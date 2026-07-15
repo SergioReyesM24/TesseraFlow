@@ -1,0 +1,48 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+class Settings(BaseSettings):
+    """Environment-backed configuration validated once at application startup."""
+
+    model_config = SettingsConfigDict(
+        env_file=(PROJECT_ENV_FILE, ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "TesseraFlow"
+    openai_api_key: str = Field(default="", repr=False)
+    openai_base_url: str | None = None
+    openai_model: str = "gpt-5-mini"
+    openai_connect_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
+    log_level: str = "INFO"
+    log_json: bool = False
+    max_tool_rounds: int = Field(default=8, ge=1, le=50)
+    postgres_url: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/tesseraflow",
+        repr=False,
+    )
+    postgres_pool_min_size: int = Field(default=1, ge=1, le=100)
+    postgres_pool_max_size: int = Field(default=10, ge=1, le=100)
+    postgres_command_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    redis_url: str = "redis://localhost:6379/0"
+    conversation_ttl_seconds: int = Field(default=604_800, ge=60)
+    conversation_max_messages: int = Field(default=100, ge=2, le=10_000)
+    conversation_max_characters: int = Field(default=200_000, ge=2)
+    conversation_max_bytes: int = Field(default=512_000, ge=256)
+    agent_instructions: str = (
+        "You are a concise assistant. Use the available tools whenever they are "
+        "needed for an accurate answer. Never invent tool results."
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return the process-wide validated settings instance."""
+    return Settings()
