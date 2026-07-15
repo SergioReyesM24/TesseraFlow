@@ -1,5 +1,3 @@
-from typing import Any
-
 import pytest
 
 from application.conversations import (
@@ -27,52 +25,24 @@ class FakeRedis:
         """Remove one cached hash."""
         return int(self.values.pop(key, None) is not None)
 
-    def pipeline(self, *, transaction: bool) -> "FakePipeline":
-        """Create a transaction-like command buffer."""
-        assert transaction is True
-        return FakePipeline(self)
-
-
-class FakePipeline:
-    """Execute queued cache writes when the transaction is committed."""
-
-    def __init__(self, client: FakeRedis) -> None:
-        """Bind the fake client receiving queued commands."""
-        self.client = client
-        self.commands: list[tuple[str, tuple[Any, ...]]] = []
-
-    async def __aenter__(self) -> "FakePipeline":
-        """Enter the fake transactional context."""
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        """Leave the fake transactional context."""
-        return None
-
-    def hset(self, key: str, *, mapping: dict[str, object]) -> "FakePipeline":
-        """Queue a hash replacement."""
-        self.commands.append(("hset", (key, mapping)))
-        return self
-
-    def expire(self, key: str, ttl: int) -> "FakePipeline":
-        """Queue a TTL update."""
-        self.commands.append(("expire", (key, ttl)))
-        return self
-
-    async def execute(self) -> list[object]:
-        """Apply all queued commands in order."""
-        results: list[object] = []
-        for command, args in self.commands:
-            key = str(args[0])
-            if command == "hset":
-                mapping = args[1]
-                assert isinstance(mapping, dict)
-                self.client.values[key] = {str(name): str(value) for name, value in mapping.items()}
-                results.append(len(mapping))
-            else:
-                self.client.expirations[key] = int(args[1])
-                results.append(True)
-        return results
+    async def eval(self, script: str, key_count: int, *args: object) -> int:
+        """Apply the version-aware cache replacement represented by the Lua script."""
+        assert key_count == 1
+        assert "current_version" in script
+        key, version, user_id, tenant_id, title, messages, ttl = args
+        assert isinstance(key, str)
+        current = self.values.get(key)
+        if current is not None and int(current["version"]) > int(str(version)):
+            return 0
+        self.values[key] = {
+            "version": str(version),
+            "user_id": str(user_id),
+            "tenant_id": str(tenant_id),
+            "title": str(title),
+            "messages": str(messages),
+        }
+        self.expirations[key] = int(str(ttl))
+        return 1
 
 
 def conversation(*, version: int = 1, user_id: str = "user-1") -> Conversation:
@@ -119,6 +89,25 @@ async def test_redis_cache_enforces_serialized_size_limit() -> None:
 
     with pytest.raises(ConversationTooLargeError):
         await cache.store(conversation())
+
+
+async def test_redis_cache_does_not_replace_newer_context_with_stale_data() -> None:
+    """Use the cached version to reject an out-of-order refresh from another request."""
+    cache = RedisConversationCache(FakeRedis(), ttl_seconds=60, max_bytes=10_000)
+    newer = conversation(version=2)
+    stale = Conversation(
+        key=newer.key,
+        messages=(
+            ConversationMessage(role="user", content="Viejo"),
+            ConversationMessage(role="assistant", content="Viejo"),
+        ),
+        version=1,
+    )
+
+    await cache.store(newer)
+    await cache.store(stale)
+
+    assert await cache.load(newer.key) == newer
 
 
 def test_compactor_keeps_complete_newest_turn_with_tools() -> None:

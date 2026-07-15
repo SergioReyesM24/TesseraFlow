@@ -19,6 +19,7 @@ from infrastructure.postgres_conversations import (
     SELECT_RECENT_ITEMS,
     UPDATE_CONVERSATION,
     PostgresConversationRepository,
+    apply_postgres_migrations,
 )
 
 
@@ -198,3 +199,52 @@ def test_postgres_rejects_unmatched_tool_history() -> None:
 
     with pytest.raises(ValueError, match="matching result"):
         PostgresConversationRepository._validate_turn(invalid)
+
+
+class FakeMigrationConnection:
+    """Capture startup migration statements without contacting PostgreSQL."""
+
+    def __init__(self) -> None:
+        """Initialize executed statements and transaction boundaries."""
+        self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, query: str, *args: object) -> str:
+        """Record one migration or bookkeeping statement."""
+        self.statements.append((query, args))
+        return "OK"
+
+    async def fetch(self, query: str) -> list[dict[str, object]]:
+        """Report that no migration has been applied yet."""
+        assert query == "SELECT name FROM schema_migrations"
+        return []
+
+    def transaction(self) -> FakeTransaction:
+        """Create a no-op migration transaction."""
+        return FakeTransaction()
+
+
+class FakeMigrationPool:
+    """Expose one fake connection through the pool acquisition protocol."""
+
+    def __init__(self) -> None:
+        """Create the migration connection."""
+        self.connection = FakeMigrationConnection()
+
+    def acquire(self) -> FakeAcquire:
+        """Acquire the migration connection."""
+        return FakeAcquire(self.connection)  # type: ignore[arg-type]
+
+
+async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
+    """Apply the bundled schema containing ownership metadata and ordered items."""
+    pool = FakeMigrationPool()
+
+    await apply_postgres_migrations(pool)  # type: ignore[arg-type]
+
+    combined_sql = "\n".join(statement for statement, _ in pool.connection.statements)
+    assert "CREATE TABLE IF NOT EXISTS conversations" in combined_sql
+    assert "title TEXT" in combined_sql
+    assert "metadata JSONB" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS conversation_items" in combined_sql
+    assert "REFERENCES conversations(id) ON DELETE CASCADE" in combined_sql
+    assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)

@@ -1,6 +1,6 @@
 import structlog
 
-from application.conversations import RecentConversationCompactor
+from application.conversations import ConversationAccessDeniedError, RecentConversationCompactor
 from application.ports import ConversationCache, ConversationRepository
 from domain.conversations import Conversation, ConversationItem, ConversationKey
 
@@ -25,6 +25,8 @@ class CachedConversationRepository(ConversationRepository):
         """Read through Redis and rebuild its entry from PostgreSQL after a miss."""
         try:
             cached = await self._cache.load(key)
+        except ConversationAccessDeniedError:
+            raise
         except Exception as exc:
             logger.warning("conversation_cache_load_failed", error_type=type(exc).__name__)
         else:
@@ -44,8 +46,14 @@ class CachedConversationRepository(ConversationRepository):
         turn: tuple[ConversationItem, ...],
     ) -> Conversation:
         """Commit to PostgreSQL first, then refresh Redis without risking data loss."""
+        compacted_messages = self._compactor.compact(conversation.messages + turn)
         saved = await self._canonical.save_turn(conversation, turn)
-        compacted = self._compact(saved)
+        compacted = Conversation(
+            key=saved.key,
+            messages=compacted_messages,
+            version=saved.version,
+            title=saved.title,
+        )
         await self._store_best_effort(compacted)
         return compacted
 
