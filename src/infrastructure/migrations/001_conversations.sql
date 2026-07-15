@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     tenant_id TEXT,
-    title TEXT,
+    title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'archived')),
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS conversation_items (
     tool_name TEXT,
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (item_type = 'message' AND role IS NOT NULL AND call_id IS NULL AND tool_name IS NULL)
+        OR
+        (item_type = 'tool_call' AND role IS NULL AND call_id IS NOT NULL AND tool_name IS NOT NULL)
+        OR
+        (item_type = 'tool_result' AND role IS NULL AND call_id IS NOT NULL AND tool_name IS NULL)
+    ),
     UNIQUE (conversation_id, sequence)
 );
 

@@ -1,4 +1,6 @@
-from application.conversations import RecentConversationCompactor
+import pytest
+
+from application.conversations import ConversationTooLargeError, RecentConversationCompactor
 from domain.conversations import (
     Conversation,
     ConversationItem,
@@ -70,6 +72,22 @@ class StubConversationCache:
         self.invalidations.append(key)
 
 
+class FailingConversationCache(StubConversationCache):
+    """Simulate Redis being unavailable for every cache operation."""
+
+    async def load(self, key: ConversationKey) -> Conversation | None:
+        """Fail cache reads like an unavailable Redis connection."""
+        raise ConnectionError("redis unavailable")
+
+    async def store(self, conversation: Conversation) -> None:
+        """Fail cache writes like an unavailable Redis connection."""
+        raise ConnectionError("redis unavailable")
+
+    async def invalidate(self, key: ConversationKey) -> None:
+        """Fail invalidation like an unavailable Redis connection."""
+        raise ConnectionError("redis unavailable")
+
+
 def key() -> ConversationKey:
     """Return one stable owned conversation key."""
     return ConversationKey(conversation_id="conv-1", user_id="user-1")
@@ -136,6 +154,27 @@ async def test_save_commits_canonical_turn_before_refreshing_cache() -> None:
     assert cache.value == saved
 
 
+async def test_oversized_turn_is_rejected_before_canonical_write() -> None:
+    """Avoid persisting a turn when it cannot fit in the configured model context."""
+    canonical = StubCanonicalRepository()
+    cache = StubConversationCache()
+    repository = CachedConversationRepository(
+        canonical,
+        cache,
+        RecentConversationCompactor(max_messages=2, max_characters=5),
+    )
+    turn = (
+        ConversationMessage(role="user", content="demasiado largo"),
+        ConversationMessage(role="assistant", content="respuesta"),
+    )
+
+    with pytest.raises(ConversationTooLargeError):
+        await repository.save_turn(Conversation(key=key()), turn)
+
+    assert canonical.saved_turns == []
+    assert cache.stores == []
+
+
 async def test_delete_removes_canonical_data_and_invalidates_cache() -> None:
     """Delete PostgreSQL history and its disposable Redis context."""
     value = Conversation(key=key(), messages=turns(), version=2)
@@ -147,3 +186,19 @@ async def test_delete_removes_canonical_data_and_invalidates_cache() -> None:
     assert deleted is True
     assert canonical.value is None
     assert cache.invalidations == [key()]
+
+
+async def test_redis_outage_does_not_block_canonical_load_save_or_delete() -> None:
+    """Keep PostgreSQL authoritative and usable while the cache is unavailable."""
+    previous = Conversation(key=key(), messages=turns()[:2], version=1, title="Title")
+    canonical = StubCanonicalRepository(previous)
+    repository = coordinator(canonical, FailingConversationCache())
+
+    loaded = await repository.load(key())
+    saved = await repository.save_turn(loaded or previous, turns()[-2:])
+    deleted = await repository.delete(key())
+
+    assert loaded == previous
+    assert saved.version == 2
+    assert deleted is True
+    assert canonical.value is None

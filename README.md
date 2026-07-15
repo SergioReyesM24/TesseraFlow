@@ -7,7 +7,8 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![OpenAI](https://img.shields.io/badge/OpenAI-Responses_API-412991?logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference/responses)
-[![Redis](https://img.shields.io/badge/Redis-Conversaciones-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Historial-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-Contexto-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 
 Responses API · function calling · streaming SSE · historial persistente · concurrencia optimista
 
@@ -32,7 +33,8 @@ Redis o FastAPI.
 - Function calling estricto con argumentos validados por Pydantic.
 - Ejecución concurrente de las tools solicitadas en una misma respuesta.
 - Respuesta completa y streaming SSE con semántica equivalente.
-- Conversaciones multiusuario en Redis con TTL y límites de almacenamiento.
+- Historial multiusuario canónico y append-only en PostgreSQL.
+- Contexto reciente en Redis con TTL, compactación y recuperación tras cache miss.
 - Control de propiedad mediante `conversation_id`, `user_id` y `tenant_id`.
 - Escrituras atómicas y detección de actualizaciones concurrentes.
 - Logs estructurados que evitan registrar mensajes y datos de las tools.
@@ -43,7 +45,7 @@ Redis o FastAPI.
 ### Requisitos
 
 - Python 3.11 o superior.
-- Una instancia de Redis accesible.
+- PostgreSQL y Redis accesibles.
 - Una API key de OpenAI.
 
 ### Instalación
@@ -59,13 +61,14 @@ Configura al menos estas variables en `.env`:
 
 ```dotenv
 OPENAI_API_KEY=sk-...
+POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/tesseraflow
 REDIS_URL=redis://localhost:6379/0
 ```
 
-Inicia Redis por el medio que prefieras. Por ejemplo, con Docker:
+Inicia ambos servicios con Docker Compose:
 
 ```bash
-docker run --rm --name tesseraflow-redis -p 6379:6379 redis:7-alpine
+docker compose up -d postgres redis
 ```
 
 En otra terminal, activa el entorno y arranca la API:
@@ -123,12 +126,14 @@ flowchart LR
     Service --> Registry[ToolRegistry]
     Registry --> Tools[Tools locales]
     Service --> Repository[ConversationRepository]
-    Repository --> Redis[(Redis)]
+    Repository --> Cached[CachedConversationRepository]
+    Cached --> PostgreSQL[(PostgreSQL canónico)]
+    Cached --> Redis[(Redis contexto reciente)]
 
     classDef core fill:#e8f5e9,stroke:#198754,color:#102a13
     classDef adapter fill:#eef4ff,stroke:#3776ab,color:#10253f
     class Service,Gateway,Registry,Repository core
-    class API,Session,OpenAI,Tools,Redis adapter
+    class API,Session,OpenAI,Tools,Cached,PostgreSQL,Redis adapter
 ```
 
 La dirección de dependencias siempre apunta hacia el núcleo:
@@ -144,7 +149,7 @@ api ----------> application <---------- infrastructure
 | --- | --- |
 | `domain` | Conversaciones, eventos, respuestas y tool calls neutrales. |
 | `application` | Orquestación del ciclo modelo → tool → modelo y definición de puertos. |
-| `infrastructure` | Adaptadores de OpenAI, Redis y logging. |
+| `infrastructure` | Adaptadores de OpenAI, PostgreSQL, Redis y logging. |
 | `api` | Schemas, rutas HTTP, SSE y traducción de errores. |
 | `tools` | Capacidades independientes y registro central. |
 | `bootstrap.py` | Composición de clientes, adaptadores y servicios concretos. |
@@ -183,8 +188,8 @@ sequenceDiagram
         S->>M: ToolResult
     end
     M-->>S: respuesta final
-    S->>S: añadir turno y compactar historial
-    S->>R: save(Conversation, expected_version)
+    S->>R: save_turn(Conversation, turn)
+    R->>R: append canónico y compactación de caché
     R-->>S: Conversation con nueva versión
     S-->>A: AgentResult
     A-->>C: JSON o evento completed
@@ -197,34 +202,51 @@ La aplicación define únicamente estas operaciones:
 ```python
 class ConversationRepository(Protocol):
     async def load(self, key: ConversationKey) -> Conversation | None: ...
-    async def save(self, conversation: Conversation) -> Conversation: ...
+    async def save_turn(
+        self, conversation: Conversation, turn: tuple[ConversationItem, ...]
+    ) -> Conversation: ...
     async def delete(self, key: ConversationKey) -> bool: ...
 ```
 
-Actualmente `bootstrap.py` conecta ese puerto con `RedisConversationRepository`. Para
-usar PostgreSQL, MongoDB u otra base basta con implementar el mismo contrato y cambiar
-la composición; `AgentService` y la API no necesitan conocer el nuevo almacenamiento.
+`bootstrap.py` conecta el puerto con `CachedConversationRepository`: PostgreSQL es la
+fuente de verdad y Redis es una optimización reemplazable. `AgentService` y la API no
+conocen ninguno de esos detalles.
 
-### Persistencia en Redis
+### Persistencia canónica en PostgreSQL
 
-Cada conversación se almacena en un hash similar a este:
+La migración `001_conversations.sql` crea dos tablas:
 
 ```text
-conversation:v1:<sha256(conversation_id)>
-├── user_id
-├── tenant_id
-├── version
-└── messages     JSON neutral
+conversations
+├── id, user_id, tenant_id
+├── title, status, metadata
+├── version, last_sequence
+└── created_at, updated_at, last_message_at
+
+conversation_items
+├── conversation_id, turn_id, sequence
+├── item_type, role, call_id, tool_name
+└── payload JSONB
 ```
 
-- El identificador público se hashea antes de formar la clave Redis.
-- El propietario se valida en cada lectura, escritura y borrado.
-- `WATCH` / `MULTI` / `EXEC` implementan concurrencia optimista.
-- Cada escritura incrementa `version` y renueva el TTL.
-- Si dos requests cargan la misma versión, solo una puede persistir; la otra recibe un
-  conflicto.
-- Antes de guardar se conservan únicamente los turnos completos más recientes dentro
-  de los límites configurados.
+La identidad persistente es `conversation_id`. No se guarda un `session_id` del modelo:
+cada `ModelSession` pertenece a una sola ejecución y una conversación atraviesa muchas
+de esas sesiones.
+
+- Cada interacción añade filas; compactar Redis no elimina historial canónico.
+- `turn_id` mantiene juntas las llamadas, resultados y respuesta de un turno.
+- `sequence` conserva el orden exacto de todos los elementos.
+- Un bloqueo de fila y `version` implementan concurrencia optimista.
+- `ON DELETE CASCADE` elimina los elementos al borrar su conversación.
+- El primer mensaje genera un título inicial de hasta 120 caracteres.
+
+### Caché de contexto en Redis
+
+Redis almacena `conversation:context:v2:<sha256(conversation_id)>` con la versión, el
+propietario, el título y la ventana compactada. Las escrituras usan un script Lua
+atómico que impide que una carga antigua sobrescriba una versión nueva. Si Redis expira
+o falla, el contexto reciente se reconstruye desde PostgreSQL; un fallo de caché no
+invalida una escritura canónica exitosa.
 
 La conversación se persiste después de obtener la respuesta final. En streaming se
 guarda antes de emitir el evento terminal `completed`, por lo que un stream exitoso ya
@@ -341,12 +363,16 @@ a todas las tools.
 | `OPENAI_BASE_URL` | — | Base URL alternativa compatible. |
 | `OPENAI_MODEL` | `gpt-5-mini` | Modelo usado por la definición por defecto. |
 | `OPENAI_CONNECT_TIMEOUT_SECONDS` | `15` | Timeout de conexión. |
-| `REDIS_URL` | `redis://localhost:6379/0` | Conexión al almacenamiento. |
+| `POSTGRES_URL` | `postgresql://.../tesseraflow` | Fuente canónica de conversaciones. |
+| `POSTGRES_POOL_MIN_SIZE` | `1` | Conexiones mínimas por proceso. |
+| `POSTGRES_POOL_MAX_SIZE` | `10` | Conexiones máximas por proceso. |
+| `POSTGRES_COMMAND_TIMEOUT_SECONDS` | `30` | Timeout de comandos SQL. |
+| `REDIS_URL` | `redis://localhost:6379/0` | Caché de contexto reciente. |
 | `MAX_TOOL_ROUNDS` | `8` | Límite contra bucles de tools. |
-| `CONVERSATION_TTL_SECONDS` | `604800` | Retención desde la última escritura. |
-| `CONVERSATION_MAX_MESSAGES` | `100` | Máximo de mensajes y elementos de tools. |
-| `CONVERSATION_MAX_CHARACTERS` | `200000` | Límite lógico del historial. |
-| `CONVERSATION_MAX_BYTES` | `512000` | Límite final del JSON serializado. |
+| `CONVERSATION_TTL_SECONDS` | `604800` | TTL de la caché; no borra PostgreSQL. |
+| `CONVERSATION_MAX_MESSAGES` | `100` | Máximo de elementos en el contexto reciente. |
+| `CONVERSATION_MAX_CHARACTERS` | `200000` | Límite lógico del contexto reciente. |
+| `CONVERSATION_MAX_BYTES` | `512000` | Límite del JSON guardado en Redis. |
 | `LOG_LEVEL` | `INFO` | Nivel de logging. |
 | `LOG_JSON` | `false` | Activa logs JSON estructurados. |
 
@@ -354,8 +380,8 @@ Consulta [.env.example](.env.example) para ver una configuración completa.
 
 ## Ciclos de vida y concurrencia
 
-- `AsyncOpenAI` y el cliente Redis se crean una vez por proceso durante el `lifespan` y
-  se cierran durante el apagado.
+- `AsyncOpenAI`, el pool PostgreSQL y el cliente Redis se crean una vez por proceso
+  durante el `lifespan` y se cierran durante el apagado.
 - Cada ejecución crea una `ModelSession` ligera con su propio estado efímero.
 - No se guarda usuario, historial ni `response_id` en servicios compartidos.
 - Las tools de una misma respuesta se ejecutan concurrentemente y sus resultados se
@@ -400,7 +426,7 @@ src/
 ├── api/                 # FastAPI, schemas y SSE
 ├── application/         # Casos de uso, puertos y orquestación
 ├── domain/              # Modelos y eventos neutrales
-├── infrastructure/      # OpenAI, Redis y logging
+├── infrastructure/      # OpenAI, PostgreSQL, Redis y logging
 ├── tools/               # Tools concretas y registro
 ├── bootstrap.py         # Composición de dependencias
 └── main.py              # Aplicación y lifespan

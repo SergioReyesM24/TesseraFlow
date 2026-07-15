@@ -12,6 +12,21 @@ from infrastructure.conversation_codec import (
     encode_conversation_item,
 )
 
+STORE_IF_NEWER_SCRIPT = """
+local current_version = redis.call('HGET', KEYS[1], 'version')
+if current_version and tonumber(current_version) > tonumber(ARGV[1]) then
+    return 0
+end
+redis.call('HSET', KEYS[1],
+    'version', ARGV[1],
+    'user_id', ARGV[2],
+    'tenant_id', ARGV[3],
+    'title', ARGV[4],
+    'messages', ARGV[5])
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return 1
+"""
+
 
 class InvalidConversationDataError(RuntimeError):
     """Raised when cached Redis data violates the neutral conversation schema."""
@@ -62,19 +77,20 @@ class RedisConversationCache:
                 "Conversation exceeds the configured serialized cache limit"
             )
         storage_key = self._storage_key(conversation.key.conversation_id)
-        async with self._client.pipeline(transaction=True) as pipeline:
-            pipeline.hset(
+        await cast(
+            Awaitable[object],
+            self._client.eval(
+                STORE_IF_NEWER_SCRIPT,
+                1,
                 storage_key,
-                mapping={
-                    "user_id": conversation.key.user_id,
-                    "tenant_id": conversation.key.tenant_id or "",
-                    "version": conversation.version,
-                    "title": conversation.title or "",
-                    "messages": payload,
-                },
-            )
-            pipeline.expire(storage_key, self._ttl_seconds)
-            await pipeline.execute()
+                str(conversation.version),
+                conversation.key.user_id,
+                conversation.key.tenant_id or "",
+                conversation.title or "",
+                payload,
+                str(self._ttl_seconds),
+            ),
+        )
 
     async def invalidate(self, key: ConversationKey) -> None:
         """Remove cached context without affecting canonical conversation data."""
