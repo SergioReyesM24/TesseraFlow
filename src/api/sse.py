@@ -5,7 +5,7 @@ from typing import Any
 
 import structlog
 
-from api.schemas import RunAgentResponse, ToolCallResponse
+from api.schemas import AgentCompletedResponse, ToolCallResponse
 from domain.events import (
     AgentStreamCompleted,
     AgentStreamEvent,
@@ -60,7 +60,7 @@ def encode_agent_event(event: AgentStreamEvent) -> str:
         )
         return encode_sse("tool_completed", tool_payload.model_dump(mode="json"))
     if isinstance(event, AgentStreamCompleted):
-        completed_payload = RunAgentResponse.from_result(event.result)
+        completed_payload = AgentCompletedResponse.from_result(event.result)
         return encode_sse("completed", completed_payload.model_dump(mode="json"))
     raise TypeError(f"Unsupported agent stream event: {type(event).__name__}")
 

@@ -20,6 +20,11 @@ class StubCanonicalRepository:
         self.saved_turns: list[tuple[ConversationItem, ...]] = []
         self.deletes = 0
 
+    async def create(self, key: ConversationKey) -> Conversation:
+        """Create and retain one empty canonical conversation."""
+        self.value = Conversation(key=key, title="Nueva conversación")
+        return self.value
+
     async def load(self, key: ConversationKey) -> Conversation | None:
         """Return the configured canonical conversation."""
         self.loads += 1
@@ -124,6 +129,18 @@ async def test_cache_hit_avoids_canonical_read() -> None:
 
     assert loaded == cached
     assert canonical.loads == 0
+
+
+async def test_create_persists_and_caches_an_empty_conversation() -> None:
+    """Make a new session immediately visible through canonical and cache storage."""
+    canonical = StubCanonicalRepository()
+    cache = StubConversationCache()
+
+    created = await coordinator(canonical, cache).create(key())
+
+    assert created == Conversation(key=key(), title="Nueva conversación")
+    assert canonical.value == created
+    assert cache.value == created
 
 
 async def test_cache_miss_rebuilds_compacted_context_from_canonical() -> None:

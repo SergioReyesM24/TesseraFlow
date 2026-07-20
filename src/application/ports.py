@@ -47,6 +47,10 @@ class ModelGateway(Protocol):
 class ConversationRepository(Protocol):
     """Persists neutral conversations with ownership and version checks."""
 
+    async def create(self, key: ConversationKey) -> Conversation:
+        """Create an empty owned conversation before it can receive messages."""
+        ...
+
     async def load(self, key: ConversationKey) -> Conversation | None:
         """Load a conversation only when the supplied owner matches."""
         ...

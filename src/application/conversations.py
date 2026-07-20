@@ -1,6 +1,14 @@
 import json
+import uuid
+from collections.abc import Callable
 
-from domain.conversations import ConversationItem, ConversationMessage
+from application.ports import ConversationRepository
+from domain.conversations import (
+    Conversation,
+    ConversationItem,
+    ConversationKey,
+    ConversationMessage,
+)
 from domain.tools import ToolCall
 
 
@@ -12,8 +20,46 @@ class ConversationConflictError(RuntimeError):
     """Raised when another request updated a conversation concurrently."""
 
 
+class ConversationNotFoundError(LookupError):
+    """Raised when a requested conversation has not been created."""
+
+
 class ConversationTooLargeError(ValueError):
     """Raised when a conversation cannot fit within configured storage limits."""
+
+
+class ConversationService:
+    """Manage persisted conversation lifecycle independently from model orchestration."""
+
+    def __init__(
+        self,
+        conversations: ConversationRepository,
+        *,
+        uid_factory: Callable[[], uuid.UUID] = uuid.uuid4,
+    ) -> None:
+        """Bind persistence and an injectable UID generator."""
+        self._conversations = conversations
+        self._uid_factory = uid_factory
+
+    async def create_session(self, user_id: str, tenant_id: str | None = None) -> Conversation:
+        """Create an empty owned conversation with a server-generated session UID."""
+        key = ConversationKey(
+            conversation_id=str(self._uid_factory()),
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        return await self._conversations.create(key)
+
+    async def require(self, key: ConversationKey) -> Conversation:
+        """Return an existing owned conversation or reject an unknown session UID."""
+        conversation = await self._conversations.load(key)
+        if conversation is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return conversation
+
+    async def delete(self, key: ConversationKey) -> bool:
+        """Delete an owned conversation and all retained history."""
+        return await self._conversations.delete(key)
 
 
 class RecentConversationCompactor:

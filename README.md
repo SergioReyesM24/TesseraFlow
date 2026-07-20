@@ -32,10 +32,11 @@ Redis o FastAPI.
 - Sesiones aisladas por request sobre un único cliente HTTP compartido.
 - Function calling estricto con argumentos validados por Pydantic.
 - Ejecución concurrente de las tools solicitadas en una misma respuesta.
-- Respuesta completa y streaming SSE con semántica equivalente.
+- Streaming SSE con eventos neutrales y un único evento terminal `completed`.
 - Historial multiusuario canónico y append-only en PostgreSQL.
 - Contexto reciente en Redis con TTL, compactación y recuperación tras cache miss.
-- Control de propiedad mediante `conversation_id`, `user_id` y `tenant_id`.
+- Creación explícita de sesiones con UUID antes de aceptar mensajes.
+- Control de propiedad mediante `session_uid`, `user_id` y `tenant_id`.
 - Escrituras atómicas y detección de actualizaciones concurrentes.
 - Logs estructurados que evitan registrar mensajes y datos de las tools.
 - Puertos pequeños para sustituir OpenAI, Redis o las tools sin alterar el núcleo.
@@ -81,37 +82,40 @@ make run
 La API queda disponible en `http://127.0.0.1:8000` y la documentación interactiva en
 [`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs).
 
-### Primera petición
+### Crear una sesión y enviar el primer mensaje
+
+Cada chat debe comenzar creando una sesión persistida:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/agent/run \
+curl -X POST http://127.0.0.1:8000/v1/sessions \
   -H 'Content-Type: application/json' \
+  -d '{"user_id":"user-456"}'
+```
+
+La respuesta contiene un UUID generado por el servidor:
+
+```json
+{"session_uid":"0fda5792-2577-4f26-a56d-71f8dd89ac90"}
+```
+
+Utiliza ese UUID en el único endpoint que invoca al modelo:
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/agent/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
   -d '{
     "message": "¿Cuánto es (125.50 * 3) + 20?",
-    "conversation_id": "conv-123",
+    "session_uid": "0fda5792-2577-4f26-a56d-71f8dd89ac90",
     "user_id": "user-456"
   }'
 ```
 
-Respuesta simplificada:
+El último evento exitoso contiene el resultado completo:
 
-```json
-{
-  "answer": "El resultado es 396.5.",
-  "response_id": "resp_...",
-  "conversation_id": "conv-123",
-  "tool_calls": [
-    {
-      "call_id": "call_...",
-      "tool_name": "calculator",
-      "arguments": {"operation": "multiply", "a": 125.5, "b": 3},
-      "status": "success",
-      "output": {"result": "376.5"},
-      "error": null,
-      "duration_ms": 0.12
-    }
-  ]
-}
+```text
+event: completed
+data: {"answer":"El resultado es 396.5.","response_id":"resp_...","session_uid":"0fda5792-2577-4f26-a56d-71f8dd89ac90","tool_calls":[...]}
 ```
 
 ## Arquitectura
@@ -177,8 +181,9 @@ sequenceDiagram
     participant R as ConversationRepository
     participant M as ModelSession
 
-    C->>A: message + conversation_id + owner
-    A->>S: run(message, definition, key)
+    C->>A: message + session_uid + owner
+    A->>R: validar sesión y propietario
+    A->>S: stream(message, definition, key)
     S->>R: load(ConversationKey)
     R-->>S: Conversation o None
     S->>M: historial neutral + mensaje actual
@@ -192,7 +197,7 @@ sequenceDiagram
     R->>R: append canónico y compactación de caché
     R-->>S: Conversation con nueva versión
     S-->>A: AgentResult
-    A-->>C: JSON o evento completed
+    A-->>C: eventos SSE hasta completed
 ```
 
 ### El puerto `ConversationRepository`
@@ -201,6 +206,7 @@ La aplicación define únicamente estas operaciones:
 
 ```python
 class ConversationRepository(Protocol):
+    async def create(self, key: ConversationKey) -> Conversation: ...
     async def load(self, key: ConversationKey) -> Conversation | None: ...
     async def save_turn(
         self, conversation: Conversation, turn: tuple[ConversationItem, ...]
@@ -209,8 +215,9 @@ class ConversationRepository(Protocol):
 ```
 
 `bootstrap.py` conecta el puerto con `CachedConversationRepository`: PostgreSQL es la
-fuente de verdad y Redis es una optimización reemplazable. `AgentService` y la API no
-conocen ninguno de esos detalles.
+fuente de verdad y Redis es una optimización reemplazable. `ConversationService`
+gestiona crear, validar y borrar sesiones; `AgentService` se limita a orquestar el
+modelo, las tools y la persistencia de cada turno.
 
 ### Persistencia canónica en PostgreSQL
 
@@ -229,9 +236,10 @@ conversation_items
 └── payload JSONB
 ```
 
-La identidad persistente es `conversation_id`. No se guarda un `session_id` del modelo:
-cada `ModelSession` pertenece a una sola ejecución y una conversación atraviesa muchas
-de esas sesiones.
+La identidad persistente interna es `conversation_id`, expuesta por la API como
+`session_uid`. No es una sesión del proveedor: cada `ModelSession` pertenece a una sola
+ejecución y una conversación atraviesa muchas de esas sesiones. Un UID desconocido
+produce `404` y un UID de otro propietario produce `403`.
 
 - Cada interacción añade filas; compactar Redis no elimina historial canónico.
 - `turn_id` mantiene juntas las llamadas, resultados y respuesta de un turno.
@@ -262,7 +270,7 @@ curl -N -X POST http://127.0.0.1:8000/v1/agent/stream \
   -H 'Accept: text/event-stream' \
   -d '{
     "message": "¿Cuánto es 125.50 multiplicado por 3?",
-    "conversation_id": "conv-123",
+    "session_uid": "0fda5792-2577-4f26-a56d-71f8dd89ac90",
     "user_id": "user-456"
   }'
 ```
@@ -300,8 +308,8 @@ el stream de esa request; el cliente compartido permanece disponible.
 | Método | Ruta | Descripción |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check sin consultar dependencias externas. |
-| `POST` | `/v1/agent/run` | Ejecuta y persiste una interacción completa. |
-| `POST` | `/v1/agent/stream` | Ejecuta la interacción mediante eventos SSE. |
+| `POST` | `/v1/sessions` | Crea una sesión vacía y devuelve su `session_uid`. |
+| `POST` | `/v1/agent/stream` | Valida una sesión existente y ejecuta la interacción mediante SSE. |
 | `DELETE` | `/v1/conversations/{conversation_id}` | Borra una conversación del propietario indicado. |
 
 El endpoint de borrado recibe `user_id` y, opcionalmente, `tenant_id` como query params:

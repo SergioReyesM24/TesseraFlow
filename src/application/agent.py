@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 
 import structlog
 
+from application.conversations import ConversationNotFoundError
 from application.ports import ConversationRepository, ModelGateway
 from application.tools import ToolRegistry
 from domain.agent import AgentDefinition, AgentResult
@@ -195,13 +196,12 @@ class AgentService:
 
         raise AssertionError("Unreachable")
 
-    async def delete_conversation(self, key: ConversationKey) -> bool:
-        """Delete a conversation after enforcing repository ownership checks."""
-        return await self._conversations.delete(key)
-
     async def _load_conversation(self, key: ConversationKey) -> Conversation:
-        """Load an existing conversation or create a new version-zero aggregate."""
-        return await self._conversations.load(key) or Conversation(key=key)
+        """Load an explicitly created conversation before invoking the model."""
+        conversation = await self._conversations.load(key)
+        if conversation is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return conversation
 
     async def _persist_turn(
         self,

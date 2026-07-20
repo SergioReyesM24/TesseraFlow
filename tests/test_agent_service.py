@@ -2,8 +2,10 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 
+import pytest
+
 from application.agent import AgentService
-from application.conversations import ConversationConflictError
+from application.conversations import ConversationConflictError, ConversationNotFoundError
 from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
@@ -87,6 +89,11 @@ class InMemoryConversationRepository:
     def __init__(self) -> None:
         self.conversations: dict[str, Conversation] = {}
 
+    async def create(self, key: ConversationKey) -> Conversation:
+        conversation = Conversation(key=key)
+        self.conversations[key.conversation_id] = conversation
+        return conversation
+
     async def load(self, key: ConversationKey) -> Conversation | None:
         conversation = self.conversations.get(key.conversation_id)
         if conversation is not None and conversation.key != key:
@@ -160,6 +167,7 @@ async def test_runs_and_captures_a_tool_call() -> None:
     repository = InMemoryConversationRepository()
     service = build_service(gateway, repository)
     definition = agent_definition("calculator")
+    await repository.create(conversation_key())
 
     result = await service.run("Suma 2.5 y 3", definition, conversation_key())
 
@@ -204,7 +212,9 @@ async def test_returns_tool_errors_to_the_model() -> None:
             ]
         ]
     )
-    service = build_service(gateway)
+    repository = InMemoryConversationRepository()
+    service = build_service(gateway, repository)
+    await repository.create(conversation_key())
 
     result = await service.run(
         "Divide uno entre cero", agent_definition("calculator"), conversation_key()
@@ -224,8 +234,11 @@ async def test_concurrent_runs_use_independent_model_sessions() -> None:
             [ModelReply(response_id="resp_b", text="Respuesta B")],
         ]
     )
-    service = build_service(gateway)
+    repository = InMemoryConversationRepository()
+    service = build_service(gateway, repository)
     definition = agent_definition()
+    await repository.create(conversation_key("conversation-a"))
+    await repository.create(conversation_key("conversation-b"))
 
     results = await asyncio.gather(
         service.run("Mensaje A", definition, conversation_key("conversation-a")),
@@ -258,7 +271,9 @@ async def test_streams_text_and_tool_lifecycle_events() -> None:
             ]
         ]
     )
-    service = build_service(gateway)
+    repository = InMemoryConversationRepository()
+    service = build_service(gateway, repository)
+    await repository.create(conversation_key())
 
     events = [
         event
@@ -294,6 +309,7 @@ async def test_continues_a_persisted_conversation_with_neutral_history() -> None
     repository = InMemoryConversationRepository()
     service = build_service(gateway, repository)
     key = conversation_key()
+    await repository.create(key)
 
     await service.run("Primer mensaje", agent_definition(), key)
     await service.run("Segundo mensaje", agent_definition(), key)
@@ -310,6 +326,7 @@ async def test_stream_persists_before_emitting_completed() -> None:
     gateway = StubModelGateway([[ModelReply(response_id="resp_1", text="Respuesta")]])
     repository = InMemoryConversationRepository()
     service = build_service(gateway, repository)
+    await repository.create(conversation_key())
 
     events = [
         event async for event in service.stream("Mensaje", agent_definition(), conversation_key())
@@ -317,3 +334,14 @@ async def test_stream_persists_before_emitting_completed() -> None:
 
     assert isinstance(events[-1], AgentStreamCompleted)
     assert repository.conversations["conversation-1"].messages[-1].content == "Respuesta"
+
+
+async def test_rejects_a_chat_for_an_unknown_session_before_calling_the_model() -> None:
+    """Require explicit session creation before invoking a provider."""
+    gateway = StubModelGateway([[ModelReply(response_id="unused", text="unused")]])
+    service = build_service(gateway)
+
+    with pytest.raises(ConversationNotFoundError):
+        await service.run("Mensaje", agent_definition(), conversation_key("missing"))
+
+    assert gateway.sessions == []

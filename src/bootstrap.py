@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from redis.asyncio import Redis
 
 from application.agent import AgentService
-from application.conversations import RecentConversationCompactor
+from application.conversations import ConversationService, RecentConversationCompactor
 from config import Settings
 from domain.agent import AgentDefinition
 from infrastructure.cached_conversations import CachedConversationRepository
@@ -27,6 +27,7 @@ class AppContainer:
     redis_client: Redis
     postgres_pool: asyncpg.Pool
     agent_service: AgentService
+    conversation_service: ConversationService
     default_agent: AgentDefinition
 
     async def close(self) -> None:
@@ -70,30 +71,32 @@ async def build_container(settings: Settings) -> AppContainer:
         instructions=settings.agent_instructions,
         tool_names=tools.names,
     )
-    service = AgentService(
+    conversations = CachedConversationRepository(
+        canonical=PostgresConversationRepository(
+            postgres_pool,
+            context_item_limit=settings.conversation_max_messages,
+        ),
+        cache=RedisConversationCache(
+            redis_client,
+            ttl_seconds=settings.conversation_ttl_seconds,
+            max_bytes=settings.conversation_max_bytes,
+        ),
+        compactor=RecentConversationCompactor(
+            max_messages=settings.conversation_max_messages,
+            max_characters=settings.conversation_max_characters,
+        ),
+    )
+    agent_service = AgentService(
         model_gateway=OpenAIResponsesGateway(client),
         tools=tools,
-        conversations=CachedConversationRepository(
-            canonical=PostgresConversationRepository(
-                postgres_pool,
-                context_item_limit=settings.conversation_max_messages,
-            ),
-            cache=RedisConversationCache(
-                redis_client,
-                ttl_seconds=settings.conversation_ttl_seconds,
-                max_bytes=settings.conversation_max_bytes,
-            ),
-            compactor=RecentConversationCompactor(
-                max_messages=settings.conversation_max_messages,
-                max_characters=settings.conversation_max_characters,
-            ),
-        ),
+        conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
     )
     return AppContainer(
         openai_client=client,
         redis_client=redis_client,
         postgres_pool=postgres_pool,
-        agent_service=service,
+        agent_service=agent_service,
+        conversation_service=ConversationService(conversations),
         default_agent=definition,
     )
