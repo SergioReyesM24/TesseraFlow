@@ -10,7 +10,6 @@ class ConversationKey:
 
     conversation_id: str
     user_id: str
-    tenant_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

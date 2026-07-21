@@ -28,7 +28,7 @@ durable ya forman parte de la arquitectura actual. Las siguientes extensiones co
 fuera de alcance:
 
 - Añadir prioridades, resultados parciales, cancelación pública y límites de consumo por
-  usuario o tenant a los contratos de jobs existentes.
+  usuario a los contratos de jobs existentes.
 - Separar opcionalmente el coordinador en un proceso desplegable de forma independiente;
   PostgreSQL ya actúa como frontera durable compartida.
 - Permitir que ambas capas trabajen a la vez y publiquen resultados parciales mediante
@@ -44,30 +44,12 @@ fuera de alcance:
   ningún transporte en fuente de verdad.
 - Propagar cancelaciones cuando sea posible y definir políticas explícitas para tareas
   que deban continuar tras la desconexión del cliente.
-- Aplicar autenticación, autorización y aislamiento multiusuario tanto al envío del
-  trabajo como a la consulta, cancelación y entrega de sus resultados.
 - Añadir observabilidad de tiempos en cola, latencia de la primera respuesta, duración
   del razonamiento, uso de recursos, errores y resultados descartados, sin registrar
   datos personales ni contenido sensible.
 - Probar el aislamiento entre ejecuciones concurrentes, la recuperación tras reinicios,
   la cancelación, los timeouts, los resultados fuera de orden y los fallos parciales de
   cada capa.
-
-## Política de ejecución de tools en batch
-
-Introducir una política explícita para decidir cuándo varias tools pueden ejecutarse en
-paralelo, secuencialmente o como una operación coordinada.
-
-Aspectos que deberá cubrir:
-
-- Añadir metadatos como `concurrency_safe`, `read_only`, `idempotent` y grupo de
-  exclusión mutua a cada tool.
-- Ejecutar en paralelo únicamente tools declaradas como seguras para concurrencia.
-- Mantener orden secuencial para operaciones con dependencias o efectos laterales.
-- Definir límites de concurrencia globales, por usuario, tenant y proveedor externo.
-- Preservar la correspondencia entre cada `call_id` y su resultado.
-- Definir comportamiento ante éxito parcial y cancelación de un batch.
-- Evitar paralelizar operaciones con efectos laterales que compitan sobre el mismo recurso.
 
 ## Evolución de la interacción STS
 
@@ -80,8 +62,6 @@ Extensiones que continúan fuera de alcance:
 
 - Añadir WebRTC cuando se necesiten jitter buffers, negociación de codecs, cancelación de
   eco y transporte adaptativo frente a WebSocket PCM.
-- Incorporar autenticación efímera cliente-proveedor si se decide evitar el proxy de media,
-  sin exponer credenciales de servidor.
 - Publicar eventos explícitos de actividad de voz cuando un frontend necesite representar
   el estado VAD además de las transcripciones y delimitaciones actuales.
 - Entregar finalizaciones proactivas del worker dentro de la misma sesión de voz; hoy son
@@ -124,7 +104,7 @@ Aspectos que deberá cubrir:
   de la API concreta de email.
 - Crear un catálogo explícito de excepciones y severidades que generan alertas; no
   enviar notificaciones por cualquier error indiscriminadamente.
-- Recopilar `request_id`, `conversation_id`, `session_id`, usuario o tenant cuando sea
+- Recopilar `request_id`, `conversation_id`, `session_id` y usuario cuando sea
   seguro, nombre de la excepción, mensaje sanitizado, stack trace, endpoint, proveedor,
   modelo y timestamps.
 - Propagar el contexto mediante `structlog.contextvars` para que logger y publisher
@@ -160,4 +140,4 @@ Antes de considerar terminada cualquiera de estas líneas:
 - Debe funcionar tanto en respuestas completas como en streaming.
 - No debe introducir formatos específicos de proveedor en dominio o aplicación.
 - Debe documentar límites, configuración, observabilidad y tratamiento de errores.
-- Debe contemplar autenticación, autorización y aislamiento multiusuario.
+- Debe preservar el aislamiento entre usuarios.

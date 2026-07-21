@@ -41,12 +41,11 @@ class ConversationService:
         self._conversations = conversations
         self._uid_factory = uid_factory
 
-    async def create_session(self, user_id: str, tenant_id: str | None = None) -> Conversation:
+    async def create_session(self, user_id: str) -> Conversation:
         """Create an empty owned conversation with a server-generated session UID."""
         key = ConversationKey(
             conversation_id=str(self._uid_factory()),
             user_id=user_id,
-            tenant_id=tenant_id,
         )
         return await self._conversations.create(key)
 

@@ -27,7 +27,6 @@ class ToolExecutionContext(BaseModel):
 
     conversation_id: str
     user_id: str
-    tenant_id: str | None = None
 
     @classmethod
     def from_conversation(cls, key: ConversationKey) -> "ToolExecutionContext":
@@ -35,7 +34,6 @@ class ToolExecutionContext(BaseModel):
         return cls(
             conversation_id=key.conversation_id,
             user_id=key.user_id,
-            tenant_id=key.tenant_id,
         )
 
     def conversation_key(self) -> ConversationKey:
@@ -43,7 +41,6 @@ class ToolExecutionContext(BaseModel):
         return ConversationKey(
             conversation_id=self.conversation_id,
             user_id=self.user_id,
-            tenant_id=self.tenant_id,
         )
 
 

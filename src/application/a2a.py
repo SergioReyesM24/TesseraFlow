@@ -50,7 +50,6 @@ class A2AService:
         worker_key = ConversationKey(
             conversation_id=str(self._uid_factory()),
             user_id=parent.user_id,
-            tenant_id=parent.tenant_id,
         )
         thread = A2AThread(
             thread_id=thread_id,
@@ -190,7 +189,6 @@ class A2AWorker:
                     ConversationKey(
                         conversation_id=job.worker_conversation_id,
                         user_id=job.parent_conversation.user_id,
-                        tenant_id=job.parent_conversation.tenant_id,
                     ),
                     source="worker_agent",
                 ),
@@ -252,7 +250,6 @@ class A2AWorker:
         key = ConversationKey(
             conversation_id=job.worker_conversation_id,
             user_id=job.parent_conversation.user_id,
-            tenant_id=job.parent_conversation.tenant_id,
         )
         conversation = await self._conversations.load(key)
         if conversation is None:

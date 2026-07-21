@@ -63,7 +63,6 @@ class FakeConnection:
             "status": "running",
             "attempt_count": 1,
             "user_id": "user-1",
-            "tenant_id": "tenant-1",
         }
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
@@ -82,7 +81,6 @@ class FakeConnection:
                 "event_type": "text_delta",
                 "payload": {"text": "Hola"},
                 "user_id": "user-1",
-                "tenant_id": "tenant-1",
             }
         ]
 
@@ -117,11 +115,7 @@ class FakePool:
 
 def key() -> ConversationKey:
     """Build the full ownership key used in SQL adapter assertions."""
-    return ConversationKey(
-        conversation_id="conversation-1",
-        user_id="user-1",
-        tenant_id="tenant-1",
-    )
+    return ConversationKey(conversation_id="conversation-1", user_id="user-1")
 
 
 def repository(pool: FakePool) -> PostgresInteractionRepository:
@@ -207,7 +201,7 @@ async def test_postgres_interactions_translate_commands_and_outputs() -> None:
         "text_delta",
     )
     assert json.loads(str(inserted[6])) == {"text": "Hola"}
-    assert (ACKNOWLEDGE_OUTPUT, ("output-1", "conversation-1", "user-1", "tenant-1")) in (
+    assert (ACKNOWLEDGE_OUTPUT, ("output-1", "conversation-1", "user-1")) in (
         pool.connection.executed
     )
 

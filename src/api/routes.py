@@ -81,7 +81,7 @@ async def create_session(
     service: Annotated[ConversationService, Depends(get_conversation_service)],
 ) -> CreateSessionResponse:
     """Create an empty persisted chat session and return its generated UID."""
-    conversation = await service.create_session(payload.user_id, payload.tenant_id)
+    conversation = await service.create_session(payload.user_id)
     return CreateSessionResponse(session_uid=conversation.key.conversation_id)
 
 
@@ -98,7 +98,6 @@ async def stream_agent(
     key = ConversationKey(
         conversation_id=str(payload.session_uid),
         user_id=payload.user_id,
-        tenant_id=payload.tenant_id,
     )
     try:
         await conversation_service.require(key)
@@ -141,13 +140,11 @@ async def agent_websocket(
         Depends(get_conversation_coordinator),
     ],
     conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
-    tenant_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
 ) -> None:
     """Keep an owned conversation open and stream each correlated turn as JSON."""
     key = ConversationKey(
         conversation_id=str(session_uid),
         user_id=user_id,
-        tenant_id=tenant_id,
     )
     try:
         await conversation_service.require(key)
@@ -190,7 +187,6 @@ async def realtime_agent_websocket(
     service: Annotated[RealtimeAgentService | None, Depends(get_realtime_agent_service)],
     container: Annotated[AppContainer, Depends(get_container)],
     conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
-    tenant_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
 ) -> None:
     """Bridge raw PCM frames to a configured full-duplex provider session."""
     if service is None:
@@ -201,7 +197,6 @@ async def realtime_agent_websocket(
     key = ConversationKey(
         conversation_id=str(session_uid),
         user_id=user_id,
-        tenant_id=tenant_id,
     )
     try:
         await conversation_service.require(key)
@@ -241,10 +236,9 @@ async def delete_conversation(
     conversation_id: Annotated[str, Path(min_length=1, max_length=128)],
     service: Annotated[ConversationService, Depends(get_conversation_service)],
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
-    tenant_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
 ) -> dict[str, bool]:
     """Delete retained conversation data for its owning security principal."""
-    key = ConversationKey(conversation_id=conversation_id, user_id=user_id, tenant_id=tenant_id)
+    key = ConversationKey(conversation_id=conversation_id, user_id=user_id)
     try:
         deleted = await service.delete(key)
     except ConversationAccessDeniedError as exc:

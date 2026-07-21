@@ -1,7 +1,6 @@
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    tenant_id TEXT,
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'archived')),
@@ -14,7 +13,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE INDEX IF NOT EXISTS conversations_owner_updated_idx
-    ON conversations (user_id, tenant_id, updated_at DESC);
+    ON conversations (user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS conversation_items (
     id BIGSERIAL PRIMARY KEY,

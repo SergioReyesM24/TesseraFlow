@@ -40,7 +40,7 @@ RETURNING id
 
 CLAIM_NEXT_COMMAND = """
 WITH candidate AS (
-    SELECT command.id, conversation.user_id, conversation.tenant_id
+    SELECT command.id, conversation.user_id
     FROM interaction_commands AS command
     JOIN conversations AS conversation ON conversation.id = command.conversation_id
     WHERE (
@@ -70,7 +70,7 @@ FROM candidate
 WHERE command.id = candidate.id
 RETURNING command.id, command.request_id, command.conversation_id, command.kind,
           command.source, command.message, command.causation_id, command.status,
-          command.attempt_count, candidate.user_id, candidate.tenant_id
+          command.attempt_count, candidate.user_id
 """
 
 INSERT_OUTPUT = """
@@ -113,17 +113,16 @@ WHERE id = $1 AND worker_id = $2 AND status = 'running'
 SELECT_OUTPUTS = """
 SELECT output.sequence, output.id, output.command_id, output.request_id,
        output.conversation_id, output.modality, output.event_type, output.payload,
-       conversation.user_id, conversation.tenant_id
+       conversation.user_id
 FROM interaction_outbox AS output
 JOIN conversations AS conversation ON conversation.id = output.conversation_id
 WHERE output.conversation_id = $1
   AND conversation.user_id = $2
-  AND conversation.tenant_id IS NOT DISTINCT FROM $3
-  AND (output.delivered_at IS NULL OR $5::text IS NOT NULL)
-  AND output.sequence > $4
-  AND ($5::text IS NULL OR output.command_id = $5)
+  AND (output.delivered_at IS NULL OR $4::text IS NOT NULL)
+  AND output.sequence > $3
+  AND ($4::text IS NULL OR output.command_id = $4)
 ORDER BY output.sequence
-LIMIT $6
+LIMIT $5
 """
 
 ACKNOWLEDGE_OUTPUT = """
@@ -134,7 +133,6 @@ WHERE output.id = $1
   AND conversation.id = output.conversation_id
   AND output.conversation_id = $2
   AND conversation.user_id = $3
-  AND conversation.tenant_id IS NOT DISTINCT FROM $4
   AND output.delivered_at IS NULL
 """
 
@@ -227,7 +225,6 @@ class PostgresInteractionRepository(InteractionRepository):
                 SELECT_OUTPUTS,
                 conversation.conversation_id,
                 conversation.user_id,
-                conversation.tenant_id,
                 after_sequence,
                 command_id,
                 limit,
@@ -242,7 +239,6 @@ class PostgresInteractionRepository(InteractionRepository):
                 output_id,
                 conversation.conversation_id,
                 conversation.user_id,
-                conversation.tenant_id,
             )
 
     @staticmethod
@@ -254,7 +250,6 @@ class PostgresInteractionRepository(InteractionRepository):
             conversation=ConversationKey(
                 conversation_id=str(row["conversation_id"]),
                 user_id=str(row["user_id"]),
-                tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
             ),
             kind=cast(InteractionCommandKind, str(row["kind"])),
             source=cast(InteractionSource, str(row["source"])),
@@ -277,7 +272,6 @@ class PostgresInteractionRepository(InteractionRepository):
             conversation=ConversationKey(
                 conversation_id=str(row["conversation_id"]),
                 user_id=str(row["user_id"]),
-                tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
             ),
             modality=cast(InteractionModality, str(row["modality"])),
             event=decode_agent_event(str(row["event_type"]), raw_payload),

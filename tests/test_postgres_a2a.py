@@ -38,7 +38,6 @@ class FakeConnection:
             "parent_conversation_id": "parent-1",
             "worker_conversation_id": "worker-conversation-1",
             "user_id": "user-1",
-            "tenant_id": "tenant-1",
         }
         self.job_row = {
             "id": "job-1",
@@ -119,11 +118,7 @@ class FakePool:
 
 def parent_key() -> ConversationKey:
     """Build the parent conversation used by repository ownership checks."""
-    return ConversationKey(
-        conversation_id="parent-1",
-        user_id="user-1",
-        tenant_id="tenant-1",
-    )
+    return ConversationKey(conversation_id="parent-1", user_id="user-1")
 
 
 def repository(pool: FakePool) -> PostgresA2AJobRepository:
@@ -156,7 +151,7 @@ async def test_postgres_a2a_creates_and_loads_owned_protocol_state() -> None:
     assert loaded_job == job
     assert (
         INSERT_THREAD,
-        ("thread-1", "parent-1", "worker-conversation-1", "user-1", "tenant-1"),
+        ("thread-1", "parent-1", "worker-conversation-1", "user-1"),
     ) in pool.connection.executed
     assert (INSERT_JOB, ("job-1", "thread-1", "Investiga")) in pool.connection.executed
 

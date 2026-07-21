@@ -25,9 +25,9 @@ Gemini 3.1 Flash Live produce la conversación y el audio dirigido al usuario, m
 OpenAI ejecuta el agente de trabajo pesado.
 
 > [!NOTE]
-> El proyecto todavía no incorpora autenticación. En producción, `user_id` y `tenant_id`
-> deben obtenerse de un principal autenticado y no confiarse directamente al cliente.
-> Consulta [ROADMAP.md](ROADMAP.md) para conocer las siguientes fases.
+> La autenticación queda fuera del alcance de este repositorio. En un despliegue que la
+> necesite, `user_id` debe obtenerse en una capa externa y no confiarse directamente al
+> cliente. Consulta [ROADMAP.md](ROADMAP.md) para conocer las siguientes fases.
 
 ## Núcleo: doble capa multimodal
 
@@ -74,7 +74,7 @@ latencia y mantiene el audio crudo fuera de la persistencia.
 - Historial multiusuario canónico y append-only en PostgreSQL.
 - Contexto reciente en Redis con TTL, compactación y recuperación tras cache miss.
 - Creación explícita de sesiones con UUID antes de aceptar mensajes.
-- Control de propiedad mediante `session_uid`, `user_id` y `tenant_id`.
+- Control de propiedad mediante `session_uid` y `user_id`.
 - Escrituras atómicas y detección de actualizaciones concurrentes.
 - Logs estructurados que evitan registrar mensajes y datos de las tools.
 - Puertos pequeños para sustituir Gemini, OpenAI, Redis o las tools sin alterar el núcleo.
@@ -407,7 +407,7 @@ SQL se han aplicado. No contiene conversaciones, mensajes ni estado de los agent
 
 | Tabla | Responsabilidad | Contenido principal |
 | --- | --- | --- |
-| `conversations` | Cabecera e identidad de una conversación. | Propietario, tenant, versión y título. |
+| `conversations` | Cabecera e identidad de una conversación. | Propietario, versión y título. |
 | `conversation_items` | Historial que recibe el modelo. | Mensajes, tool calls y tool results. |
 | `a2a_threads` | Relación estable entre una conversación principal y una conversación del worker. | `parent_conversation_id` y `worker_conversation_id`. |
 | `a2a_jobs` | Cola y estado de tareas pesadas. | Mensaje, estado, lease y resultado. |
@@ -420,7 +420,7 @@ es la siguiente:
 
 ```text
 conversations
-├── id, user_id, tenant_id
+├── id, user_id
 ├── title, status, metadata
 ├── version, last_sequence
 └── created_at, updated_at, last_message_at
@@ -432,7 +432,7 @@ conversation_items
 
 a2a_threads
 ├── parent_conversation_id, worker_conversation_id
-└── user_id, tenant_id
+└── user_id
 
 a2a_jobs
 ├── thread_id, sequence, message, status
@@ -479,7 +479,7 @@ tiene su historial retenido.
 La conexión queda asociada a una conversación y a su propietario durante el handshake:
 
 ```text
-ws://127.0.0.1:8000/v1/agent/ws?session_uid=<uuid>&user_id=<owner>&tenant_id=<tenant>
+ws://127.0.0.1:8000/v1/agent/ws?session_uid=<uuid>&user_id=<owner>
 ```
 
 Tras el evento `connected`, el cliente puede enviar varios turnos por la misma conexión:
@@ -534,7 +534,7 @@ compatibilidad. Los nuevos clientes deben usar el WebSocket.
 El flujo `speech_to_speech` habilita una conexión distinta:
 
 ```text
-ws://127.0.0.1:8000/v1/agent/realtime?session_uid=<uuid>&user_id=<owner>&tenant_id=<tenant>
+ws://127.0.0.1:8000/v1/agent/realtime?session_uid=<uuid>&user_id=<owner>
 ```
 
 Después de `connected` y `realtime_ready`, el cliente abre la captura con
@@ -573,7 +573,7 @@ a diferencia del endpoint durable, los frames de audio no se recuperan al recone
 | `POST` | `/v1/agent/stream` | Acceso SSE por turnos al mismo núcleo de dos agentes. |
 | `DELETE` | `/v1/conversations/{conversation_id}` | Borra una conversación del propietario indicado. |
 
-El endpoint de borrado recibe `user_id` y, opcionalmente, `tenant_id` como query params:
+El endpoint de borrado recibe `user_id` como query param:
 
 ```bash
 curl -X DELETE \
@@ -766,8 +766,8 @@ propiedad. Los resultados proactivos del worker continúan siendo durables en
 - Mensajes, argumentos y resultados sí forman parte del historial persistido. El
   cifrado, la clasificación de datos y la retención legal dependen del despliegue.
 - El audio realtime no se persiste, pero sus transcripciones sí forman parte del historial.
-- Esta base no implementa todavía autenticación, autorización externa, cifrado a nivel
-  de aplicación ni políticas regulatorias específicas.
+- La autenticación, la autorización externa, el cifrado a nivel de aplicación y las
+  políticas regulatorias específicas quedan fuera del alcance de esta base.
 
 ## Desarrollo y calidad
 

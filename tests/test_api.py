@@ -115,15 +115,13 @@ class StubConversationCoordinator:
 class StubConversationService:
     """Manage one deterministic session for API boundary tests."""
 
-    async def create_session(self, user_id: str, tenant_id: str | None = None) -> Conversation:
+    async def create_session(self, user_id: str) -> Conversation:
         """Return the deterministic empty session."""
         assert user_id == "user-1"
-        assert tenant_id is None
         return Conversation(
             key=ConversationKey(
                 conversation_id=SESSION_UID,
                 user_id=user_id,
-                tenant_id=tenant_id,
             ),
             title="Nueva conversación",
         )

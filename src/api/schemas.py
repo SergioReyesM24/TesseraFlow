@@ -12,7 +12,6 @@ class StreamAgentRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     session_uid: UUID
     user_id: str = Field(min_length=1, max_length=128)
-    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class AgentWebSocketRequest(BaseModel):
@@ -56,7 +55,6 @@ class CreateSessionRequest(BaseModel):
     """Ownership data required to create a persisted chat session."""
 
     user_id: str = Field(min_length=1, max_length=128)
-    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class CreateSessionResponse(BaseModel):

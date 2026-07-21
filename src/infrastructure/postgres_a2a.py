@@ -8,8 +8,8 @@ from domain.conversations import ConversationKey
 
 INSERT_THREAD = """
 INSERT INTO a2a_threads (
-    id, parent_conversation_id, worker_conversation_id, user_id, tenant_id
-) VALUES ($1, $2, $3, $4, $5)
+    id, parent_conversation_id, worker_conversation_id, user_id
+) VALUES ($1, $2, $3, $4)
 """
 
 INSERT_JOB = """
@@ -18,12 +18,11 @@ VALUES ($1, $2, $3)
 """
 
 SELECT_THREAD = """
-SELECT id, parent_conversation_id, worker_conversation_id, user_id, tenant_id
+SELECT id, parent_conversation_id, worker_conversation_id, user_id
 FROM a2a_threads
 WHERE id = $1
   AND parent_conversation_id = $2
   AND user_id = $3
-  AND tenant_id IS NOT DISTINCT FROM $4
 """
 
 SELECT_JOB = """
@@ -37,14 +36,12 @@ SELECT
     j.error_code,
     t.parent_conversation_id,
     t.worker_conversation_id,
-    t.user_id,
-    t.tenant_id
+    t.user_id
 FROM a2a_jobs AS j
 JOIN a2a_threads AS t ON t.id = j.thread_id
 WHERE j.id = $1
   AND t.parent_conversation_id = $2
   AND t.user_id = $3
-  AND t.tenant_id IS NOT DISTINCT FROM $4
 """
 
 CLAIM_NEXT_JOB = """
@@ -148,7 +145,7 @@ WHERE id = $1 AND worker_id = $2 AND status = 'running'
 """
 
 SELECT_THREAD_FOR_JOB = """
-SELECT parent_conversation_id, worker_conversation_id, user_id, tenant_id
+SELECT parent_conversation_id, worker_conversation_id, user_id
 FROM a2a_threads
 WHERE id = $1
 """
@@ -170,7 +167,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
                 thread.parent_conversation.conversation_id,
                 thread.worker_conversation_id,
                 thread.parent_conversation.user_id,
-                thread.parent_conversation.tenant_id,
             )
             await connection.execute(
                 INSERT_JOB,
@@ -191,7 +187,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
                 thread_id,
                 parent_conversation.conversation_id,
                 parent_conversation.user_id,
-                parent_conversation.tenant_id,
             )
         return self._thread_from_row(row) if row is not None else None
 
@@ -212,7 +207,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
                 job_id,
                 parent_conversation.conversation_id,
                 parent_conversation.user_id,
-                parent_conversation.tenant_id,
             )
         return self._job_from_row(row) if row is not None else None
 
@@ -278,7 +272,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
             parent_conversation=ConversationKey(
                 conversation_id=str(row["parent_conversation_id"]),
                 user_id=str(row["user_id"]),
-                tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
             ),
             worker_conversation_id=str(row["worker_conversation_id"]),
         )
@@ -292,7 +285,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
             parent_conversation=ConversationKey(
                 conversation_id=str(row["parent_conversation_id"]),
                 user_id=str(row["user_id"]),
-                tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
             ),
             worker_conversation_id=str(row["worker_conversation_id"]),
             message=str(row["message"]),

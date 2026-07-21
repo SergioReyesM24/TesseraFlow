@@ -65,11 +65,10 @@ class FakePostgresConnection:
     async def execute(self, query: str, *args: object) -> str:
         """Apply conversation metadata mutations."""
         if query == INSERT_CONVERSATION:
-            conversation_id, user_id, tenant_id, title = args
+            conversation_id, user_id, title = args
             assert isinstance(conversation_id, str)
             self.conversations[conversation_id] = {
                 "user_id": user_id,
-                "tenant_id": tenant_id,
                 "title": title,
                 "version": 0,
                 "last_sequence": 0,

@@ -20,10 +20,9 @@ end
 redis.call('HSET', KEYS[1],
     'version', ARGV[1],
     'user_id', ARGV[2],
-    'tenant_id', ARGV[3],
-    'title', ARGV[4],
-    'messages', ARGV[5])
-redis.call('EXPIRE', KEYS[1], ARGV[6])
+    'title', ARGV[3],
+    'messages', ARGV[4])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
 return 1
 """
 
@@ -50,9 +49,7 @@ class RedisConversationCache:
         if not values:
             return None
         normalized = {self._text(name): self._text(value) for name, value in values.items()}
-        if normalized.get("user_id") != key.user_id or normalized.get("tenant_id") != (
-            key.tenant_id or ""
-        ):
+        if normalized.get("user_id") != key.user_id:
             raise ConversationAccessDeniedError("Conversation ownership does not match")
         try:
             messages = self._decode_messages(normalized["messages"])
@@ -85,7 +82,6 @@ class RedisConversationCache:
                 storage_key,
                 str(conversation.version),
                 conversation.key.user_id,
-                conversation.key.tenant_id or "",
                 conversation.title or "",
                 payload,
                 str(self._ttl_seconds),

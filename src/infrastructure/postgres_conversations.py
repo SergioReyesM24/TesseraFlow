@@ -24,7 +24,7 @@ from infrastructure.conversation_codec import (
 )
 
 SELECT_CONVERSATION = """
-SELECT user_id, tenant_id, title, version, last_sequence
+SELECT user_id, title, version, last_sequence
 FROM conversations
 WHERE id = $1
 """
@@ -51,9 +51,9 @@ ORDER BY item.sequence
 
 INSERT_CONVERSATION = """
 INSERT INTO conversations (
-    id, user_id, tenant_id, title, version, last_sequence
+    id, user_id, title, version, last_sequence
 )
-VALUES ($1, $2, $3, $4, 0, 0)
+VALUES ($1, $2, $3, 0, 0)
 """
 
 INSERT_ITEM = """
@@ -96,7 +96,6 @@ class PostgresConversationRepository(ConversationRepository):
                     INSERT_CONVERSATION,
                     key.conversation_id,
                     key.user_id,
-                    key.tenant_id,
                     "Nueva conversación",
                 )
         except asyncpg.UniqueViolationError as exc:
@@ -150,7 +149,6 @@ class PostgresConversationRepository(ConversationRepository):
                         INSERT_CONVERSATION,
                         conversation.key.conversation_id,
                         conversation.key.user_id,
-                        conversation.key.tenant_id,
                         title,
                     )
                     last_sequence = 0
@@ -207,8 +205,8 @@ class PostgresConversationRepository(ConversationRepository):
 
     @staticmethod
     def _validate_owner(key: ConversationKey, row: asyncpg.Record) -> None:
-        """Reject reads and writes performed by a different user or tenant."""
-        if row["user_id"] != key.user_id or row["tenant_id"] != key.tenant_id:
+        """Reject reads and writes performed by a different user."""
+        if row["user_id"] != key.user_id:
             raise ConversationAccessDeniedError("Conversation ownership does not match")
 
     @staticmethod
