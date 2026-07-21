@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
@@ -66,10 +66,27 @@ class Settings(BaseSettings):
     worker_agent_instructions: str = DEFAULT_WORKER_AGENT_INSTRUCTIONS
     a2a_worker_poll_seconds: float = Field(default=0.5, gt=0, le=60)
     a2a_job_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
-    interaction_coordinator_poll_seconds: float = Field(default=0.1, gt=0, le=60)
-    interaction_output_poll_seconds: float = Field(default=0.05, gt=0, le=60)
+    interaction_coordinator_reconciliation_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        validation_alias=AliasChoices(
+            "INTERACTION_COORDINATOR_RECONCILIATION_SECONDS",
+            "INTERACTION_COORDINATOR_POLL_SECONDS",
+        ),
+    )
+    interaction_output_reconciliation_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        validation_alias=AliasChoices(
+            "INTERACTION_OUTPUT_RECONCILIATION_SECONDS",
+            "INTERACTION_OUTPUT_POLL_SECONDS",
+        ),
+    )
     interaction_command_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
     interaction_max_pending_commands: int = Field(default=16, ge=1, le=1000)
+    interaction_coordinator_workers: int = Field(default=4, ge=1, le=100)
 
 
 @lru_cache

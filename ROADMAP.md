@@ -118,6 +118,25 @@ Extensiones que continúan fuera de alcance:
 - Probar navegadores y dispositivos reales con cancelación de eco, pérdida de red,
   reconexión y cambios de dispositivo de entrada.
 
+## Contabilidad de uso y costes de modelos
+
+Persistir el consumo y el coste estimado de los modelos por turno, tanto para ejecuciones
+de texto como para sesiones STS, sin depender de los formatos de facturación de un
+proveedor concreto.
+
+Aspectos que deberá cubrir:
+
+- Definir un registro neutral asociado al turno con proveedor, modelo, rol del agente,
+  modalidad, `conversation_id`, `response_id`, unidades consumidas y coste estimado.
+- Traducir en cada adaptador las unidades que exponga el proveedor, como tokens de entrada
+  y salida, tokens en caché, audio o duración de una sesión STS.
+- Guardar los registros en una base de datos durable y permitir agregaciones por turno,
+  conversación, modelo, proveedor y periodo temporal.
+- Mantener las tarifas fuera del núcleo, versionadas y con fechas de vigencia, para poder
+  recalcular costes y distinguir estimaciones de importes facturados por el proveedor.
+- No persistir prompts, respuestas, audio ni argumentos de tools como parte de la
+  contabilidad de costes.
+
 ## Reintentos
 
 Añadir políticas de reintentos diferenciadas para llamadas al modelo, herramientas y

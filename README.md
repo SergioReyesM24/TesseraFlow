@@ -324,6 +324,12 @@ actualizado. El resultado A2A usa el envelope versionado `tesseraflow.a2a.result
 un turno nuevo del agente interactivo. Sus eventos se guardan en el outbox antes de ser
 entregados, por lo que siguen disponibles si no hay un socket conectado.
 
+Los inserts de inbox y outbox emiten señales PostgreSQL `NOTIFY` después del commit. Una
+única conexión `LISTEN` por proceso distribuye esos avisos a los consumidores locales por
+`command_id` o conversación. El aviso solo despierta: cada consumidor vuelve a consultar
+la fila durable y conserva una reconciliación periódica lenta para recuperarse de una
+notificación perdida o una conexión reiniciada.
+
 ## Pipeline de conversaciones
 
 El historial se guarda como elementos del dominio, no como respuestas del SDK de un
@@ -348,6 +354,7 @@ sequenceDiagram
     C->>A: message + session_uid + owner
     A->>R: validar sesión y propietario
     A->>I: enqueue(text_user)
+    I-->>K: NOTIFY comando disponible
     K->>I: claim_next por conversación
     K->>S: stream(command.message, source)
     S->>R: load(ConversationKey)
@@ -361,6 +368,7 @@ sequenceDiagram
     R-->>S: Conversation con nueva versión
     S-->>K: eventos neutrales
     K->>I: append outbox + complete command
+    I-->>A: NOTIFY output disponible
     I-->>A: eventos pendientes
     A-->>C: frames JSON hasta completed/error
 ```
@@ -415,8 +423,9 @@ SQL se han aplicado. No contiene conversaciones, mensajes ni estado de los agent
 | `interaction_outbox` | Eventos pendientes de entregar al cliente. | Deltas, estados de tools, respuestas finales y errores. |
 
 Las migraciones `001_conversations.sql`, `002_a2a_jobs.sql` y
-`003_interaction_inbox_outbox.sql` crean esas tablas por bloques. Su estructura principal
-es la siguiente:
+`003_interaction_inbox_outbox.sql` crean esas tablas por bloques. La migración
+`004_interaction_notifications.sql` añade triggers `LISTEN/NOTIFY` sin convertir las
+notificaciones en fuente de verdad. Su estructura principal es la siguiente:
 
 ```text
 conversations
@@ -682,10 +691,11 @@ modificar los archivos versionados.
 | `MAX_TOOL_ROUNDS` | `8` | Límite contra bucles de tools. |
 | `A2A_WORKER_POLL_SECONDS` | `0.5` | Intervalo de sondeo de la cola durable. |
 | `A2A_JOB_TIMEOUT_SECONDS` | `600` | Tiempo máximo de un turno del worker. |
-| `INTERACTION_COORDINATOR_POLL_SECONDS` | `0.1` | Sondeo de comandos para el modelo interactivo. |
-| `INTERACTION_OUTPUT_POLL_SECONDS` | `0.05` | Sondeo de eventos pendientes por los transportes. |
+| `INTERACTION_COORDINATOR_RECONCILIATION_SECONDS` | `5` | Reconciliación de comandos si no llega una notificación. |
+| `INTERACTION_OUTPUT_RECONCILIATION_SECONDS` | `5` | Reconciliación de outputs si no llega una notificación. |
 | `INTERACTION_COMMAND_TIMEOUT_SECONDS` | `120` | Tiempo máximo de un turno interactivo. |
 | `INTERACTION_MAX_PENDING_COMMANDS` | `16` | Entradas de usuario pendientes permitidas por conversación. |
+| `INTERACTION_COORDINATOR_WORKERS` | `4` | Turnos máximos concurrentes por proceso; una conversación sigue serializada. |
 | `CONVERSATION_TTL_SECONDS` | `604800` | TTL de la caché; no borra PostgreSQL. |
 | `CONVERSATION_MAX_MESSAGES` | `100` | Máximo de elementos en el contexto reciente. |
 | `CONVERSATION_MAX_CHARACTERS` | `200000` | Límite lógico del contexto reciente. |
@@ -741,10 +751,13 @@ Consulta [.env.example](.env.example) para ver una configuración completa.
   WebSocket y la cierra al desconectar o alcanzar su tiempo máximo.
 - No se guarda usuario, historial ni `response_id` en servicios compartidos.
 - El worker se inicia y detiene con el `lifespan`; una interrupción libera su job.
-- El coordinador se inicia con el `lifespan`; una interrupción libera su comando.
+- El coordinador y su conexión `LISTEN` se inician con el `lifespan`; una interrupción
+  libera sus comandos y cierra el listener.
 - Los jobs sobreviven a reinicios y una lease vencida permite reclamarlos de nuevo.
 - Dos jobs del mismo thread nunca se ejecutan a la vez.
 - Dos comandos de la misma conversación nunca invocan a la vez al modelo interactivo.
+- Conversaciones distintas pueden ocupar hasta `INTERACTION_COORDINATOR_WORKERS`
+  ejecuciones simultáneas por proceso.
 - Un cierre del WebSocket detiene la entrega, no el comando durable ya aceptado.
 - Un outbox sin confirmar permite reanudar la entrega tras una reconexión.
 - Las tools operativas solo se exponen al worker. Si solicita varias, actualmente se

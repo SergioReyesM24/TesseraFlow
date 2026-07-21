@@ -235,3 +235,40 @@ class InteractionRepository(Protocol):
     async def acknowledge(self, output_id: str, conversation: ConversationKey) -> None:
         """Mark one owned output delivered after a transport sends it successfully."""
         ...
+
+
+class InteractionSubscription(Protocol):
+    """Observe durable interaction changes without carrying their persisted data."""
+
+    def checkpoint(self) -> int:
+        """Return the current monotonic notification generation."""
+        ...
+
+    async def wait_for_change(self, checkpoint: int, deadline_seconds: float) -> None:
+        """Wait until the generation advances or reconciliation becomes due."""
+        ...
+
+
+class InteractionNotifier(Protocol):
+    """Create process-local subscriptions fed by a cross-process interaction signal."""
+
+    async def start(self) -> None:
+        """Start receiving cross-process notifications before consumers run."""
+        ...
+
+    async def close(self) -> None:
+        """Release notification resources during application shutdown."""
+        ...
+
+    def subscribe_commands(self) -> AbstractAsyncContextManager[InteractionSubscription]:
+        """Subscribe one coordinator worker to newly runnable commands."""
+        ...
+
+    def subscribe_outputs(
+        self,
+        conversation_id: str,
+        *,
+        command_id: str | None = None,
+    ) -> AbstractAsyncContextManager[InteractionSubscription]:
+        """Subscribe a transport to output changes in its delivery scope."""
+        ...

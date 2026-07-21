@@ -8,6 +8,7 @@ from application.a2a import A2AService, A2AWorker
 from application.agent import AgentService
 from application.conversations import ConversationService, RecentConversationCompactor
 from application.interactions import ConversationCoordinator
+from application.ports import InteractionNotifier
 from application.realtime import RealtimeAgentService
 from config import Settings
 from domain.agent import AgentDefinition
@@ -18,6 +19,7 @@ from infrastructure.postgres_conversations import (
     PostgresConversationRepository,
     apply_postgres_migrations,
 )
+from infrastructure.postgres_interaction_notifier import PostgresInteractionNotifier
 from infrastructure.postgres_interactions import PostgresInteractionRepository
 from infrastructure.redis_conversations import RedisConversationCache
 from tools.registry import build_interactive_tool_registry, build_tool_registry
@@ -36,10 +38,12 @@ class AppContainer:
     realtime_agent_service: RealtimeAgentService | None
     a2a_service: A2AService
     a2a_worker: A2AWorker
+    interaction_notifier: InteractionNotifier
     conversation_coordinator: ConversationCoordinator
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Start process-local background consumers after lifespan composition."""
+        await self.interaction_notifier.start()
         self.conversation_coordinator.start()
         self.a2a_worker.start()
 
@@ -47,6 +51,7 @@ class AppContainer:
         """Release application-wide clients during graceful shutdown."""
         await self.a2a_worker.close()
         await self.conversation_coordinator.close()
+        await self.interaction_notifier.close()
         await self.model_runtime.close()
         await self.redis_client.aclose()
         await self.postgres_pool.close()
@@ -90,6 +95,10 @@ async def build_container(settings: Settings) -> AppContainer:
         postgres_pool,
         max_pending_commands=settings.interaction_max_pending_commands,
     )
+    interaction_notifier = PostgresInteractionNotifier(
+        settings.postgres_url,
+        command_timeout_seconds=settings.postgres_command_timeout_seconds,
+    )
     a2a_service = A2AService(jobs, conversations)
     worker_tools = build_tool_registry()
     interactive_tools = build_interactive_tool_registry(a2a_service)
@@ -110,11 +119,13 @@ async def build_container(settings: Settings) -> AppContainer:
     )
     conversation_coordinator = ConversationCoordinator(
         interactions,
+        interaction_notifier,
         model_runtime.interactive_agent,
         worker_id=str(uuid4()),
-        poll_seconds=settings.interaction_coordinator_poll_seconds,
-        output_poll_seconds=settings.interaction_output_poll_seconds,
+        reconciliation_seconds=settings.interaction_coordinator_reconciliation_seconds,
+        output_reconciliation_seconds=settings.interaction_output_reconciliation_seconds,
         command_timeout_seconds=settings.interaction_command_timeout_seconds,
+        worker_count=settings.interaction_coordinator_workers,
     )
     return AppContainer(
         model_runtime=model_runtime,
@@ -126,5 +137,6 @@ async def build_container(settings: Settings) -> AppContainer:
         realtime_agent_service=model_runtime.realtime_agent_service,
         a2a_service=a2a_service,
         a2a_worker=a2a_worker,
+        interaction_notifier=interaction_notifier,
         conversation_coordinator=conversation_coordinator,
     )

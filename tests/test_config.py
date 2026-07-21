@@ -82,6 +82,17 @@ def test_speech_to_speech_flow_has_a_bounded_pcm_chunk_size() -> None:
     assert settings.realtime_audio_max_chunk_bytes == 3_200
 
 
+def test_legacy_interaction_poll_names_configure_reconciliation() -> None:
+    """Accept deployed polling variables while exposing notification semantics."""
+    settings = Settings(
+        INTERACTION_COORDINATOR_POLL_SECONDS=7,
+        INTERACTION_OUTPUT_POLL_SECONDS=9,
+    )
+
+    assert settings.interaction_coordinator_reconciliation_seconds == 7
+    assert settings.interaction_output_reconciliation_seconds == 9
+
+
 def test_blank_optional_dotenv_values_keep_provider_defaults(
     tmp_path: Path,
     monkeypatch: Any,
