@@ -301,7 +301,37 @@ modelo, las tools y la persistencia de cada turno.
 
 ### Persistencia canónica en PostgreSQL
 
-La migración `001_conversations.sql` crea dos tablas:
+Las tablas funcionales se agrupan en tres responsabilidades principales:
+
+```text
+1. Conversaciones
+   ├── conversations
+   └── conversation_items
+
+2. Trabajo entre agentes
+   ├── a2a_threads
+   └── a2a_jobs
+
+3. Coordinación y entrega al usuario
+   ├── interaction_commands
+   └── interaction_outbox
+```
+
+Además existe `schema_migrations`, una tabla técnica que solo registra qué migraciones
+SQL se han aplicado. No contiene conversaciones, mensajes ni estado de los agentes.
+
+| Tabla | Responsabilidad | Contenido principal |
+| --- | --- | --- |
+| `conversations` | Cabecera e identidad de una conversación. | Propietario, tenant, versión y título. |
+| `conversation_items` | Historial que recibe el modelo. | Mensajes, tool calls y tool results. |
+| `a2a_threads` | Relación estable entre una conversación principal y una conversación del worker. | `parent_conversation_id` y `worker_conversation_id`. |
+| `a2a_jobs` | Cola y estado de tareas pesadas. | Mensaje, estado, lease y resultado. |
+| `interaction_commands` | Cola serializada de entradas del agente principal. | Mensajes del usuario y finalizaciones del worker. |
+| `interaction_outbox` | Eventos pendientes de entregar al cliente. | Deltas, estados de tools, respuestas finales y errores. |
+
+Las migraciones `001_conversations.sql`, `002_a2a_jobs.sql` y
+`003_interaction_inbox_outbox.sql` crean esas tablas por bloques. Su estructura principal
+es la siguiente:
 
 ```text
 conversations
