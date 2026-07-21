@@ -5,11 +5,11 @@ from typing import Protocol
 from domain.a2a import A2AJob, A2AThread
 from domain.agent import AgentDefinition
 from domain.conversations import Conversation, ConversationItem, ConversationKey
-from domain.events import ModelStreamEvent
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
 from domain.realtime import AudioChunk, RealtimeModelEvent
 from domain.tools import ToolResult, ToolSpec
+from domain.turn_events import ModelStreamEvent
 
 
 class ModelSession(Protocol):

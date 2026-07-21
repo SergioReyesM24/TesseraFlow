@@ -10,15 +10,15 @@ from google.genai import types
 from application.ports import ModelGateway, ModelSession
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationItem, ConversationMessage
-from domain.events import (
+from domain.model import ModelReply
+from domain.tools import ToolCall, ToolResult, ToolSpec
+from domain.turn_events import (
     ModelAudioDelta,
     ModelAudioInterrupted,
     ModelStreamCompleted,
     ModelStreamEvent,
     ModelTextDelta,
 )
-from domain.model import ModelReply
-from domain.tools import ToolCall, ToolResult, ToolSpec
 from domain.types import JsonObject
 
 logger = structlog.get_logger(__name__)

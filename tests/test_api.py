@@ -15,7 +15,6 @@ from api.routes import router
 from application.conversations import ConversationNotFoundError
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import Conversation, ConversationKey
-from domain.events import AgentStreamCompleted, AgentTextDelta
 from domain.interactions import InteractionCommand, InteractionOutput
 from domain.realtime import (
     RealtimeAgentEvent,
@@ -23,6 +22,7 @@ from domain.realtime import (
     RealtimeOutputTranscriptDelta,
     RealtimeTurnCompleted,
 )
+from domain.turn_events import AgentStreamCompleted, AgentTextDelta
 
 SESSION_UID = "12345678-1234-4678-9234-567812345678"
 REQUEST_UID = "87654321-4321-4765-8321-876543218765"

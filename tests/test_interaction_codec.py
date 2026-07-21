@@ -1,4 +1,4 @@
-from domain.events import AgentAudioDelta, AgentAudioInterrupted
+from domain.turn_events import AgentAudioDelta, AgentAudioInterrupted
 from infrastructure.interaction_codec import decode_agent_event, encode_agent_event
 
 

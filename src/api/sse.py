@@ -6,7 +6,7 @@ from typing import Any
 import structlog
 
 from api.event_payloads import agent_event_payload
-from domain.events import AgentStreamEvent
+from domain.turn_events import AgentStreamEvent
 
 logger = structlog.get_logger(__name__)
 

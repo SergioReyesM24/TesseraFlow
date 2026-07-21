@@ -9,18 +9,18 @@ from application.agent import AgentService
 from application.ports import InteractionRepository, InteractiveAgent
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey
-from domain.events import (
-    AgentAudioDelta,
-    AgentAudioInterrupted,
-    AgentStreamCompleted,
-    AgentStreamFailed,
-)
 from domain.interactions import (
     InteractionCommand,
     InteractionEmission,
     InteractionOutput,
     InteractionSource,
     is_terminal_output,
+)
+from domain.turn_events import (
+    AgentAudioDelta,
+    AgentAudioInterrupted,
+    AgentStreamCompleted,
+    AgentStreamFailed,
 )
 
 logger = structlog.get_logger(__name__)

@@ -4,8 +4,8 @@ import pytest
 from google.genai import types
 
 from domain.conversations import ConversationMessage
-from domain.events import ModelAudioDelta, ModelStreamCompleted, ModelTextDelta
 from domain.tools import ToolCall, ToolResult, ToolSpec
+from domain.turn_events import ModelAudioDelta, ModelStreamCompleted, ModelTextDelta
 from infrastructure.gemini_live_gateway import (
     GeminiLiveGateway,
     GeminiLiveModelSession,

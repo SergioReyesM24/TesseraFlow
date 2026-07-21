@@ -6,13 +6,13 @@ from uuid import UUID
 from application.interactions import ConversationCoordinator, TurnInteractionAgent
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationKey
-from domain.events import AgentAudioDelta, AgentStreamCompleted, AgentTextDelta
 from domain.interactions import (
     InteractionCommand,
     InteractionEmission,
     InteractionOutput,
     InteractionSource,
 )
+from domain.turn_events import AgentAudioDelta, AgentStreamCompleted, AgentTextDelta
 
 
 class InMemoryInteractionRepository:

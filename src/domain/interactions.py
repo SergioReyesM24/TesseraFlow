@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from domain.conversations import ConversationKey
-from domain.events import AgentStreamEvent
+from domain.turn_events import AgentStreamEvent
 
 InteractionCommandKind = Literal["user_message", "worker_completed"]
 InteractionSource = Literal["text_user", "speech_user", "worker_agent"]
@@ -48,6 +48,6 @@ class InteractionEmission:
 
 def is_terminal_output(output: InteractionOutput) -> bool:
     """Report whether an output closes its command's public event stream."""
-    from domain.events import AgentStreamCompleted, AgentStreamFailed
+    from domain.turn_events import AgentStreamCompleted, AgentStreamFailed
 
     return isinstance(output.event, AgentStreamCompleted | AgentStreamFailed)

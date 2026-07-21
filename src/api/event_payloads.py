@@ -2,7 +2,7 @@ import base64
 from typing import Any
 
 from api.schemas import AgentCompletedResponse, ToolCallResponse
-from domain.events import (
+from domain.turn_events import (
     AgentAudioDelta,
     AgentAudioInterrupted,
     AgentStreamCompleted,

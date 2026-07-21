@@ -1,8 +1,18 @@
+"""Contracts for one long-lived, full-duplex agent connection.
+
+Unlike ``domain.turn_events``, these streams remain open across multiple speech
+turns. ``RealtimeModel*`` events belong to the provider gateway boundary;
+``Realtime*`` events are application-facing and carry a ``turn_id`` whenever a
+client must correlate output inside the shared connection.
+"""
+
 from dataclasses import dataclass
 from typing import TypeAlias
 
 from domain.agent import AgentResult
 from domain.tools import ToolCall, ToolCallRecord
+
+# Media sent into the provider session.
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +21,9 @@ class AudioChunk:
 
     data: bytes
     mime_type: str = "audio/pcm;rate=16000"
+
+
+# Provider gateway events received throughout the connection.
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +75,9 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelToolCall
     | RealtimeModelTurnCompleted
 )
+
+
+# Application events correlated to one logical turn for realtime clients.
 
 
 @dataclass(frozen=True, slots=True)

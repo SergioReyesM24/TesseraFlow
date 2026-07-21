@@ -3,7 +3,8 @@ import binascii
 from typing import Any, Literal, cast
 
 from domain.agent import AgentResult
-from domain.events import (
+from domain.tools import ToolCallRecord
+from domain.turn_events import (
     AgentAudioDelta,
     AgentAudioInterrupted,
     AgentStreamCompleted,
@@ -13,7 +14,6 @@ from domain.events import (
     AgentToolCompleted,
     AgentToolStarted,
 )
-from domain.tools import ToolCallRecord
 
 
 def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]:

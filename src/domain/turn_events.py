@@ -1,9 +1,23 @@
+"""Events for finite model turns and their application-facing agent streams.
+
+``Model*`` events cross the provider gateway boundary and describe one model
+response. ``Agent*`` events are emitted after application orchestration has added
+tool execution and the terminal :class:`~domain.agent.AgentResult`. Keeping these
+families distinct prevents provider-facing events from leaking to API consumers,
+even when a pair currently carries the same payload.
+
+Long-lived, full-duplex sessions use the separate contracts in
+``domain.realtime`` because one connection can contain multiple correlated turns.
+"""
+
 from dataclasses import dataclass
 from typing import TypeAlias
 
 from domain.agent import AgentResult
 from domain.model import ModelReply
 from domain.tools import ToolCallRecord
+
+# Provider gateway events for one finite model response.
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +52,9 @@ ModelStreamEvent: TypeAlias = (
 )
 
 
+# Application events exposed after agent orchestration.
+
+
 @dataclass(frozen=True, slots=True)
 class AgentTextDelta:
     """Text fragment ready to be forwarded to an agent-stream consumer."""
@@ -47,7 +64,7 @@ class AgentTextDelta:
 
 @dataclass(frozen=True, slots=True)
 class AgentAudioDelta:
-    """Provider-neutral PCM fragment ready for a realtime transport consumer."""
+    """PCM fragment ready for a finite agent-stream consumer."""
 
     data: bytes
     mime_type: str
@@ -55,7 +72,7 @@ class AgentAudioDelta:
 
 @dataclass(frozen=True, slots=True)
 class AgentAudioInterrupted:
-    """Tell clients to discard buffered playback after a model interruption."""
+    """Tell an agent-stream consumer to discard buffered playback."""
 
 
 @dataclass(frozen=True, slots=True)

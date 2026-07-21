@@ -14,7 +14,13 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
-from domain.events import (
+from domain.model import ModelReply
+from domain.tools import (
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
+from domain.turn_events import (
     AgentAudioDelta,
     AgentAudioInterrupted,
     AgentStreamCompleted,
@@ -26,12 +32,6 @@ from domain.events import (
     ModelStreamCompleted,
     ModelStreamEvent,
     ModelTextDelta,
-)
-from domain.model import ModelReply
-from domain.tools import (
-    ToolCall,
-    ToolResult,
-    ToolSpec,
 )
 from tools.registry import build_tool_registry
 

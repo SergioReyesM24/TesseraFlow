@@ -3,8 +3,8 @@ import json
 import pytest
 
 from domain.conversations import ConversationKey
-from domain.events import AgentTextDelta
 from domain.interactions import InteractionCommand, InteractionOutput
+from domain.turn_events import AgentTextDelta
 from infrastructure.postgres_interactions import (
     ACKNOWLEDGE_OUTPUT,
     CLAIM_NEXT_COMMAND,

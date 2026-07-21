@@ -5,11 +5,11 @@ from typing import Any
 
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationMessage
-from domain.events import (
+from domain.tools import ToolCall, ToolResult, ToolSpec
+from domain.turn_events import (
     ModelStreamCompleted,
     ModelTextDelta,
 )
-from domain.tools import ToolCall, ToolResult, ToolSpec
 from infrastructure.openai_gateway import OpenAIResponsesGateway
 
 

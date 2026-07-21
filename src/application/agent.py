@@ -12,7 +12,9 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
-from domain.events import (
+from domain.interactions import InteractionSource
+from domain.tools import ToolCallRecord
+from domain.turn_events import (
     AgentAudioDelta,
     AgentAudioInterrupted,
     AgentStreamCompleted,
@@ -25,8 +27,6 @@ from domain.events import (
     ModelStreamCompleted,
     ModelTextDelta,
 )
-from domain.interactions import InteractionSource
-from domain.tools import ToolCallRecord
 
 logger = structlog.get_logger(__name__)
 
