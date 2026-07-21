@@ -60,7 +60,7 @@ class RedisConversationCache:
             title = normalized.get("title") or None
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise InvalidConversationDataError("Cached conversation data is invalid") from exc
-        if version < 1:
+        if version < 0:
             raise InvalidConversationDataError("Cached conversation version is invalid")
         return Conversation(key=key, messages=messages, version=version, title=title)
 

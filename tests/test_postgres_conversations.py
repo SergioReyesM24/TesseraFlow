@@ -76,10 +76,11 @@ class FakePostgresConnection:
             }
             self.items[conversation_id] = []
         elif query == UPDATE_CONVERSATION:
-            conversation_id, version, last_sequence = args
+            conversation_id, version, last_sequence, title = args
             assert isinstance(conversation_id, str)
             self.conversations[conversation_id]["version"] = version
             self.conversations[conversation_id]["last_sequence"] = last_sequence
+            self.conversations[conversation_id]["title"] = title
         elif query == "DELETE FROM conversations WHERE id = $1":
             conversation_id = args[0]
             assert isinstance(conversation_id, str)
@@ -166,6 +167,19 @@ async def test_postgres_appends_and_loads_complete_tool_turn() -> None:
     assert [record["sequence"] for record in pool.connection.items["conv-1"]] == [1, 2, 3, 4]
 
 
+async def test_postgres_creates_an_empty_session_before_its_first_turn() -> None:
+    """Persist a version-zero conversation that can subsequently receive messages."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+
+    created = await store.create(key())
+    loaded = await store.load(key())
+
+    assert created == Conversation(key=key(), title="Nueva conversación")
+    assert loaded == created
+    assert pool.connection.items["conv-1"] == []
+
+
 async def test_postgres_rejects_stale_versions_and_other_owners() -> None:
     """Enforce optimistic concurrency and canonical ownership checks."""
     pool = FakePostgresPool()
@@ -247,4 +261,7 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "metadata JSONB" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS conversation_items" in combined_sql
     assert "REFERENCES conversations(id) ON DELETE CASCADE" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS a2a_threads" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS a2a_jobs" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
+    assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)

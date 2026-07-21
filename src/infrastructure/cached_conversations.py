@@ -21,6 +21,12 @@ class CachedConversationRepository(ConversationRepository):
         self._cache = cache
         self._compactor = compactor
 
+    async def create(self, key: ConversationKey) -> Conversation:
+        """Create the canonical empty conversation, then cache it best-effort."""
+        conversation = await self._canonical.create(key)
+        await self._store_best_effort(conversation)
+        return conversation
+
     async def load(self, key: ConversationKey) -> Conversation | None:
         """Read through Redis and rebuild its entry from PostgreSQL after a miss."""
         try:

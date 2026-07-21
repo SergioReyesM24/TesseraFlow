@@ -51,9 +51,9 @@ ORDER BY item.sequence
 
 INSERT_CONVERSATION = """
 INSERT INTO conversations (
-    id, user_id, tenant_id, title, version, last_sequence, last_message_at
+    id, user_id, tenant_id, title, version, last_sequence
 )
-VALUES ($1, $2, $3, $4, 0, 0, NOW())
+VALUES ($1, $2, $3, $4, 0, 0)
 """
 
 INSERT_ITEM = """
@@ -67,6 +67,7 @@ UPDATE_CONVERSATION = """
 UPDATE conversations
 SET version = $2,
     last_sequence = $3,
+    title = $4,
     updated_at = NOW(),
     last_message_at = NOW()
 WHERE id = $1
@@ -86,6 +87,21 @@ class PostgresConversationRepository(ConversationRepository):
             raise ValueError("context_item_limit must be at least 2")
         self._pool = pool
         self._context_item_limit = context_item_limit
+
+    async def create(self, key: ConversationKey) -> Conversation:
+        """Insert an empty owned conversation addressed by a caller-safe UUID."""
+        try:
+            async with self._pool.acquire() as connection:
+                await connection.execute(
+                    INSERT_CONVERSATION,
+                    key.conversation_id,
+                    key.user_id,
+                    key.tenant_id,
+                    "Nueva conversación",
+                )
+        except asyncpg.UniqueViolationError as exc:
+            raise ConversationConflictError("Conversation already exists") from exc
+        return Conversation(key=key, title="Nueva conversación")
 
     async def load(self, key: ConversationKey) -> Conversation | None:
         """Load recent complete turns after validating canonical ownership."""
@@ -107,7 +123,7 @@ class PostgresConversationRepository(ConversationRepository):
             raise InvalidPostgresConversationDataError(
                 "Canonical conversation data is invalid"
             ) from exc
-        if version < 1 or title is not None and not isinstance(title, str):
+        if version < 0 or title is not None and not isinstance(title, str):
             raise InvalidPostgresConversationDataError("Canonical conversation fields are invalid")
         return Conversation(key=key, messages=messages, version=version, title=title)
 
@@ -147,6 +163,9 @@ class PostgresConversationRepository(ConversationRepository):
                     title = row["title"]
                     last_sequence = int(row["last_sequence"])
 
+                if conversation.version == 0:
+                    title = self._default_title(turn)
+
                 turn_id = uuid.uuid4()
                 records = [
                     self._item_record(
@@ -164,6 +183,7 @@ class PostgresConversationRepository(ConversationRepository):
                     conversation.key.conversation_id,
                     version,
                     last_sequence + len(turn),
+                    title,
                 )
         except asyncpg.UniqueViolationError as exc:
             raise ConversationConflictError("Conversation was updated by another request") from exc
