@@ -23,6 +23,7 @@ from domain.events import (
     ModelStreamCompleted,
     ModelTextDelta,
 )
+from domain.interactions import InteractionSource
 from domain.tools import (
     ToolCall,
     ToolCallRecord,
@@ -66,6 +67,8 @@ class AgentService:
         message: str,
         definition: AgentDefinition,
         conversation_key: ConversationKey,
+        *,
+        source: InteractionSource = "text_user",
     ) -> AgentResult:
         """Continue and persist one owned conversation after a complete model run."""
         conversation = await self._load_conversation(conversation_key)
@@ -74,7 +77,9 @@ class AgentService:
             definition, selected_tools.specs, conversation.messages
         )
         records: list[ToolCallRecord] = []
-        turn_items: list[ConversationItem] = [ConversationMessage(role="user", content=message)]
+        turn_items: list[ConversationItem] = [
+            ConversationMessage(role="user", content=message, source=source)
+        ]
 
         logger.info(
             "agent_run_started",
@@ -118,7 +123,9 @@ class AgentService:
             conversation_id=conversation_key.conversation_id,
             tool_calls=tuple(records),
         )
-        turn_items.append(ConversationMessage(role="assistant", content=result.answer))
+        turn_items.append(
+            ConversationMessage(role="assistant", content=result.answer, source="assistant")
+        )
         await self._persist_turn(conversation, tuple(turn_items))
         return result
 
@@ -127,6 +134,8 @@ class AgentService:
         message: str,
         definition: AgentDefinition,
         conversation_key: ConversationKey,
+        *,
+        source: InteractionSource = "text_user",
     ) -> AsyncGenerator[AgentStreamEvent, None]:
         """Stream one conversation turn and persist it before terminal success."""
         conversation = await self._load_conversation(conversation_key)
@@ -136,7 +145,9 @@ class AgentService:
         )
         model_events = session.stream_message(message)
         records: list[ToolCallRecord] = []
-        turn_items: list[ConversationItem] = [ConversationMessage(role="user", content=message)]
+        turn_items: list[ConversationItem] = [
+            ConversationMessage(role="user", content=message, source=source)
+        ]
 
         logger.info(
             "agent_stream_started",
@@ -173,7 +184,13 @@ class AgentService:
                     conversation_id=conversation_key.conversation_id,
                     tool_calls=tuple(records),
                 )
-                turn_items.append(ConversationMessage(role="assistant", content=result.answer))
+                turn_items.append(
+                    ConversationMessage(
+                        role="assistant",
+                        content=result.answer,
+                        source="assistant",
+                    )
+                )
                 await self._persist_turn(conversation, tuple(turn_items))
                 logger.info(
                     "agent_stream_completed",

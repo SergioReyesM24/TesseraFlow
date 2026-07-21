@@ -4,6 +4,7 @@ from api.schemas import AgentCompletedResponse, ToolCallResponse
 from domain.events import (
     AgentStreamCompleted,
     AgentStreamEvent,
+    AgentStreamFailed,
     AgentTextDelta,
     AgentToolCompleted,
     AgentToolStarted,
@@ -31,4 +32,6 @@ def agent_event_payload(event: AgentStreamEvent) -> tuple[str, dict[str, Any]]:
     if isinstance(event, AgentStreamCompleted):
         completed_payload = AgentCompletedResponse.from_result(event.result)
         return "completed", completed_payload.model_dump(mode="json")
+    if isinstance(event, AgentStreamFailed):
+        return "error", {"code": event.code, "message": event.message}
     raise TypeError(f"Unsupported agent stream event: {type(event).__name__}")

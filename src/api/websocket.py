@@ -1,6 +1,4 @@
 import asyncio
-from collections.abc import AsyncGenerator
-from contextlib import aclosing
 from uuid import UUID
 
 import structlog
@@ -9,14 +7,10 @@ from pydantic import ValidationError
 
 from api.event_payloads import agent_event_payload
 from api.schemas import AgentWebSocketRequest
-from application.agent import AgentService
-from domain.agent import AgentDefinition
+from application.interactions import ConversationCoordinator, InteractionQueueFullError
 from domain.conversations import ConversationKey
-from domain.events import AgentStreamEvent
 
 logger = structlog.get_logger(__name__)
-
-MAX_PENDING_MESSAGES = 8
 
 
 class InvalidWebSocketMessageError(ValueError):
@@ -25,71 +19,59 @@ class InvalidWebSocketMessageError(ValueError):
 
 async def serve_agent_websocket(
     websocket: WebSocket,
-    agent_service: AgentService,
-    definition: AgentDefinition,
+    coordinator: ConversationCoordinator,
     conversation_key: ConversationKey,
 ) -> None:
-    """Receive turns and stream correlated agent events over one persistent socket."""
-    requests: asyncio.Queue[AgentWebSocketRequest] = asyncio.Queue(maxsize=MAX_PENDING_MESSAGES)
+    """Enqueue inputs and deliver durable outputs over one persistent socket."""
     send_lock = asyncio.Lock()
-    disconnected = asyncio.Event()
     try:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(
-                _receive_requests(websocket, requests, send_lock, disconnected),
+                _receive_requests(websocket, coordinator, conversation_key, send_lock),
                 name=f"agent-ws-receiver-{conversation_key.conversation_id}",
             )
             tasks.create_task(
-                _process_requests(
-                    websocket,
-                    requests,
-                    send_lock,
-                    disconnected,
-                    agent_service,
-                    definition,
-                    conversation_key,
-                ),
-                name=f"agent-ws-processor-{conversation_key.conversation_id}",
+                _send_pending_outputs(websocket, coordinator, conversation_key, send_lock),
+                name=f"agent-ws-sender-{conversation_key.conversation_id}",
             )
     except* WebSocketDisconnect:
-        logger.info("agent_websocket_disconnected_during_send")
+        logger.info("agent_websocket_disconnected")
 
 
 async def _receive_requests(
     websocket: WebSocket,
-    requests: asyncio.Queue[AgentWebSocketRequest],
+    coordinator: ConversationCoordinator,
+    conversation_key: ConversationKey,
     send_lock: asyncio.Lock,
-    disconnected: asyncio.Event,
 ) -> None:
-    """Validate incoming text frames without building an unbounded request buffer."""
-    try:
-        while True:
-            try:
-                request = await _receive_request(websocket)
-            except InvalidWebSocketMessageError:
-                await _send_error(
-                    websocket,
-                    send_lock,
-                    request_id=None,
-                    code="invalid_message",
-                    message="Expected a valid JSON message frame.",
-                )
-                continue
-
-            try:
-                requests.put_nowait(request)
-            except asyncio.QueueFull:
-                await _send_error(
-                    websocket,
-                    send_lock,
-                    request_id=request.request_id,
-                    code="too_many_pending_messages",
-                    message="Wait for pending agent turns to complete before sending more.",
-                )
-    except WebSocketDisconnect as exc:
-        logger.info("agent_websocket_disconnected", close_code=exc.code)
-    finally:
-        disconnected.set()
+    """Validate frames and persist them without coupling socket life to execution."""
+    while True:
+        try:
+            request = await _receive_request(websocket)
+        except InvalidWebSocketMessageError:
+            await _send_error(
+                websocket,
+                send_lock,
+                request_id=None,
+                code="invalid_message",
+                message="Expected a valid JSON message frame.",
+            )
+            continue
+        try:
+            await coordinator.submit(
+                request.message,
+                conversation_key,
+                request_id=str(request.request_id),
+                source="text_user",
+            )
+        except InteractionQueueFullError:
+            await _send_error(
+                websocket,
+                send_lock,
+                request_id=request.request_id,
+                code="too_many_pending_messages",
+                message="Wait for pending agent turns to complete before sending more.",
+            )
 
 
 async def _receive_request(websocket: WebSocket) -> AgentWebSocketRequest:
@@ -109,132 +91,24 @@ async def _receive_request(websocket: WebSocket) -> AgentWebSocketRequest:
         raise InvalidWebSocketMessageError from exc
 
 
-async def _process_requests(
+async def _send_pending_outputs(
     websocket: WebSocket,
-    requests: asyncio.Queue[AgentWebSocketRequest],
-    send_lock: asyncio.Lock,
-    disconnected: asyncio.Event,
-    agent_service: AgentService,
-    definition: AgentDefinition,
+    coordinator: ConversationCoordinator,
     conversation_key: ConversationKey,
+    send_lock: asyncio.Lock,
 ) -> None:
-    """Run accepted turns sequentially so conversation updates preserve their order."""
-    while True:
-        request = await _next_request(requests, disconnected)
-        if request is None:
-            return
-        request_id = str(request.request_id)
-        try:
-            with structlog.contextvars.bound_contextvars(request_id=request_id):
-                completed = await _stream_turn_until_disconnected(
-                    websocket,
-                    send_lock,
-                    request,
-                    disconnected,
-                    agent_service,
-                    definition,
-                    conversation_key,
-                )
-                if not completed:
-                    return
-        except WebSocketDisconnect:
-            raise
-        except Exception as exc:
-            logger.exception("agent_websocket_turn_failed", error_type=type(exc).__name__)
-            await _send_error(
-                websocket,
-                send_lock,
-                request_id=request.request_id,
-                code="agent_error",
-                message="The agent turn could not be completed.",
-            )
-        finally:
-            requests.task_done()
-
-
-async def _next_request(
-    requests: asyncio.Queue[AgentWebSocketRequest],
-    disconnected: asyncio.Event,
-) -> AgentWebSocketRequest | None:
-    """Wait for a queued turn while allowing a disconnect to stop the processor."""
-    request_task = asyncio.create_task(requests.get())
-    disconnect_task = asyncio.create_task(disconnected.wait())
-    try:
-        await asyncio.wait(
-            {request_task, disconnect_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if disconnected.is_set():
-            return None
-        return request_task.result()
-    finally:
-        for task in (request_task, disconnect_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(request_task, disconnect_task, return_exceptions=True)
-
-
-async def _stream_turn_until_disconnected(
-    websocket: WebSocket,
-    send_lock: asyncio.Lock,
-    request: AgentWebSocketRequest,
-    disconnected: asyncio.Event,
-    agent_service: AgentService,
-    definition: AgentDefinition,
-    conversation_key: ConversationKey,
-) -> bool:
-    """Cancel an active model stream promptly when the socket reader disconnects."""
-    turn_task = asyncio.create_task(
-        _stream_turn(
+    """Deliver live and offline-completed events until the socket disconnects."""
+    async for output in coordinator.stream_pending_outputs(conversation_key):
+        event_type, data = agent_event_payload(output.event)
+        await _send_json(
             websocket,
             send_lock,
-            request,
-            agent_service,
-            definition,
-            conversation_key,
+            {
+                "type": event_type,
+                "request_id": output.request_id,
+                "data": data,
+            },
         )
-    )
-    disconnect_task = asyncio.create_task(disconnected.wait())
-    try:
-        await asyncio.wait(
-            {turn_task, disconnect_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if disconnected.is_set():
-            return False
-        await turn_task
-        return True
-    finally:
-        for task in (turn_task, disconnect_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(turn_task, disconnect_task, return_exceptions=True)
-
-
-async def _stream_turn(
-    websocket: WebSocket,
-    send_lock: asyncio.Lock,
-    request: AgentWebSocketRequest,
-    agent_service: AgentService,
-    definition: AgentDefinition,
-    conversation_key: ConversationKey,
-) -> None:
-    """Forward one application event stream and close it on cancellation."""
-    events: AsyncGenerator[AgentStreamEvent, None] = agent_service.stream(
-        request.message, definition, conversation_key
-    )
-    async with aclosing(events):
-        async for event in events:
-            event_type, data = agent_event_payload(event)
-            await _send_json(
-                websocket,
-                send_lock,
-                {
-                    "type": event_type,
-                    "request_id": str(request.request_id),
-                    "data": data,
-                },
-            )
 
 
 async def _send_error(

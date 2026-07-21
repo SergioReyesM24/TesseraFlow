@@ -5,6 +5,7 @@ from domain.a2a import A2AJob, A2AThread
 from domain.agent import AgentDefinition
 from domain.conversations import Conversation, ConversationItem, ConversationKey
 from domain.events import ModelStreamEvent
+from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
 from domain.tools import ToolResult, ToolSpec
 
@@ -42,6 +43,14 @@ class ModelGateway(Protocol):
         history: tuple[ConversationItem, ...],
     ) -> ModelSession:
         """Create an isolated session backed by shared provider resources."""
+        ...
+
+
+class InteractiveAgent(Protocol):
+    """Advance one interactive command through a text, speech, or future modality."""
+
+    def stream(self, command: InteractionCommand) -> AsyncIterator[InteractionEmission]:
+        """Produce neutral, modality-tagged events for one serialized command."""
         ...
 
 
@@ -122,14 +131,68 @@ class A2AJobRepository(Protocol):
         worker_id: str,
         answer: str,
         response_id: str,
+        notification_message: str,
     ) -> None:
-        """Store a successful worker response for the active claim."""
+        """Atomically store success and publish its parent-conversation command."""
         ...
 
-    async def fail(self, job_id: str, worker_id: str, error_code: str) -> None:
-        """Store a safe failure code for the active claim."""
+    async def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        error_code: str,
+        notification_message: str,
+    ) -> None:
+        """Atomically store failure and publish its parent-conversation command."""
         ...
 
     async def requeue(self, job_id: str, worker_id: str) -> None:
         """Release an interrupted claim so another worker can resume it."""
+        ...
+
+
+class InteractionRepository(Protocol):
+    """Persist serialized conversation inputs and their durable delivery outbox."""
+
+    async def enqueue(self, command: InteractionCommand) -> None:
+        """Append one command while enforcing the conversation's queue limit."""
+        ...
+
+    async def claim_next(
+        self,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> InteractionCommand | None:
+        """Lease the oldest runnable command while serializing each conversation."""
+        ...
+
+    async def append_output(self, output: InteractionOutput) -> None:
+        """Append one idempotent event to the durable outbox."""
+        ...
+
+    async def complete(self, command_id: str, worker_id: str) -> None:
+        """Mark an owned command completed after its terminal output is durable."""
+        ...
+
+    async def fail(self, command_id: str, worker_id: str, error_code: str) -> None:
+        """Mark an owned command failed using a safe diagnostic code."""
+        ...
+
+    async def requeue(self, command_id: str, worker_id: str) -> None:
+        """Release an interrupted command for another coordinator process."""
+        ...
+
+    async def load_outputs(
+        self,
+        conversation: ConversationKey,
+        *,
+        after_sequence: int,
+        command_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[InteractionOutput, ...]:
+        """Load ordered undelivered outputs through their ownership boundary."""
+        ...
+
+    async def acknowledge(self, output_id: str, conversation: ConversationKey) -> None:
+        """Mark one owned output delivered after a transport sends it successfully."""
         ...

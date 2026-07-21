@@ -29,6 +29,33 @@ class A2AMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class A2ACompletionMessage:
+    """Versioned worker result presented as non-instructional structured data."""
+
+    job_id: str
+    thread_id: str
+    status: Literal["completed", "failed"]
+    answer: str | None = None
+    error_code: str | None = None
+
+    def serialize(self) -> str:
+        """Encode a deterministic result envelope for a fresh primary-agent turn."""
+        return json.dumps(
+            {
+                "protocol": "tesseraflow.a2a.result",
+                "version": 1,
+                "job_id": self.job_id,
+                "thread_id": self.thread_id,
+                "status": self.status,
+                "answer": self.answer,
+                "error_code": self.error_code,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class A2AThread:
     """Durable conversation that lets one agent address another as a user."""
 

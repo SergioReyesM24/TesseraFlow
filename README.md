@@ -33,12 +33,14 @@ Redis o FastAPI.
 - Agente interactivo aislado de las tools pesadas mediante tres tools de protocolo A2A.
 - Conversaciones propias del worker, con historial de tool calls y respuestas entre jobs.
 - Cola durable en PostgreSQL con leases, recuperación y orden estricto por thread A2A.
+- Inbox por conversación que serializa mensajes de usuario y finalizaciones del worker.
+- Respuesta proactiva al completar jobs mediante un outbox durable y recuperable.
 - Consulta de estados públicos `queued`, `running`, `completed` y `failed`.
 - Sesiones de modelo aisladas por turno sobre un único cliente HTTP compartido.
 - Function calling estricto con argumentos validados por Pydantic.
 - Ejecución concurrente de las tools que el worker solicita en una misma respuesta.
 - WebSocket persistente con eventos neutrales, varios turnos y correlación por `request_id`.
-- Backpressure mediante una cola acotada y un único evento terminal `completed` por turno.
+- Un único evento terminal `completed` o `error` por comando aceptado.
 - Historial multiusuario canónico y append-only en PostgreSQL.
 - Contexto reciente en Redis con TTL, compactación y recuperación tras cache miss.
 - Creación explícita de sesiones con UUID antes de aceptar mensajes.
@@ -141,15 +143,20 @@ resultado completo:
 ```mermaid
 flowchart LR
     Client[Cliente] --> API[FastAPI / WebSocket]
-    API --> Service[AgentService]
-    Service --> Interactive[Agente interactivo]
+    API --> Inbox[(Interaction inbox)]
+    Inbox --> Coordinator[ConversationCoordinator]
+    Coordinator --> Interactive[InteractiveAgent]
+    Interactive --> Service[TextInteractionAgent / AgentService]
     Interactive --> Protocol[Tools A2A]
     Protocol --> Jobs[(Jobs PostgreSQL)]
     Jobs --> Worker[Agente worker]
+    Worker --> Inbox
     Worker --> Tools[Tools operativas]
     Interactive --> Gateway[ModelGateway]
     Worker --> Gateway
     Gateway --> OpenAI[OpenAI Responses API]
+    Coordinator --> Outbox[(Interaction outbox)]
+    Outbox --> API
     Service --> Repository[ConversationRepository]
     Repository --> Cached[CachedConversationRepository]
     Cached --> PostgreSQL[(PostgreSQL canónico)]
@@ -157,8 +164,8 @@ flowchart LR
 
     classDef core fill:#e8f5e9,stroke:#198754,color:#102a13
     classDef adapter fill:#eef4ff,stroke:#3776ab,color:#10253f
-    class Service,Interactive,Protocol,Worker,Gateway,Repository core
-    class API,OpenAI,Tools,Jobs,Cached,PostgreSQL,Redis adapter
+    class Coordinator,Service,Interactive,Protocol,Worker,Gateway,Repository core
+    class API,Inbox,Outbox,OpenAI,Tools,Jobs,Cached,PostgreSQL,Redis adapter
 ```
 
 La dirección de dependencias siempre apunta hacia el núcleo:
@@ -183,6 +190,11 @@ api ----------> application <---------- infrastructure
 Los formatos de OpenAI —por ejemplo `function_call_output`— se traducen exclusivamente
 en `OpenAIModelSession`.
 
+`ConversationCoordinator` depende del puerto `InteractiveAgent`, no de un modelo de
+texto concreto. `TextInteractionAgent` adapta el `AgentService` actual y etiqueta sus
+emisiones como texto. Un adaptador STS futuro podrá implementar el mismo puerto y emitir
+audio sin modificar la serialización por conversación ni el worker A2A.
+
 ## Protocolo entre agentes
 
 El agente que habla con el usuario no tiene acceso a `calculator`, `current_time` ni a
@@ -201,7 +213,7 @@ usuario -> agente interactivo -> delegate_to_worker_agent -> queued
 PostgreSQL <- worker agent <- tools operativas <- ModelSession propia
      |
      v
-get_worker_agent_status -> informe -> agente interactivo -> usuario
+comando worker_completed -> coordinador -> agente interactivo -> outbox -> usuario
 ```
 
 Cada thread A2A apunta a una conversación interna independiente. El mensaje generado por
@@ -216,9 +228,16 @@ historial en lugar de invocar otra vez al modelo.
 
 Los jobs de un mismo thread se ejecutan en orden. Varios procesos pueden reclamar jobs
 distintos con `FOR UPDATE SKIP LOCKED`; una lease vencida permite recuperar trabajo tras
-una caída. El worker nunca escribe directamente al WebSocket. Actualmente el resultado
-se incorpora cuando el usuario envía otro turno y el agente interactivo consulta el job;
-la entrega proactiva mediante outbox permanece en el roadmap.
+una caída. Al terminar, el repositorio cambia el estado del job y crea un comando
+`worker_completed` en una sola operación SQL. El worker nunca llama al modelo principal
+ni escribe directamente al WebSocket.
+
+`ConversationCoordinator` reclama tanto ese comando como los mensajes del usuario desde
+la misma inbox. Solo permite un comando activo por conversación, así que si ambos llegan
+a la vez gana el menor `sequence`; el otro espera y después carga el historial ya
+actualizado. El resultado A2A usa el envelope versionado `tesseraflow.a2a.result` y abre
+un turno nuevo del agente interactivo. Sus eventos se guardan en el outbox antes de ser
+entregados, por lo que siguen disponibles si no hay un socket conectado.
 
 ## Pipeline de conversaciones
 
@@ -235,13 +254,17 @@ El flujo de una interacción es el siguiente:
 sequenceDiagram
     participant C as Cliente
     participant A as FastAPI
+    participant I as Interaction inbox
+    participant K as ConversationCoordinator
     participant S as AgentService
     participant R as ConversationRepository
     participant M as ModelSession
 
     C->>A: message + session_uid + owner
     A->>R: validar sesión y propietario
-    A->>S: stream(message, definition, key)
+    A->>I: enqueue(text_user)
+    K->>I: claim_next por conversación
+    K->>S: stream(command.message, source)
     S->>R: load(ConversationKey)
     R-->>S: Conversation o None
     S->>M: historial neutral + mensaje actual
@@ -251,8 +274,10 @@ sequenceDiagram
     S->>R: save_turn(Conversation, turn)
     R->>R: append canónico y compactación de caché
     R-->>S: Conversation con nueva versión
-    S-->>A: AgentResult
-    A-->>C: frames JSON hasta completed
+    S-->>K: eventos neutrales
+    K->>I: append outbox + complete command
+    I-->>A: eventos pendientes
+    A-->>C: frames JSON hasta completed/error
 ```
 
 ### El puerto `ConversationRepository`
@@ -298,6 +323,16 @@ a2a_jobs
 ├── thread_id, sequence, message, status
 ├── worker_id, lease_expires_at, attempt_count
 └── answer, response_id, error_code
+
+interaction_commands
+├── conversation_id, request_id, kind, source, message
+├── sequence, status, worker_id, lease_expires_at
+└── causation_id, attempt_count, error_code
+
+interaction_outbox
+├── command_id, conversation_id, request_id, modality
+├── sequence, event_type, payload JSONB
+└── delivered_at
 ```
 
 La identidad persistente interna es `conversation_id`, expuesta por la API como
@@ -342,9 +377,12 @@ Tras el evento `connected`, el cliente puede enviar varios turnos por la misma c
 }
 ```
 
-`request_id` es opcional; si falta, el servidor genera un UUID. Todos los eventos de un
-turno repiten ese identificador. Los turnos recibidos por una conexión se procesan en
-orden y la cola admite como máximo ocho pendientes.
+`request_id` es opcional; si falta, el servidor genera un UUID. No forma parte de la URL
+ni identifica la conexión: únicamente correlaciona un mensaje aceptado con sus eventos.
+La aplicación genera además un `command_id` interno. Todos los comandos de una
+conversación —incluidos los resultados A2A— se procesan por `sequence` en PostgreSQL.
+Las respuestas proactivas usan el `job_id` como `request_id`, de modo que el cliente puede
+relacionarlas con el identificador devuelto al delegar.
 
 El protocolo público utiliza eventos neutrales al proveedor:
 
@@ -366,10 +404,10 @@ El protocolo público utiliza eventos neutrales al proveedor:
 ```
 
 Los argumentos fragmentados se acumulan dentro del adaptador antes de exponer un
-`ToolCall`. Si el cliente se desconecta, se cancela el generador y se cierra únicamente
-el stream de ese turno; el cliente compartido permanece disponible. Los frames inválidos
-y los fallos de un turno producen un evento `error` seguro sin cerrar necesariamente el
-socket.
+`ToolCall`. Si el cliente se desconecta, el comando aceptado continúa fuera del ciclo de
+vida del socket. Sus salidas no confirmadas permanecen en el outbox y se entregan al
+reconectar a la misma conversación. Los frames inválidos y los fallos de un comando
+producen un evento `error` seguro sin exponer detalles internos.
 
 `POST /v1/agent/stream` continúa disponible temporalmente como transporte SSE de
 compatibilidad. Los nuevos clientes deben usar el WebSocket.
@@ -402,8 +440,8 @@ curl -X DELETE \
 
 `weekly_balance_history` solo está registrada en el worker. Para probar el recorrido
 completo de la doble capa, pide al agente interactivo «devuelve mi historial de saldo
-por semana». El primer turno delega el trabajo y devuelve sus identificadores; en un
-turno posterior, pídele que consulte el job para incorporar el resultado ya completado.
+por semana». El primer turno responde que va a consultarlo; cuando el job termina, el
+agente interactivo recibe el resultado y responde proactivamente por el mismo WebSocket.
 
 `send_mock_bizum_to_mom` también pertenece exclusivamente al worker. Exige un importe
 positivo, no permite cambiar el destinatario y devuelve un justificante sintético con
@@ -479,6 +517,10 @@ modificar los archivos versionados.
 | `MAX_TOOL_ROUNDS` | `8` | Límite contra bucles de tools. |
 | `A2A_WORKER_POLL_SECONDS` | `0.5` | Intervalo de sondeo de la cola durable. |
 | `A2A_JOB_TIMEOUT_SECONDS` | `600` | Tiempo máximo de un turno del worker. |
+| `INTERACTION_COORDINATOR_POLL_SECONDS` | `0.1` | Sondeo de comandos para el modelo interactivo. |
+| `INTERACTION_OUTPUT_POLL_SECONDS` | `0.05` | Sondeo de eventos pendientes por los transportes. |
+| `INTERACTION_COMMAND_TIMEOUT_SECONDS` | `120` | Tiempo máximo de un turno interactivo. |
+| `INTERACTION_MAX_PENDING_COMMANDS` | `16` | Entradas de usuario pendientes permitidas por conversación. |
 | `CONVERSATION_TTL_SECONDS` | `604800` | TTL de la caché; no borra PostgreSQL. |
 | `CONVERSATION_MAX_MESSAGES` | `100` | Máximo de elementos en el contexto reciente. |
 | `CONVERSATION_MAX_CHARACTERS` | `200000` | Límite lógico del contexto reciente. |
@@ -495,13 +537,20 @@ Consulta [.env.example](.env.example) para ver una configuración completa.
 - Cada ejecución crea una `ModelSession` ligera con su propio estado efímero.
 - No se guarda usuario, historial ni `response_id` en servicios compartidos.
 - El worker se inicia y detiene con el `lifespan`; una interrupción libera su job.
+- El coordinador se inicia con el `lifespan`; una interrupción libera su comando.
 - Los jobs sobreviven a reinicios y una lease vencida permite reclamarlos de nuevo.
 - Dos jobs del mismo thread nunca se ejecutan a la vez.
-- Un lector independiente detecta el cierre del WebSocket y cancela el turno activo.
-- Los turnos de una conexión se procesan secuencialmente y su cola es acotada.
+- Dos comandos de la misma conversación nunca invocan a la vez al modelo interactivo.
+- Un cierre del WebSocket detiene la entrega, no el comando durable ya aceptado.
+- Un outbox sin confirmar permite reanudar la entrega tras una reconexión.
 - Las tools operativas solo se exponen al worker. Si solicita varias, actualmente se
   ejecutan concurrentemente y sus resultados se devuelven juntos.
 - Las cancelaciones se propagan y los streams se liberan mediante context managers.
+
+`InteractionCommand.source` distingue `text_user`, `speech_user` y `worker_agent`, y
+`InteractionOutput.modality` distingue `text` y `audio`. Hoy solo hay gateways y eventos
+de texto. Estas etiquetas permiten incorporar una sesión STS como otro productor y
+consumidor del mismo coordinador, sin duplicar la inbox, las leases ni el protocolo A2A.
 
 ## Seguridad y límites actuales
 

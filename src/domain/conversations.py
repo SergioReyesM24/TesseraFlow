@@ -19,6 +19,16 @@ class ConversationMessage:
 
     role: Literal["user", "assistant"]
     content: str
+    source: Literal["text_user", "speech_user", "worker_agent", "assistant"] | None = None
+
+    def __post_init__(self) -> None:
+        """Infer and validate provenance without changing provider-facing roles."""
+        source = self.source or ("assistant" if self.role == "assistant" else "text_user")
+        if self.role == "assistant" and source != "assistant":
+            raise ValueError("Assistant messages must use the assistant source")
+        if self.role == "user" and source == "assistant":
+            raise ValueError("User messages must use an input source")
+        object.__setattr__(self, "source", source)
 
 
 ConversationItem: TypeAlias = ConversationMessage | ToolCall | ToolResult

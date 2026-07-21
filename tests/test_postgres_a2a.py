@@ -84,6 +84,8 @@ class FakeConnection:
             } | {"status": "running"}
         if query == SELECT_THREAD_FOR_JOB:
             return {key: value for key, value in self.thread_row.items() if key != "id"}
+        if query == COMPLETE_JOB:
+            return {"id": "a2a-result:job-1"} if self.update_status == "UPDATE 1" else None
         raise AssertionError(f"Unexpected query: {query}")
 
 
@@ -179,9 +181,33 @@ async def test_postgres_a2a_rejects_completion_after_a_claim_is_lost() -> None:
     pool.connection.update_status = "UPDATE 0"
 
     with pytest.raises(RuntimeError, match="claim was lost"):
-        await repository(pool).complete("job-1", "old-process", "Respuesta", "resp-1")
+        await repository(pool).complete(
+            "job-1",
+            "old-process",
+            "Respuesta",
+            "resp-1",
+            "notification",
+        )
 
     assert (
         COMPLETE_JOB,
-        ("job-1", "old-process", "Respuesta", "resp-1"),
+        ("job-1", "old-process", "Respuesta", "resp-1", "notification"),
+    ) in pool.connection.executed
+
+
+async def test_postgres_a2a_publishes_completion_with_the_job_update() -> None:
+    """Use one SQL statement for terminal state and parent-conversation wake-up."""
+    pool = FakePool()
+
+    await repository(pool).complete(
+        "job-1",
+        "process-1",
+        "Respuesta",
+        "resp-1",
+        "notification",
+    )
+
+    assert (
+        COMPLETE_JOB,
+        ("job-1", "process-1", "Respuesta", "resp-1", "notification"),
     ) in pool.connection.executed

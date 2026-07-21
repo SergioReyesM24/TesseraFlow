@@ -81,27 +81,61 @@ RETURNING job.id, job.thread_id, job.message, job.status, job.answer,
 """
 
 COMPLETE_JOB = """
-UPDATE a2a_jobs
-SET status = 'completed',
-    answer = $3,
-    response_id = $4,
-    error_code = NULL,
-    worker_id = NULL,
-    lease_expires_at = NULL,
-    completed_at = NOW()
-WHERE id = $1 AND worker_id = $2 AND status = 'running'
+WITH completed AS (
+    UPDATE a2a_jobs
+    SET status = 'completed',
+        answer = $3,
+        response_id = $4,
+        error_code = NULL,
+        worker_id = NULL,
+        lease_expires_at = NULL,
+        completed_at = NOW()
+    WHERE id = $1 AND worker_id = $2 AND status = 'running'
+    RETURNING id, thread_id
+)
+INSERT INTO interaction_commands (
+    id, request_id, conversation_id, kind, source, message, causation_id
+)
+SELECT 'a2a-result:' || completed.id,
+       completed.id,
+       thread.parent_conversation_id,
+       'worker_completed',
+       'worker_agent',
+       $5,
+       completed.id
+FROM completed
+JOIN a2a_threads AS thread ON thread.id = completed.thread_id
+ON CONFLICT (id) DO NOTHING
+RETURNING id
 """
 
 FAIL_JOB = """
-UPDATE a2a_jobs
-SET status = 'failed',
-    answer = NULL,
-    response_id = NULL,
-    error_code = $3,
-    worker_id = NULL,
-    lease_expires_at = NULL,
-    completed_at = NOW()
-WHERE id = $1 AND worker_id = $2 AND status = 'running'
+WITH failed AS (
+    UPDATE a2a_jobs
+    SET status = 'failed',
+        answer = NULL,
+        response_id = NULL,
+        error_code = $3,
+        worker_id = NULL,
+        lease_expires_at = NULL,
+        completed_at = NOW()
+    WHERE id = $1 AND worker_id = $2 AND status = 'running'
+    RETURNING id, thread_id
+)
+INSERT INTO interaction_commands (
+    id, request_id, conversation_id, kind, source, message, causation_id
+)
+SELECT 'a2a-result:' || failed.id,
+       failed.id,
+       thread.parent_conversation_id,
+       'worker_completed',
+       'worker_agent',
+       $4,
+       failed.id
+FROM failed
+JOIN a2a_threads AS thread ON thread.id = failed.thread_id
+ON CONFLICT (id) DO NOTHING
+RETURNING id
 """
 
 REQUEUE_JOB = """
@@ -199,23 +233,37 @@ class PostgresA2AJobRepository(A2AJobRepository):
         worker_id: str,
         answer: str,
         response_id: str,
+        notification_message: str,
     ) -> None:
-        """Commit the answer only if this process still owns the running job."""
-        async with self._pool.acquire() as connection:
-            status = await connection.execute(
+        """Commit success and its parent notification in one SQL statement."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
                 COMPLETE_JOB,
                 job_id,
                 worker_id,
                 answer,
                 response_id,
+                notification_message,
             )
-        self._require_updated(status, job_id)
+        self._require_published(row, job_id)
 
-    async def fail(self, job_id: str, worker_id: str, error_code: str) -> None:
-        """Commit a safe failure only for the active lease owner."""
-        async with self._pool.acquire() as connection:
-            status = await connection.execute(FAIL_JOB, job_id, worker_id, error_code)
-        self._require_updated(status, job_id)
+    async def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        error_code: str,
+        notification_message: str,
+    ) -> None:
+        """Commit failure and its parent notification in one SQL statement."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
+                FAIL_JOB,
+                job_id,
+                worker_id,
+                error_code,
+                notification_message,
+            )
+        self._require_published(row, job_id)
 
     async def requeue(self, job_id: str, worker_id: str) -> None:
         """Make an interrupted job immediately claimable by another worker."""
@@ -258,4 +306,10 @@ class PostgresA2AJobRepository(A2AJobRepository):
     def _require_updated(status: str, job_id: str) -> None:
         """Reject stale workers whose lease was already reclaimed."""
         if status != "UPDATE 1":
+            raise RuntimeError(f"A2A job claim was lost: {job_id}")
+
+    @staticmethod
+    def _require_published(row: Any, job_id: str) -> None:
+        """Reject stale workers when no terminal command could be published."""
+        if row is None:
             raise RuntimeError(f"A2A job claim was lost: {job_id}")

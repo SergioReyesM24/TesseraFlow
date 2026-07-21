@@ -9,7 +9,7 @@ from application.a2a import A2AJobNotFoundError, A2AService, A2AWorker
 from application.agent import AgentService
 from application.conversations import ConversationConflictError
 from application.tools import ToolRegistry
-from domain.a2a import A2AJob, A2AMessage, A2AThread
+from domain.a2a import A2ACompletionMessage, A2AJob, A2AMessage, A2AThread
 from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
@@ -78,6 +78,7 @@ class InMemoryA2AJobRepository:
         self.jobs: dict[str, A2AJob] = {}
         self.order: list[str] = []
         self.claims: dict[str, str] = {}
+        self.notifications: list[str] = []
 
     async def create_thread(self, thread: A2AThread, first_job: A2AJob) -> None:
         """Store a thread and its initial job."""
@@ -136,6 +137,7 @@ class InMemoryA2AJobRepository:
         worker_id: str,
         answer: str,
         response_id: str,
+        notification_message: str,
     ) -> None:
         """Store a completed answer for the active owner."""
         assert self.claims.pop(job_id) == worker_id
@@ -145,8 +147,15 @@ class InMemoryA2AJobRepository:
             answer=answer,
             response_id=response_id,
         )
+        self.notifications.append(notification_message)
 
-    async def fail(self, job_id: str, worker_id: str, error_code: str) -> None:
+    async def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        error_code: str,
+        notification_message: str,
+    ) -> None:
         """Store a safe failure for the active owner."""
         assert self.claims.pop(job_id) == worker_id
         self.jobs[job_id] = replace(
@@ -154,6 +163,7 @@ class InMemoryA2AJobRepository:
             status="failed",
             error_code=error_code,
         )
+        self.notifications.append(notification_message)
 
     async def requeue(self, job_id: str, worker_id: str) -> None:
         """Release a claim back to queued state."""
@@ -269,8 +279,22 @@ async def test_worker_keeps_its_own_history_across_a2a_followups() -> None:
                 message_id=first.job_id,
                 content="Investiga la petición con tus tools",
             ).serialize(),
+            source="worker_agent",
         ),
-        ConversationMessage(role="assistant", content="Informe inicial con contexto adicional"),
+        ConversationMessage(
+            role="assistant",
+            content="Informe inicial con contexto adicional",
+            source="assistant",
+        ),
+    )
+    assert (
+        jobs.notifications[0]
+        == A2ACompletionMessage(
+            job_id=first.job_id,
+            thread_id=first.thread_id,
+            status="completed",
+            answer="Informe inicial con contexto adicional",
+        ).serialize()
     )
 
 
@@ -347,7 +371,7 @@ async def test_a2a_queue_serializes_messages_within_one_thread() -> None:
     assert claimed.job_id == first.job_id
     assert blocked is None
 
-    await jobs.complete(first.job_id, "worker-1", "Hecho", "resp-1")
+    await jobs.complete(first.job_id, "worker-1", "Hecho", "resp-1", "notification")
     next_job = await jobs.claim_next("worker-2", 30)
     assert next_job is not None
     assert next_job.job_id == second.job_id

@@ -52,6 +52,18 @@ class AgentStreamCompleted:
     result: AgentResult
 
 
+@dataclass(frozen=True, slots=True)
+class AgentStreamFailed:
+    """Terminal safe failure emitted when an interactive command cannot complete."""
+
+    code: str
+    message: str
+
+
 AgentStreamEvent: TypeAlias = (
-    AgentTextDelta | AgentToolStarted | AgentToolCompleted | AgentStreamCompleted
+    AgentTextDelta
+    | AgentToolStarted
+    | AgentToolCompleted
+    | AgentStreamCompleted
+    | AgentStreamFailed
 )

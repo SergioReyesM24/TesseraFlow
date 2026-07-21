@@ -7,7 +7,12 @@ from domain.tools import ToolCall, ToolResult
 def encode_conversation_item(item: ConversationItem) -> dict[str, object]:
     """Serialize one neutral history item with a stable type discriminator."""
     if isinstance(item, ConversationMessage):
-        return {"type": "message", "role": item.role, "content": item.content}
+        return {
+            "type": "message",
+            "role": item.role,
+            "content": item.content,
+            "source": item.source,
+        }
     if isinstance(item, ToolCall):
         return {
             "type": "tool_call",
@@ -32,11 +37,20 @@ def decode_conversation_item(raw: object) -> ConversationItem:
     if item_type == "message":
         role = item.get("role")
         content = item.get("content")
-        if role not in ("user", "assistant") or not isinstance(content, str):
+        source = item.get("source", "assistant" if role == "assistant" else "text_user")
+        if (
+            role not in ("user", "assistant")
+            or not isinstance(content, str)
+            or source not in ("text_user", "speech_user", "worker_agent", "assistant")
+        ):
             raise ValueError("message fields are invalid")
         return ConversationMessage(
             role=cast(Literal["user", "assistant"], role),
             content=content,
+            source=cast(
+                Literal["text_user", "speech_user", "worker_agent", "assistant"],
+                source,
+            ),
         )
     if item_type == "tool_call":
         call_id = item.get("call_id")

@@ -6,7 +6,14 @@ import structlog
 
 from application.agent import AgentService
 from application.ports import A2AJobRepository, ConversationRepository
-from domain.a2a import A2AJob, A2AJobReceipt, A2AJobReport, A2AMessage, A2AThread
+from domain.a2a import (
+    A2ACompletionMessage,
+    A2AJob,
+    A2AJobReceipt,
+    A2AJobReport,
+    A2AMessage,
+    A2AThread,
+)
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey, ConversationMessage
 
@@ -170,6 +177,7 @@ class A2AWorker:
                 self._worker_id,
                 recovered_answer,
                 f"recovered:{job.job_id}",
+                self._completion_message(job, answer=recovered_answer),
             )
             logger.info("a2a_job_recovered", thread_id=job.thread_id, job_id=job.job_id)
             return
@@ -184,6 +192,7 @@ class A2AWorker:
                         user_id=job.parent_conversation.user_id,
                         tenant_id=job.parent_conversation.tenant_id,
                     ),
+                    source="worker_agent",
                 ),
                 timeout=self._job_timeout_seconds,
             )
@@ -195,15 +204,37 @@ class A2AWorker:
                 job_id=job.job_id,
                 error_type=type(exc).__name__,
             )
-            await self._jobs.fail(job.job_id, self._worker_id, error_code)
+            await self._jobs.fail(
+                job.job_id,
+                self._worker_id,
+                error_code,
+                self._completion_message(job, error_code=error_code),
+            )
         else:
             await self._jobs.complete(
                 job.job_id,
                 self._worker_id,
                 result.answer,
                 result.response_id,
+                self._completion_message(job, answer=result.answer),
             )
             logger.info("a2a_job_completed", thread_id=job.thread_id, job_id=job.job_id)
+
+    @staticmethod
+    def _completion_message(
+        job: A2AJob,
+        *,
+        answer: str | None = None,
+        error_code: str | None = None,
+    ) -> str:
+        """Build the trusted-data envelope that wakes the interactive agent."""
+        return A2ACompletionMessage(
+            job_id=job.job_id,
+            thread_id=job.thread_id,
+            status="completed" if error_code is None else "failed",
+            answer=answer,
+            error_code=error_code,
+        ).serialize()
 
     async def _requeue_safely(self, job_id: str) -> None:
         """Best-effort release of a claim while preserving cancellation semantics."""

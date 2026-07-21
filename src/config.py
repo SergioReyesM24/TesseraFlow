@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     worker_agent_instructions: str = DEFAULT_WORKER_AGENT_INSTRUCTIONS
     a2a_worker_poll_seconds: float = Field(default=0.5, gt=0, le=60)
     a2a_job_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
+    interaction_coordinator_poll_seconds: float = Field(default=0.1, gt=0, le=60)
+    interaction_output_poll_seconds: float = Field(default=0.05, gt=0, le=60)
+    interaction_command_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
+    interaction_max_pending_commands: int = Field(default=16, ge=1, le=1000)
 
 
 @lru_cache

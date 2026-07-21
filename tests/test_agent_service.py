@@ -189,7 +189,11 @@ async def test_runs_and_captures_a_tool_call() -> None:
             arguments={"operation": "add", "a": "2.5", "b": "3"},
         ),
         ToolResult(call_id="call_1", output={"result": "5.5"}),
-        ConversationMessage(role="assistant", content="El resultado es 5.5."),
+        ConversationMessage(
+            role="assistant",
+            content="El resultado es 5.5.",
+            source="assistant",
+        ),
     )
 
 
@@ -322,7 +326,7 @@ async def test_continues_a_persisted_conversation_with_neutral_history() -> None
     assert gateway.histories[0] == ()
     assert gateway.histories[1] == (
         ConversationMessage(role="user", content="Primer mensaje"),
-        ConversationMessage(role="assistant", content="Primera respuesta"),
+        ConversationMessage(role="assistant", content="Primera respuesta", source="assistant"),
     )
     assert repository.conversations[key.conversation_id].version == 2
 

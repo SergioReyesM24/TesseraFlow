@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from application.a2a import A2AService, A2AWorker
 from application.agent import AgentService
 from application.conversations import ConversationService, RecentConversationCompactor
+from application.interactions import ConversationCoordinator, TextInteractionAgent
 from config import Settings
 from domain.agent import AgentDefinition
 from infrastructure.cached_conversations import CachedConversationRepository
@@ -18,6 +19,7 @@ from infrastructure.postgres_conversations import (
     PostgresConversationRepository,
     apply_postgres_migrations,
 )
+from infrastructure.postgres_interactions import PostgresInteractionRepository
 from infrastructure.redis_conversations import RedisConversationCache
 from tools.registry import build_interactive_tool_registry, build_tool_registry
 
@@ -34,14 +36,17 @@ class AppContainer:
     default_agent: AgentDefinition
     a2a_service: A2AService
     a2a_worker: A2AWorker
+    conversation_coordinator: ConversationCoordinator
 
     def start(self) -> None:
         """Start process-local background consumers after lifespan composition."""
+        self.conversation_coordinator.start()
         self.a2a_worker.start()
 
     async def close(self) -> None:
         """Release application-wide clients during graceful shutdown."""
         await self.a2a_worker.close()
+        await self.conversation_coordinator.close()
         await self.openai_client.close()
         await self.redis_client.aclose()
         await self.postgres_pool.close()
@@ -92,6 +97,10 @@ async def build_container(settings: Settings) -> AppContainer:
     )
     model_gateway = OpenAIResponsesGateway(client)
     jobs = PostgresA2AJobRepository(postgres_pool)
+    interactions = PostgresInteractionRepository(
+        postgres_pool,
+        max_pending_commands=settings.interaction_max_pending_commands,
+    )
     a2a_service = A2AService(jobs, conversations)
     worker_tools = build_tool_registry()
     interactive_tools = build_interactive_tool_registry(a2a_service)
@@ -126,6 +135,14 @@ async def build_container(settings: Settings) -> AppContainer:
         poll_seconds=settings.a2a_worker_poll_seconds,
         job_timeout_seconds=settings.a2a_job_timeout_seconds,
     )
+    conversation_coordinator = ConversationCoordinator(
+        interactions,
+        TextInteractionAgent(agent_service, definition),
+        worker_id=str(uuid4()),
+        poll_seconds=settings.interaction_coordinator_poll_seconds,
+        output_poll_seconds=settings.interaction_output_poll_seconds,
+        command_timeout_seconds=settings.interaction_command_timeout_seconds,
+    )
     return AppContainer(
         openai_client=client,
         redis_client=redis_client,
@@ -135,4 +152,5 @@ async def build_container(settings: Settings) -> AppContainer:
         default_agent=definition,
         a2a_service=a2a_service,
         a2a_worker=a2a_worker,
+        conversation_coordinator=conversation_coordinator,
     )

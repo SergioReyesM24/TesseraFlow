@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator
-from threading import Event
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -12,58 +12,97 @@ from starlette.websockets import WebSocketDisconnect
 from api.middleware import request_logging_middleware
 from api.routes import router
 from application.conversations import ConversationNotFoundError
-from domain.agent import AgentDefinition, AgentResult
+from domain.agent import AgentResult
 from domain.conversations import Conversation, ConversationKey
-from domain.events import AgentStreamCompleted, AgentStreamEvent, AgentTextDelta
+from domain.events import AgentStreamCompleted, AgentTextDelta
+from domain.interactions import InteractionCommand, InteractionOutput
 
 SESSION_UID = "12345678-1234-4678-9234-567812345678"
 REQUEST_UID = "87654321-4321-4765-8321-876543218765"
 SECOND_REQUEST_UID = "aaaaaaaa-4321-4765-8321-876543218765"
 
 
-class StubAgentService:
-    """Stream a deterministic response without managing conversation lifecycle."""
+class StubConversationCoordinator:
+    """Expose deterministic durable commands and output streams to API tests."""
 
-    async def stream(
+    def __init__(self) -> None:
+        """Initialize submitted commands and the live-delivery queue."""
+        self.commands: list[InteractionCommand] = []
+        self.pending: asyncio.Queue[InteractionOutput] = asyncio.Queue()
+
+    async def submit(
         self,
         message: str,
-        definition: AgentDefinition,
-        key: ConversationKey,
-    ) -> AsyncIterator[AgentStreamEvent]:
-        """Emit one text delta and terminal event for the expected session."""
+        conversation: ConversationKey,
+        *,
+        request_id: str,
+        source: str,
+    ) -> InteractionCommand:
+        """Capture one text command and make its outputs available to WebSocket."""
         assert message == "Hola"
-        assert definition.model == "test-model"
-        assert key == ConversationKey(conversation_id=SESSION_UID, user_id="user-1")
-        yield AgentTextDelta(text="Hola")
-        yield AgentStreamCompleted(
+        assert conversation == ConversationKey(conversation_id=SESSION_UID, user_id="user-1")
+        assert source == "text_user"
+        command = InteractionCommand(
+            command_id=str(uuid4()),
+            request_id=request_id,
+            conversation=conversation,
+            kind="user_message",
+            source="text_user",
+            message=message,
+        )
+        self.commands.append(command)
+        for output in self._outputs(command):
+            await self.pending.put(output)
+        return command
+
+    async def stream_command_outputs(
+        self,
+        command: InteractionCommand,
+    ) -> AsyncIterator[InteractionOutput]:
+        """Emit deterministic SSE outputs for one submitted command."""
+        for output in self._outputs(command):
+            yield output
+
+    async def stream_pending_outputs(
+        self,
+        conversation: ConversationKey,
+    ) -> AsyncIterator[InteractionOutput]:
+        """Emit outputs submitted while a WebSocket listener is active."""
+        while True:
+            output = await self.pending.get()
+            assert output.conversation == conversation
+            yield output
+
+    @staticmethod
+    def _outputs(command: InteractionCommand) -> tuple[InteractionOutput, ...]:
+        """Build one delta and terminal output correlated to a command."""
+        completed = AgentStreamCompleted(
             result=AgentResult(
                 answer="Hola, ¿en qué puedo ayudarte?",
                 response_id="resp_stream",
-                conversation_id=key.conversation_id,
+                conversation_id=command.conversation.conversation_id,
             )
         )
-
-
-class CancellableAgentService:
-    """Expose when a long-running model stream is closed by the transport."""
-
-    def __init__(self) -> None:
-        """Create a thread-safe cancellation observation flag."""
-        self.closed = Event()
-
-    async def stream(
-        self,
-        message: str,
-        definition: AgentDefinition,
-        key: ConversationKey,
-    ) -> AsyncIterator[AgentStreamEvent]:
-        """Emit one delta and then remain active until the socket cancels the turn."""
-        del message, definition, key
-        try:
-            yield AgentTextDelta(text="Trabajando")
-            await asyncio.Event().wait()
-        finally:
-            self.closed.set()
+        return (
+            InteractionOutput(
+                output_id=f"{command.command_id}:0",
+                command_id=command.command_id,
+                request_id=command.request_id,
+                conversation=command.conversation,
+                modality="text",
+                event=AgentTextDelta(text="Hola"),
+                sequence=1,
+            ),
+            InteractionOutput(
+                output_id=f"{command.command_id}:1",
+                command_id=command.command_id,
+                request_id=command.request_id,
+                conversation=command.conversation,
+                modality="text",
+                event=completed,
+                sequence=2,
+            ),
+        )
 
 
 class StubConversationService:
@@ -95,18 +134,13 @@ class StubConversationService:
 
 
 def build_test_app(
-    agent_service: StubAgentService | CancellableAgentService | None = None,
+    coordinator: StubConversationCoordinator | None = None,
 ) -> FastAPI:
-    """Build the API with separate agent and conversation service doubles."""
+    """Build the API with coordinator and conversation lifecycle doubles."""
     app = FastAPI()
     app.state.container = SimpleNamespace(
-        agent_service=agent_service or StubAgentService(),
+        conversation_coordinator=coordinator or StubConversationCoordinator(),
         conversation_service=StubConversationService(),
-        default_agent=AgentDefinition(
-            model="test-model",
-            instructions="Test",
-            tool_names=(),
-        ),
     )
     app.middleware("http")(request_logging_middleware)
     app.include_router(router)
@@ -220,18 +254,18 @@ def test_agent_websocket_rejects_an_unknown_session() -> None:
     assert raised.value.reason == "Session not found"
 
 
-def test_agent_websocket_disconnect_cancels_the_active_stream() -> None:
-    """Close the active model stream as soon as the socket reader disconnects."""
-    agent_service = CancellableAgentService()
-    with TestClient(build_test_app(agent_service)) as client:
+def test_agent_websocket_disconnect_does_not_discard_the_submitted_command() -> None:
+    """Keep accepted work durable when its originating socket disconnects."""
+    coordinator = StubConversationCoordinator()
+    with TestClient(build_test_app(coordinator)) as client:
         with client.websocket_connect(
             f"/v1/agent/ws?session_uid={SESSION_UID}&user_id=user-1"
         ) as websocket:
             websocket.receive_json()
             websocket.send_json({"type": "message", "message": "Hola"})
-            assert websocket.receive_json()["data"] == {"text": "Trabajando"}
+            assert websocket.receive_json()["data"] == {"text": "Hola"}
 
-    assert agent_service.closed.wait(timeout=1)
+    assert len(coordinator.commands) == 1
 
 
 async def test_stream_rejects_an_unknown_session_before_starting_sse() -> None:

@@ -21,46 +21,16 @@ Aspectos que deberá cubrir:
 - Añadir compatibilidad con el WebSocket actual y permitir que clientes sin soporte
   visual degraden el contenido a texto.
 
-## Entrega proactiva de resultados A2A
+## Evolución de la entrega proactiva
 
-La primera versión de la doble capa ya separa el agente interactivo del worker, conserva
-un historial por thread A2A y ejecuta mensajes mediante jobs durables reclamados con
-lease en PostgreSQL. El agente interactivo puede delegar, consultar y continuar esos
-threads. Queda fuera de la fase actual despertar proactivamente al agente interactivo
-cuando termina un job sin esperar un nuevo mensaje del usuario.
-
-La evolución de la entrega se apoyará en los siguientes límites:
-
-```text
-tool interactiva -> JobScheduler -> cola durable -> worker
-                                             |
-                                             v
-                                      resultado durable
-                                             |
-                                             v
-ConversationCoordinator -> ModelGateway -> Outbox -> WebSocket(s) / reconexión
-```
-
-- El worker publicará un evento neutral con `job_id`, conversación, turno de origen,
-  versión observada, estado y resultado; nunca llamará directamente al WebSocket.
-- Un coordinador por conversación serializará mensajes de usuario y finalizaciones para
-  cargar el historial más reciente antes de decidir si responder, agrupar, posponer o
-  descartar un resultado obsoleto.
-- La respuesta proactiva será un nuevo turno del modelo con el resultado tipado del job y
-  el contexto vigente, no una continuación de la sesión efímera que inició la tarea.
-- Un outbox durable separará completar el trabajo de entregarlo. Si no hay socket activo,
-  la notificación quedará disponible para reconexión o consulta, con deduplicación por
-  `job_id` y versión.
-- El registro de conexiones será un adaptador de entrega efímero. En despliegues con
-  varios procesos necesitará pub/sub para enrutar eventos al proceso que mantiene cada
-  socket.
-
-Aspectos que deberá cubrir:
+La inbox serializada por conversación, los comandos de finalización A2A y el outbox
+durable ya forman parte de la arquitectura actual. Las siguientes extensiones continúan
+fuera de alcance:
 
 - Añadir prioridades, resultados parciales, cancelación pública y límites de consumo por
   usuario o tenant a los contratos de jobs existentes.
-- Separar opcionalmente el consumidor en un proceso worker desplegable de forma
-  independiente; PostgreSQL ya actúa como frontera durable compartida.
+- Separar opcionalmente el coordinador en un proceso desplegable de forma independiente;
+  PostgreSQL ya actúa como frontera durable compartida.
 - Permitir que ambas capas trabajen a la vez y publiquen resultados parciales mediante
   eventos neutrales, conservando la trazabilidad con `request_id`, `conversation_id` y
   `job_id`.
@@ -68,9 +38,10 @@ Aspectos que deberá cubrir:
   respuesta previa sin producir actualizaciones incoherentes ni duplicadas.
 - Versionar los resultados y aplicar control de concurrencia para descartar entregas
   tardías u obsoletas.
-- Exponer mecanismos para consultar el estado y recibir la finalización de un trabajo;
-  usar el WebSocket para entrega online y polling o webhooks cuando el consumidor lo
-  requiera, sin convertir el socket en fuente de verdad.
+- Añadir fan-out a varios sockets de la misma conversación y consumidores durables
+  independientes; la entrega actual confirma cada evento una sola vez.
+- Añadir webhooks o polling de outputs para consumidores sin WebSocket, sin convertir
+  ningún transporte en fuente de verdad.
 - Propagar cancelaciones cuando sea posible y definir políticas explícitas para tareas
   que deban continuar tras la desconexión del cliente.
 - Aplicar autenticación, autorización y aislamiento multiusuario tanto al envío del
@@ -105,6 +76,10 @@ audio en tiempo real sin convertir la experiencia pública en una integración a
 a un proveedor concreto.
 
 Aspectos que deberá cubrir:
+
+- Reutilizar `InteractionCommand` con origen `speech_user`, la serialización por
+  conversación y el outbox; el STS será la capa interactiva y delegará por A2A al modelo
+  de texto worker para tareas pesadas.
 
 - Definir eventos neutrales para audio de entrada, audio de salida, transcripciones,
   turnos de conversación y errores.

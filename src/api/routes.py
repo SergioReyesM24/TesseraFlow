@@ -22,15 +22,14 @@ from api.schemas import (
 )
 from api.sse import encode_agent_stream
 from api.websocket import serve_agent_websocket
-from application.agent import AgentService
 from application.conversations import (
     ConversationAccessDeniedError,
     ConversationConflictError,
     ConversationNotFoundError,
     ConversationService,
 )
+from application.interactions import ConversationCoordinator, InteractionQueueFullError
 from bootstrap import AppContainer
-from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey
 
 router = APIRouter()
@@ -42,18 +41,11 @@ def get_container(connection: HTTPConnection) -> AppContainer:
     return cast(AppContainer, connection.app.state.container)
 
 
-def get_agent_service(
+def get_conversation_coordinator(
     container: Annotated[AppContainer, Depends(get_container)],
-) -> AgentService:
-    """Resolve the shared agent orchestrator for an HTTP request."""
-    return container.agent_service
-
-
-def get_agent_definition(
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> AgentDefinition:
-    """Resolve the immutable default agent configuration used by the endpoint."""
-    return container.default_agent
+) -> ConversationCoordinator:
+    """Resolve the durable, modality-neutral interaction coordinator."""
+    return container.conversation_coordinator
 
 
 def get_conversation_service(
@@ -87,9 +79,11 @@ async def create_session(
 @router.post("/v1/agent/stream", response_class=StreamingResponse, tags=["agent"])
 async def stream_agent(
     payload: StreamAgentRequest,
-    agent_service: Annotated[AgentService, Depends(get_agent_service)],
+    coordinator: Annotated[
+        ConversationCoordinator,
+        Depends(get_conversation_coordinator),
+    ],
     conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
-    definition: Annotated[AgentDefinition, Depends(get_agent_definition)],
 ) -> StreamingResponse:
     """Validate, stream, and persist one interaction for an existing session."""
     key = ConversationKey(
@@ -103,7 +97,21 @@ async def stream_agent(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
     except ConversationAccessDeniedError as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Conversation access denied") from exc
-    events = encode_agent_stream(agent_service.stream(payload.message, definition, key))
+    try:
+        command = await coordinator.submit(
+            payload.message,
+            key,
+            request_id=str(uuid4()),
+            source="text_user",
+        )
+    except InteractionQueueFullError as exc:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many pending conversation messages",
+        ) from exc
+    events = encode_agent_stream(
+        output.event async for output in coordinator.stream_command_outputs(command)
+    )
     return StreamingResponse(
         events,
         media_type="text/event-stream",
@@ -119,9 +127,11 @@ async def agent_websocket(
     websocket: WebSocket,
     session_uid: Annotated[UUID, Query()],
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
-    agent_service: Annotated[AgentService, Depends(get_agent_service)],
+    coordinator: Annotated[
+        ConversationCoordinator,
+        Depends(get_conversation_coordinator),
+    ],
     conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
-    definition: Annotated[AgentDefinition, Depends(get_agent_definition)],
     tenant_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
 ) -> None:
     """Keep an owned conversation open and stream each correlated turn as JSON."""
@@ -160,7 +170,7 @@ async def agent_websocket(
         }
     )
     logger.info("agent_websocket_connected")
-    await serve_agent_websocket(websocket, agent_service, definition, key)
+    await serve_agent_websocket(websocket, coordinator, key)
 
 
 @router.delete("/v1/conversations/{conversation_id}", tags=["agent"])
