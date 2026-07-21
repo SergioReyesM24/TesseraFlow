@@ -5,6 +5,16 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+PROMPT_DIRECTORY = Path(__file__).resolve().parent / "prompts"
+
+
+def load_prompt(filename: str) -> str:
+    """Load one required default prompt independently from the process directory."""
+    return PROMPT_DIRECTORY.joinpath(filename).read_text(encoding="utf-8").strip()
+
+
+DEFAULT_AGENT_INSTRUCTIONS = load_prompt("interactive_agent.md")
+DEFAULT_WORKER_AGENT_INSTRUCTIONS = load_prompt("worker_agent.md")
 
 
 class Settings(BaseSettings):
@@ -37,23 +47,8 @@ class Settings(BaseSettings):
     conversation_max_messages: int = Field(default=100, ge=2, le=10_000)
     conversation_max_characters: int = Field(default=200_000, ge=2)
     conversation_max_bytes: int = Field(default=512_000, ge=256)
-    agent_instructions: str = (
-        "You are the low-latency agent that talks directly to the user. Delegate work "
-        "that requires operational tools to the worker agent. Never invent worker "
-        "results. When a job is queued or running, explain that clearly and retain its "
-        "job_id and thread_id; do not repeatedly poll it in the same turn. Check the job "
-        "on a later user turn before claiming it is complete. Continue an existing worker "
-        "thread when a follow-up depends on its prior tool results."
-    )
-    worker_agent_instructions: str = (
-        "You are a persistent worker agent addressed by another agent as if it were a "
-        "human user. Incoming messages use the tesseraflow.a2a JSON envelope; answer the "
-        "request in its content field and preserve message_id only as protocol metadata. "
-        "Use your operational tools when needed. Return a self-contained, factually precise "
-        "report with the requested answer, relevant supporting details, assumptions, and "
-        "additional context likely to help with follow-up questions. Remember that later "
-        "messages belong to the same worker conversation."
-    )
+    agent_instructions: str = DEFAULT_AGENT_INSTRUCTIONS
+    worker_agent_instructions: str = DEFAULT_WORKER_AGENT_INSTRUCTIONS
     a2a_worker_poll_seconds: float = Field(default=0.5, gt=0, le=60)
     a2a_job_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
 

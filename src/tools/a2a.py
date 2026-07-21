@@ -24,8 +24,11 @@ class DelegateToWorkerTool(AgentTool[DelegateToWorkerArguments]):
 
     name = "delegate_to_worker_agent"
     description = (
-        "Delegates tool-heavy work to a persistent worker agent. Returns immediately with "
-        "a thread_id and job_id that can be checked later."
+        "Immediately delegates any request that needs a tool, API, internal user data, or "
+        "information absent from the current conversation to a persistent worker agent. "
+        "Use it before asking clarifying questions; the worker decides whether missing "
+        "parameters can be discovered or defaulted. Returns a thread_id and job_id without "
+        "waiting for completion."
     )
     arguments_model: ClassVar[type[DelegateToWorkerArguments]] = DelegateToWorkerArguments
 

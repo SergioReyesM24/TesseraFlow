@@ -294,7 +294,12 @@ async def test_streams_text_and_tool_lifecycle_events() -> None:
 def test_tool_specs_are_provider_neutral_and_closed() -> None:
     specs = build_tool_registry().specs
 
-    assert [spec.name for spec in specs] == ["calculator", "current_time"]
+    assert [spec.name for spec in specs] == [
+        "calculator",
+        "current_time",
+        "weekly_balance_history",
+        "send_mock_bizum_to_mom",
+    ]
     assert all(spec.arguments_schema["additionalProperties"] is False for spec in specs)
     assert all(not hasattr(spec, "strict") for spec in specs)
 

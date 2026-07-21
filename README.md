@@ -397,6 +397,17 @@ curl -X DELETE \
 | --- | --- |
 | `calculator` | Suma, resta, multiplica y divide números decimales. |
 | `current_time` | Devuelve fecha y hora para una zona horaria IANA. |
+| `weekly_balance_history` | Espera 5 segundos y devuelve ocho semanas de saldos mock en EUR. |
+| `send_mock_bizum_to_mom` | Simula un Bizum en EUR al destinatario fijo `Mamá`. |
+
+`weekly_balance_history` solo está registrada en el worker. Para probar el recorrido
+completo de la doble capa, pide al agente interactivo «devuelve mi historial de saldo
+por semana». El primer turno delega el trabajo y devuelve sus identificadores; en un
+turno posterior, pídele que consulte el job para incorporar el resultado ya completado.
+
+`send_mock_bizum_to_mom` también pertenece exclusivamente al worker. Exige un importe
+positivo, no permite cambiar el destinatario y devuelve un justificante sintético con
+`mock: true`; nunca contacta con un proveedor de pagos ni mueve dinero real.
 
 ### Añadir una tool
 
@@ -438,6 +449,18 @@ class GetCustomerTool(AgentTool[CustomerInput]):
 El esquema neutral se genera desde Pydantic y cada gateway lo traduce al formato de su
 proveedor. La validación, la medición, los logs y el tratamiento de errores son comunes
 a todas las tools.
+
+## Prompts
+
+Los prompts por defecto están versionados como Markdown en:
+
+- `src/prompts/interactive_agent.md`: agente que conversa con el usuario.
+- `src/prompts/worker_agent.md`: agente persistente que ejecuta las tools operativas.
+
+`config.py` los carga mediante una ruta relativa al código, independientemente del
+directorio desde el que se arranque el proceso. `AGENT_INSTRUCTIONS` y
+`WORKER_AGENT_INSTRUCTIONS` pueden seguir sobrescribiéndolos desde el entorno sin
+modificar los archivos versionados.
 
 ## Configuración
 
@@ -519,6 +542,7 @@ src/
 ├── application/         # Casos de uso, puertos y orquestación
 ├── domain/              # Modelos y eventos neutrales
 ├── infrastructure/      # OpenAI, PostgreSQL, Redis y logging
+├── prompts/             # Instrucciones Markdown de cada capa de agente
 ├── tools/               # Tools concretas y registro
 ├── bootstrap.py         # Composición de dependencias
 └── main.py              # Aplicación y lifespan

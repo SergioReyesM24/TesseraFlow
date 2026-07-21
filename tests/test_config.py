@@ -3,12 +3,45 @@ from typing import Any
 
 import bootstrap
 from bootstrap import build_container
-from config import PROJECT_ENV_FILE, Settings
+from config import (
+    DEFAULT_AGENT_INSTRUCTIONS,
+    DEFAULT_WORKER_AGENT_INSTRUCTIONS,
+    PROJECT_ENV_FILE,
+    PROMPT_DIRECTORY,
+    Settings,
+)
 
 
 def test_project_env_file_is_independent_of_working_directory() -> None:
     """Resolve the project dotenv file relative to the source tree."""
     assert PROJECT_ENV_FILE == Path(__file__).resolve().parents[1] / ".env"
+
+
+def test_default_prompts_are_loaded_from_versioned_markdown_files() -> None:
+    """Keep both agent prompts editable without embedding prose in Python settings."""
+    assert PROMPT_DIRECTORY == Path(__file__).resolve().parents[1] / "src" / "prompts"
+    assert (
+        DEFAULT_AGENT_INSTRUCTIONS
+        == (PROMPT_DIRECTORY / "interactive_agent.md").read_text(encoding="utf-8").strip()
+    )
+    assert (
+        DEFAULT_WORKER_AGENT_INSTRUCTIONS
+        == (PROMPT_DIRECTORY / "worker_agent.md").read_text(encoding="utf-8").strip()
+    )
+    assert "Do not ask the user" in DEFAULT_AGENT_INSTRUCTIONS
+    assert "immediately call" in DEFAULT_AGENT_INSTRUCTIONS
+    assert "Voy a consultarlo, dame un momento." in DEFAULT_AGENT_INSTRUCTIONS
+
+
+def test_explicit_settings_can_override_markdown_prompts() -> None:
+    """Preserve environment and constructor overrides for deployed configurations."""
+    settings = Settings(
+        agent_instructions="Interactive override",
+        worker_agent_instructions="Worker override",
+    )
+
+    assert settings.agent_instructions == "Interactive override"
+    assert settings.worker_agent_instructions == "Worker override"
 
 
 class FakePostgresPool:
