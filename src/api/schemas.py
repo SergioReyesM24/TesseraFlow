@@ -25,6 +25,33 @@ class AgentWebSocketRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
 
 
+class RealtimeAudioStartRequest(BaseModel):
+    """Begin one correlated PCM input stream on a realtime agent socket."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["audio_start"]
+    turn_id: UUID = Field(default_factory=uuid4)
+
+
+class RealtimeAudioEndRequest(BaseModel):
+    """Pause the current PCM input stream and let provider VAD finish the turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["audio_end"]
+
+
+class RealtimeTextRequest(BaseModel):
+    """Send a text fallback through an established realtime model session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"]
+    turn_id: UUID = Field(default_factory=uuid4)
+    text: str = Field(min_length=1, max_length=20_000)
+
+
 class CreateSessionRequest(BaseModel):
     """Ownership data required to create a persisted chat session."""
 

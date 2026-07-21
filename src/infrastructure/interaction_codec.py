@@ -1,7 +1,11 @@
+import base64
+import binascii
 from typing import Any, Literal, cast
 
 from domain.agent import AgentResult
 from domain.events import (
+    AgentAudioDelta,
+    AgentAudioInterrupted,
     AgentStreamCompleted,
     AgentStreamEvent,
     AgentStreamFailed,
@@ -14,6 +18,13 @@ from domain.tools import ToolCallRecord
 
 def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]:
     """Serialize one neutral event for durable outbox storage."""
+    if isinstance(event, AgentAudioDelta):
+        return "audio_delta", {
+            "audio": base64.b64encode(event.data).decode("ascii"),
+            "mime_type": event.mime_type,
+        }
+    if isinstance(event, AgentAudioInterrupted):
+        return "audio_interrupted", {}
     if isinstance(event, AgentTextDelta):
         return "text_delta", {"text": event.text}
     if isinstance(event, AgentToolStarted):
@@ -58,6 +69,18 @@ def decode_agent_event(event_type: str, raw: object) -> AgentStreamEvent:
     if not isinstance(raw, dict):
         raise ValueError("interaction output payload must be an object")
     payload = cast(dict[str, Any], raw)
+    if event_type == "audio_delta":
+        encoded = _required_text(payload, "audio")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("audio must be valid base64") from exc
+        return AgentAudioDelta(
+            data=data,
+            mime_type=_required_text(payload, "mime_type"),
+        )
+    if event_type == "audio_interrupted":
+        return AgentAudioInterrupted()
     if event_type == "text_delta":
         return AgentTextDelta(text=_required_text(payload, "text"))
     if event_type == "tool_started":

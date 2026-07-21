@@ -69,34 +69,29 @@ Aspectos que deberá cubrir:
 - Definir comportamiento ante éxito parcial y cancelación de un batch.
 - Evitar paralelizar operaciones con efectos laterales que compitan sobre el mismo recurso.
 
-## Soporte para modelos STS
+## Evolución de la interacción STS
 
-Añadir soporte para modelos *speech-to-speech* (STS), capaces de recibir y generar
-audio en tiempo real sin convertir la experiencia pública en una integración acoplada
-a un proveedor concreto.
+El flujo `speech_to_speech` ya abre una sesión Gemini Live por WebSocket, recibe PCM16
+binario a 16 kHz, devuelve PCM16 a 24 kHz, conserva ambas transcripciones, soporta VAD,
+barge-in, varios turnos, tools neutrales, degradación textual, backpressure y límites de
+tamaño y duración. El audio es efímero; el historial semántico se persiste por turno.
 
-Aspectos que deberá cubrir:
+Extensiones que continúan fuera de alcance:
 
-- Reutilizar `InteractionCommand` con origen `speech_user`, la serialización por
-  conversación y el outbox; el STS será la capa interactiva y delegará por A2A al modelo
-  de texto worker para tareas pesadas.
-
-- Definir eventos neutrales para audio de entrada, audio de salida, transcripciones,
-  turnos de conversación y errores.
-- Evaluar WebSocket o WebRTC para la comunicación bidireccional de baja latencia.
-- Mantener clientes y sesiones específicos de OpenAI, Gemini u otros proveedores
-  dentro de sus respectivos adaptadores.
-- Gestionar detección de voz, inicio y final de turno, interrupciones y cancelación de
-  una respuesta en curso.
-- Permitir tool calls durante una sesión de voz y comunicar su estado sin bloquear la
-  reproducción de audio innecesariamente.
-- Definir codecs, frecuencia de muestreo, tamaño de fragmentos y límites de duración.
-- Aplicar backpressure y límites de memoria para clientes o redes lentas.
-- Establecer políticas explícitas para grabación, retención, transcripción y borrado de
-  audio potencialmente sensible.
-- Proporcionar degradación a texto cuando el cliente o el modelo no soporte STS.
-- Añadir métricas de latencia hasta el primer audio, interrupciones, errores y duración
-  de sesión.
+- Añadir WebRTC cuando se necesiten jitter buffers, negociación de codecs, cancelación de
+  eco y transporte adaptativo frente a WebSocket PCM.
+- Incorporar autenticación efímera cliente-proveedor si se decide evitar el proxy de media,
+  sin exponer credenciales de servidor.
+- Publicar eventos explícitos de actividad de voz cuando un frontend necesite representar
+  el estado VAD además de las transcripciones y delimitaciones actuales.
+- Entregar finalizaciones proactivas del worker dentro de la misma sesión de voz; hoy son
+  durables en el WebSocket por turnos y consultables desde STS mediante tools A2A.
+- Definir políticas desplegables de consentimiento, retención de transcripciones y borrado
+  de datos de voz, aunque el audio crudo actual no se almacene.
+- Añadir métricas de latencia hasta el primer audio, interrupciones, duración de sesión,
+  bytes descartados y conflictos de persistencia.
+- Probar navegadores y dispositivos reales con cancelación de eco, pérdida de red,
+  reconexión y cambios de dispositivo de entrada.
 
 ## Reintentos
 

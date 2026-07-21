@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
 from domain.a2a import A2AJob, A2AThread
@@ -7,6 +8,7 @@ from domain.conversations import Conversation, ConversationItem, ConversationKey
 from domain.events import ModelStreamEvent
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
+from domain.realtime import AudioChunk, RealtimeModelEvent
 from domain.tools import ToolResult, ToolSpec
 
 
@@ -34,15 +36,52 @@ class ModelSession(Protocol):
 
 
 class ModelGateway(Protocol):
-    """Creates isolated sessions while sharing provider-level resources."""
+    """Open isolated sessions while sharing provider-level resources."""
 
-    def create_session(
+    def open_session(
         self,
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> ModelSession:
-        """Create an isolated session backed by shared provider resources."""
+    ) -> AbstractAsyncContextManager[ModelSession]:
+        """Open a session and release provider resources when its scope exits."""
+        ...
+
+
+class RealtimeModelSession(Protocol):
+    """Connection-scoped full-duplex session with a realtime model provider."""
+
+    async def send_audio(self, chunk: AudioChunk) -> None:
+        """Send one bounded raw audio fragment without ending the current stream."""
+        ...
+
+    async def end_audio(self) -> None:
+        """Signal that the current client audio stream is temporarily paused."""
+        ...
+
+    async def send_text(self, text: str) -> None:
+        """Send a textual turn through the same low-latency session."""
+        ...
+
+    async def send_tool_results(self, results: tuple[ToolResult, ...]) -> None:
+        """Continue generation after resolving every pending realtime tool call."""
+        ...
+
+    def receive(self) -> AsyncIterator[RealtimeModelEvent]:
+        """Receive normalized events for every turn until the session closes."""
+        ...
+
+
+class RealtimeModelGateway(Protocol):
+    """Open persistent full-duplex sessions over provider-level shared resources."""
+
+    def open_session(
+        self,
+        definition: AgentDefinition,
+        tools: tuple[ToolSpec, ...],
+        history: tuple[ConversationItem, ...],
+    ) -> AbstractAsyncContextManager[RealtimeModelSession]:
+        """Open and eventually release one isolated realtime provider connection."""
         ...
 
 

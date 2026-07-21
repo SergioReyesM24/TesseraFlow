@@ -1,5 +1,6 @@
 from collections import deque
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from uuid import UUID
 
@@ -214,16 +215,17 @@ class StubModelGateway:
         self.session_replies = deque(session_replies)
         self.histories: list[tuple[ConversationItem, ...]] = []
 
-    def create_session(
+    @asynccontextmanager
+    async def open_session(
         self,
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> StubModelSession:
+    ) -> AsyncIterator[StubModelSession]:
         """Record the worker context before creating its isolated session."""
         del definition, tools
         self.histories.append(history)
-        return StubModelSession(self.session_replies.popleft())
+        yield StubModelSession(self.session_replies.popleft())
 
 
 def deterministic_uids() -> Callable[[], UUID]:

@@ -3,10 +3,10 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from uuid import UUID
 
-from application.interactions import ConversationCoordinator
-from domain.agent import AgentResult
+from application.interactions import ConversationCoordinator, TurnInteractionAgent
+from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationKey
-from domain.events import AgentStreamCompleted, AgentTextDelta
+from domain.events import AgentAudioDelta, AgentStreamCompleted, AgentTextDelta
 from domain.interactions import (
     InteractionCommand,
     InteractionEmission,
@@ -156,9 +156,53 @@ class BlockingAgentService:
             self.active -= 1
 
 
+class AudioEventAgentService:
+    """Emit mixed media through the AgentService-facing adapter contract."""
+
+    async def stream(
+        self,
+        message: str,
+        definition: AgentDefinition,
+        conversation: ConversationKey,
+        *,
+        source: InteractionSource,
+    ) -> AsyncIterator[AgentAudioDelta | AgentTextDelta | AgentStreamCompleted]:
+        """Yield one audio fragment, transcription, and terminal result."""
+        del message, definition, source
+        yield AgentAudioDelta(data=b"pcm", mime_type="audio/pcm;rate=24000")
+        yield AgentTextDelta(text="Hola")
+        yield AgentStreamCompleted(
+            result=AgentResult(
+                answer="Hola",
+                response_id="audio-1",
+                conversation_id=conversation.conversation_id,
+            )
+        )
+
+
 def key() -> ConversationKey:
     """Return the owned conversation shared by race-condition tests."""
     return ConversationKey(conversation_id="conversation-1", user_id="user-1")
+
+
+async def test_turn_adapter_tags_audio_without_provider_branches() -> None:
+    """Derive output modality from neutral events for every configured gateway."""
+    adapter = TurnInteractionAgent(
+        AudioEventAgentService(),  # type: ignore[arg-type]
+        AgentDefinition(model="audio-model", instructions="Speak", tool_names=()),
+    )
+    command = InteractionCommand(
+        command_id="command-1",
+        request_id="request-1",
+        conversation=key(),
+        kind="user_message",
+        source="text_user",
+        message="Hola",
+    )
+
+    emissions = [emission async for emission in adapter.stream(command)]
+
+    assert [emission.modality for emission in emissions] == ["audio", "text", "text"]
 
 
 def coordinator(

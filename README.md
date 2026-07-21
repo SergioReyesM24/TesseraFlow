@@ -6,11 +6,12 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Gemini](https://img.shields.io/badge/Gemini-Live_API-4285F4?logo=google&logoColor=white)](https://ai.google.dev/gemini-api/docs/live-api)
 [![OpenAI](https://img.shields.io/badge/OpenAI-Responses_API-412991?logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference/responses)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Historial-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-Contexto-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 
-Responses API · protocolo A2A · jobs durables · WebSocket · historial persistente
+Gemini Live · Responses API · protocolo A2A · jobs durables · WebSocket
 
 </div>
 
@@ -19,13 +20,39 @@ Responses API · protocolo A2A · jobs durables · WebSocket · historial persis
 TesseraFlow es una base de referencia para construir agentes en tiempo real con límites
 arquitectónicos claros. Separa un agente interactivo de baja latencia de un agente de
 trabajo persistente que ejecuta las tools operativas mediante un protocolo A2A. Conserva
-ambas conversaciones en formatos neutrales al proveedor y no acopla el núcleo a OpenAI,
-Redis o FastAPI.
+ambas conversaciones en formatos neutrales al proveedor. En la configuración predeterminada,
+Gemini 3.1 Flash Live produce la conversación y el audio dirigido al usuario, mientras
+OpenAI ejecuta el agente de trabajo pesado.
 
 > [!NOTE]
 > El proyecto todavía no incorpora autenticación. En producción, `user_id` y `tenant_id`
 > deben obtenerse de un principal autenticado y no confiarse directamente al cliente.
 > Consulta [ROADMAP.md](ROADMAP.md) para conocer las siguientes fases.
+
+## Núcleo: doble capa multimodal
+
+El núcleo de TesseraFlow no es un transporte ni un proveedor concreto, sino una
+arquitectura estable de dos agentes. El primer agente mantiene la interacción de baja
+latencia con el usuario y solo conoce tools de protocolo A2A. El segundo trabaja de forma
+durable, conserva su propio contexto y ejecuta las tools operativas. Texto, WebSocket
+durable y voz realtime son distintas puertas de entrada a esa misma separación.
+
+```text
+Texto por SSE ───────────┐
+Texto por WS durable ────┼──> Agente interactivo ──> Tools A2A ──> Worker ──> Tools pesadas
+Audio STS realtime ──────┘
+```
+
+| Forma de interacción | Primera capa | Segunda capa | Entrega del worker |
+| --- | --- | --- | --- |
+| `POST /v1/agent/stream` | Agente por turnos; entrada textual y salida según el modelo configurado | Worker textual durable | El job continúa, pero el SSE inicial no permanece abierto para su resultado posterior |
+| `WS /v1/agent/ws` | Agente por turnos con comandos y outputs durables | Worker textual durable | Proactiva mediante inbox/outbox en `/v1/agent/ws`, incluso después del turno inicial |
+| `WS /v1/agent/realtime` | Agente STS con audio full-duplex, VAD y barge-in | El mismo worker textual durable | Consultable mediante tools A2A; la reinyección automática como voz aún no está implementada |
+
+Las tres entradas comparten las definiciones de agente, las tools A2A, el historial
+neutral, el control de propiedad y el worker. Lo que cambia es la semántica de la primera
+capa y del transporte: los comandos por turnos priorizan durabilidad; STS prioriza
+latencia y mantiene el audio crudo fuera de la persistencia.
 
 ## Características
 
@@ -36,7 +63,10 @@ Redis o FastAPI.
 - Inbox por conversación que serializa mensajes de usuario y finalizaciones del worker.
 - Respuesta proactiva al completar jobs mediante un outbox durable y recuperable.
 - Consulta de estados públicos `queued`, `running`, `completed` y `failed`.
-- Sesiones de modelo aisladas por turno sobre un único cliente HTTP compartido.
+- Sesiones Gemini Live aisladas por turno o WebSocket realtime sobre un cliente compartido.
+- Audio PCM nativo a 24 kHz con transcripción textual y eventos de interrupción neutrales.
+- STS bidireccional con PCM16 binario a 16 kHz, VAD de Gemini y barge-in.
+- Proveedor y modelo configurables por rol; un mismo proveedor comparte cliente y pool.
 - Function calling estricto con argumentos validados por Pydantic.
 - Ejecución concurrente de las tools que el worker solicita en una misma respuesta.
 - WebSocket persistente con eventos neutrales, varios turnos y correlación por `request_id`.
@@ -47,7 +77,7 @@ Redis o FastAPI.
 - Control de propiedad mediante `session_uid`, `user_id` y `tenant_id`.
 - Escrituras atómicas y detección de actualizaciones concurrentes.
 - Logs estructurados que evitan registrar mensajes y datos de las tools.
-- Puertos pequeños para sustituir OpenAI, Redis o las tools sin alterar el núcleo.
+- Puertos pequeños para sustituir Gemini, OpenAI, Redis o las tools sin alterar el núcleo.
 
 ## Inicio rápido
 
@@ -55,7 +85,8 @@ Redis o FastAPI.
 
 - Python 3.11 o superior.
 - PostgreSQL y Redis accesibles.
-- Una API key de OpenAI.
+- Una API key de Gemini para la capa interactiva.
+- Una API key de OpenAI para el worker.
 
 ### Instalación
 
@@ -69,6 +100,7 @@ cp .env.example .env
 Configura al menos estas variables en `.env`:
 
 ```dotenv
+GEMINI_API_KEY=...
 OPENAI_API_KEY=sk-...
 POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/tesseraflow
 REDIS_URL=redis://localhost:6379/0
@@ -114,7 +146,17 @@ const socket = new WebSocket(
   `ws://127.0.0.1:8000/v1/agent/ws?session_uid=${sessionUid}&user_id=user-456`,
 );
 
-socket.onmessage = ({ data }) => console.log(JSON.parse(data));
+socket.onmessage = ({ data }) => {
+  const event = JSON.parse(data);
+  if (event.type === "audio_delta") {
+    // PCM16 mono a 24 kHz. Encola los bytes en tu reproductor Web Audio.
+    const pcm = Uint8Array.from(atob(event.data.audio), (byte) => byte.charCodeAt(0));
+    playPcm16(pcm, 24000);
+  } else if (event.type === "audio_interrupted") {
+    clearPlaybackQueue();
+  }
+  console.log(event);
+};
 socket.onopen = () => socket.send(JSON.stringify({
   type: "message",
   request_id: crypto.randomUUID(),
@@ -122,8 +164,35 @@ socket.onopen = () => socket.send(JSON.stringify({
 }));
 ```
 
-Cada frame del servidor es JSON. El último evento exitoso del turno contiene el
-resultado completo:
+Para micrófono bidireccional configura `INTERACTIVE_FLOW=speech_to_speech` y usa el
+endpoint realtime. Los frames binarios cliente → servidor son PCM16 mono little-endian
+a 16 kHz; los frames binarios servidor → cliente son PCM16 mono a 24 kHz:
+
+```javascript
+const realtime = new WebSocket(
+  `ws://127.0.0.1:8000/v1/agent/realtime?session_uid=${sessionUid}&user_id=user-456`,
+);
+realtime.binaryType = "arraybuffer";
+
+realtime.onmessage = ({ data }) => {
+  if (data instanceof ArrayBuffer) {
+    playPcm16(new Uint8Array(data), 24000);
+    return;
+  }
+  const event = JSON.parse(data);
+  if (event.type === "audio_interrupted") clearPlaybackQueue();
+  console.log(event);
+};
+
+realtime.onopen = () => {
+  realtime.send(JSON.stringify({ type: "audio_start", turn_id: crypto.randomUUID() }));
+};
+const sendMicChunk = (pcm16Chunk) => realtime.send(pcm16Chunk);
+const stopMic = () => realtime.send(JSON.stringify({ type: "audio_end" }));
+```
+
+En `/v1/agent/ws`, cada frame del servidor es JSON. El último evento exitoso del turno
+contiene el resultado completo:
 
 ```json
 {
@@ -143,29 +212,38 @@ resultado completo:
 ```mermaid
 flowchart LR
     Client[Cliente] --> API[FastAPI / WebSocket]
+    Client --> RealtimeAPI[WebSocket realtime PCM]
     API --> Inbox[(Interaction inbox)]
     Inbox --> Coordinator[ConversationCoordinator]
-    Coordinator --> Interactive[InteractiveAgent]
-    Interactive --> Service[TextInteractionAgent / AgentService]
+    Coordinator --> Interactive[TurnInteractionAgent]
     Interactive --> Protocol[Tools A2A]
     Protocol --> Jobs[(Jobs PostgreSQL)]
     Jobs --> Worker[Agente worker]
     Worker --> Inbox
     Worker --> Tools[Tools operativas]
-    Interactive --> Gateway[ModelGateway]
-    Worker --> Gateway
-    Gateway --> OpenAI[OpenAI Responses API]
+    Interactive --> InteractiveService[AgentService]
+    InteractiveService --> InteractiveGateway[ModelGateway]
+    InteractiveGateway --> Gemini[Gemini Live API]
+    RealtimeAPI --> RealtimeService[RealtimeAgentService]
+    RealtimeService --> RealtimeGateway[RealtimeModelGateway]
+    RealtimeGateway --> Gemini
+    RealtimeService --> Protocol
+    Worker --> WorkerService[AgentService]
+    WorkerService --> WorkerGateway[ModelGateway]
+    WorkerGateway --> OpenAI[OpenAI Responses API]
     Coordinator --> Outbox[(Interaction outbox)]
     Outbox --> API
-    Service --> Repository[ConversationRepository]
+    InteractiveService --> Repository[ConversationRepository]
+    RealtimeService --> Repository
+    WorkerService --> Repository
     Repository --> Cached[CachedConversationRepository]
     Cached --> PostgreSQL[(PostgreSQL canónico)]
     Cached --> Redis[(Redis contexto reciente)]
 
     classDef core fill:#e8f5e9,stroke:#198754,color:#102a13
     classDef adapter fill:#eef4ff,stroke:#3776ab,color:#10253f
-    class Coordinator,Service,Interactive,Protocol,Worker,Gateway,Repository core
-    class API,Inbox,Outbox,OpenAI,Tools,Jobs,Cached,PostgreSQL,Redis adapter
+    class Coordinator,Interactive,InteractiveService,RealtimeService,Protocol,Worker,WorkerService,Repository core
+    class API,RealtimeAPI,Inbox,Outbox,InteractiveGateway,RealtimeGateway,WorkerGateway,Gemini,OpenAI,Tools,Jobs,Cached,PostgreSQL,Redis adapter
 ```
 
 La dirección de dependencias siempre apunta hacia el núcleo:
@@ -181,19 +259,26 @@ api ----------> application <---------- infrastructure
 | --- | --- |
 | `domain` | Conversaciones, eventos, respuestas y tool calls neutrales. |
 | `application` | Orquestación interactiva, worker A2A, ciclo de tools y puertos. |
-| `infrastructure` | Adaptadores de OpenAI, PostgreSQL, Redis y logging. |
+| `infrastructure` | Adaptadores de Gemini Live, OpenAI, PostgreSQL, Redis y logging. |
 | `api` | Schemas, rutas HTTP/WebSocket y traducción de eventos y errores. |
 | `tools` | Capacidades independientes y registro central. |
 | `bootstrap.py` | Composición de clientes, adaptadores y servicios concretos. |
 
-`AgentService` solo conoce contratos como `ModelGateway` y `ConversationRepository`.
-Los formatos de OpenAI —por ejemplo `function_call_output`— se traducen exclusivamente
-en `OpenAIModelSession`.
+`AgentService` orquesta ejecuciones por turnos para interacción textual, audio con entrada
+textual y trabajo pesado. `RealtimeAgentService` representa la semántica distinta de una
+conexión full-duplex: audio concurrente, varios turnos VAD, interrupciones y cierre ligado
+al socket. Ambos comparten `ToolExecutor`, contratos de tools, `AgentDefinition` y el
+repositorio neutral. `OpenAIModelSession`, `GeminiLiveModelSession` y
+`GeminiRealtimeModelSession` conservan los tipos y estados de sus SDK en `infrastructure`.
 
-`ConversationCoordinator` depende del puerto `InteractiveAgent`, no de un modelo de
-texto concreto. `TextInteractionAgent` adapta el `AgentService` actual y etiqueta sus
-emisiones como texto. Un adaptador STS futuro podrá implementar el mismo puerto y emitir
-audio sin modificar la serialización por conversación ni el worker A2A.
+`ModelRuntime` selecciona y crea gateways, definiciones y clientes desde la configuración,
+comparte un cliente cuando dos roles usan el mismo proveedor y encapsula su cierre. El
+`bootstrap.py` solo recibe servicios neutrales y no importa ningún SDK de modelos.
+
+Con `live_audio`, cada comando textual abre una sesión Gemini aislada y publica audio y
+transcripción en el outbox durable. Con `speech_to_speech`, un segundo endpoint mantiene
+una conexión Gemini durante la vida del WebSocket: el audio cruza de forma efímera y las
+transcripciones, tool calls y resultados se guardan al completar cada turno.
 
 ## Protocolo entre agentes
 
@@ -419,6 +504,8 @@ El protocolo público utiliza eventos neutrales al proveedor:
 | Evento | Significado |
 | --- | --- |
 | `connected` | Confirma la conexión e informa `connection_id` y `session_uid`. |
+| `audio_delta` | PCM16 mono codificado en base64; Gemini lo produce a 24 kHz. |
+| `audio_interrupted` | Obliga a vaciar el buffer de reproducción pendiente. |
 | `text_delta` | Fragmento incremental del texto. |
 | `tool_started` | Una tool validada está a punto de ejecutarse. |
 | `tool_completed` | Resultado, estado, duración y posible error de la tool. |
@@ -442,14 +529,48 @@ producen un evento `error` seguro sin exponer detalles internos.
 `POST /v1/agent/stream` continúa disponible temporalmente como transporte SSE de
 compatibilidad. Los nuevos clientes deben usar el WebSocket.
 
+### WebSocket speech-to-speech
+
+El flujo `speech_to_speech` habilita una conexión distinta:
+
+```text
+ws://127.0.0.1:8000/v1/agent/realtime?session_uid=<uuid>&user_id=<owner>&tenant_id=<tenant>
+```
+
+Después de `connected` y `realtime_ready`, el cliente abre la captura con
+`{"type":"audio_start","turn_id":"<uuid>"}`, envía frames binarios PCM16 y la pausa
+con `{"type":"audio_end"}`. Gemini usa VAD, de modo que un mismo flujo de micrófono puede
+producir varios `turn_completed`. Los turnos posteriores reciben un `turn_id` generado por
+el servidor. También se admite `{"type":"text","turn_id":"<uuid>","text":"..."}` como
+degradación textual dentro de la misma sesión.
+
+El servidor devuelve audio como frames binarios sin base64. El resto son frames JSON:
+
+| Evento | Significado |
+| --- | --- |
+| `realtime_ready` | Informa formatos PCM y confirma la conexión con Gemini. |
+| `audio_started` / `audio_ended` | Confirma los límites del flujo de captura. |
+| `input_transcript_delta` | Fragmento reconocido del micrófono. |
+| `output_transcript_delta` | Fragmento transcrito del audio del asistente. |
+| `audio_interrupted` | Vacía inmediatamente el buffer de reproducción. |
+| `tool_started` / `tool_completed` | Estado de una tool neutral ejecutada durante la voz. |
+| `turn_completed` | Cierra un turno VAD, pero mantiene la sesión abierta. |
+| `error` | Error seguro de control, límites o sesión. |
+
+Los bytes de micrófono y reproducción son efímeros y tienen backpressure directo: no se
+guardan en PostgreSQL, Redis ni el outbox. Al completar un turno se persisten únicamente
+las transcripciones, tool calls y resultados. La desconexión cancela la sesión realtime;
+a diferencia del endpoint durable, los frames de audio no se recuperan al reconectar.
+
 ## Endpoints
 
 | Método | Ruta | Descripción |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check sin consultar dependencias externas. |
 | `POST` | `/v1/sessions` | Crea una sesión vacía y devuelve su `session_uid`. |
-| `WS` | `/v1/agent/ws` | Mantiene una conversación y transmite turnos mediante frames JSON. |
-| `POST` | `/v1/agent/stream` | Transporte SSE conservado durante la migración. |
+| `WS` | `/v1/agent/ws` | Acceso durable por turnos a la doble capa mediante frames JSON. |
+| `WS` | `/v1/agent/realtime` | Primera capa STS full-duplex y el mismo worker de trabajo pesado. |
+| `POST` | `/v1/agent/stream` | Acceso SSE por turnos al mismo núcleo de dos agentes. |
 | `DELETE` | `/v1/conversations/{conversation_id}` | Borra una conversación del propietario indicado. |
 
 El endpoint de borrado recibe `user_id` y, opcionalmente, `tenant_id` como query params:
@@ -471,7 +592,9 @@ curl -X DELETE \
 `weekly_balance_history` solo está registrada en el worker. Para probar el recorrido
 completo de la doble capa, pide al agente interactivo «devuelve mi historial de saldo
 por semana». El primer turno responde que va a consultarlo; cuando el job termina, el
-agente interactivo recibe el resultado y responde proactivamente por el mismo WebSocket.
+agente interactivo recibe el resultado y responde proactivamente por
+`/v1/agent/ws`. En una sesión STS, el estado puede consultarse mediante las tools A2A,
+pero el resultado todavía no se reinyecta automáticamente para que Gemini lo pronuncie.
 
 `send_mock_bizum_to_mom` también pertenece exclusivamente al worker. Exige un importe
 positivo, no permite cambiar el destinatario y devuelve un justificante sintético con
@@ -523,6 +646,7 @@ a todas las tools.
 Los prompts por defecto están versionados como Markdown en:
 
 - `src/prompts/interactive_agent.md`: agente que conversa con el usuario.
+- `src/prompts/live_audio_agent.md`: reglas añadidas solo al flujo de audio nativo.
 - `src/prompts/worker_agent.md`: agente persistente que ejecuta las tools operativas.
 
 `config.py` los carga mediante una ruta relativa al código, independientemente del
@@ -534,11 +658,22 @@ modificar los archivos versionados.
 
 | Variable | Valor por defecto | Propósito |
 | --- | --- | --- |
+| `INTERACTIVE_FLOW` | `speech_to_speech` | Flujo: `text`, `live_audio` o `speech_to_speech`. |
+| `INTERACTIVE_PROVIDER` | `gemini` | Proveedor del agente dirigido al usuario. |
+| `INTERACTIVE_MODEL` | según proveedor | Modelo interactivo; sobrescribe el default del proveedor. |
+| `WORKER_PROVIDER` | `openai` | Proveedor del agente de trabajo pesado. |
 | `OPENAI_API_KEY` | — | Credencial de OpenAI. |
 | `OPENAI_BASE_URL` | — | Base URL alternativa compatible. |
-| `OPENAI_MODEL` | `gpt-5-mini` | Modelo usado por la definición por defecto. |
+| `OPENAI_MODEL` | `gpt-5-mini` | Modelo OpenAI usado como fallback del worker. |
 | `WORKER_AGENT_MODEL` | igual que `OPENAI_MODEL` | Modelo del agente de trabajo. |
 | `OPENAI_CONNECT_TIMEOUT_SECONDS` | `15` | Timeout de conexión. |
+| `GEMINI_API_KEY` | — | Credencial independiente para la capa interactiva. |
+| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Modelo nativo de audio dirigido al usuario. |
+| `GEMINI_LIVE_API_VERSION` | `v1beta` | Versión de la API Live usada por el SDK. |
+| `GEMINI_LIVE_VOICE_NAME` | `Zephyr` | Voz predefinida de salida. |
+| `GEMINI_LIVE_LANGUAGE_CODE` | inferido | Idioma opcional de la voz. |
+| `REALTIME_AUDIO_MAX_CHUNK_BYTES` | `32768` | Máximo por frame PCM16 de entrada. |
+| `REALTIME_SESSION_MAX_SECONDS` | `1800` | Duración máxima de una conexión STS. |
 | `POSTGRES_URL` | `postgresql://.../tesseraflow` | Fuente canónica de conversaciones. |
 | `POSTGRES_POOL_MIN_SIZE` | `1` | Conexiones mínimas por proceso. |
 | `POSTGRES_POOL_MAX_SIZE` | `10` | Conexiones máximas por proceso. |
@@ -558,13 +693,52 @@ modificar los archivos versionados.
 | `LOG_LEVEL` | `INFO` | Nivel de logging. |
 | `LOG_JSON` | `false` | Activa logs JSON estructurados. |
 
+Para conversación textual con OpenAI en ambas capas:
+
+```dotenv
+INTERACTIVE_FLOW=text
+INTERACTIVE_PROVIDER=openai
+INTERACTIVE_MODEL=gpt-5-mini
+WORKER_PROVIDER=openai
+WORKER_AGENT_MODEL=gpt-5
+```
+
+Para Gemini Live delante y OpenAI en el worker:
+
+```dotenv
+INTERACTIVE_FLOW=live_audio
+INTERACTIVE_PROVIDER=gemini
+INTERACTIVE_MODEL=gemini-3.1-flash-live-preview
+WORKER_PROVIDER=openai
+WORKER_AGENT_MODEL=gpt-5
+```
+
+Para micrófono speech-to-speech con Gemini y trabajo pesado en OpenAI:
+
+```dotenv
+INTERACTIVE_FLOW=speech_to_speech
+INTERACTIVE_PROVIDER=gemini
+INTERACTIVE_MODEL=gemini-3.1-flash-live-preview
+GEMINI_API_KEY=...
+WORKER_PROVIDER=openai
+WORKER_AGENT_MODEL=gpt-5
+OPENAI_API_KEY=...
+REALTIME_AUDIO_MAX_CHUNK_BYTES=32768
+REALTIME_SESSION_MAX_SECONDS=1800
+```
+
+Las combinaciones sin adaptador registrado fallan durante la composición, antes de
+aceptar tráfico. Incorporar otro proveedor solo requiere añadir su gateway y registrarlo
+en `infrastructure/model_runtime.py`; `bootstrap.py` y el núcleo no cambian.
+
 Consulta [.env.example](.env.example) para ver una configuración completa.
 
 ## Ciclos de vida y concurrencia
 
-- `AsyncOpenAI`, el pool PostgreSQL y el cliente Redis se crean una vez por proceso
-  durante el `lifespan` y se cierran durante el apagado.
-- Cada ejecución crea una `ModelSession` ligera con su propio estado efímero.
+- Los clientes de modelos seleccionados, el pool PostgreSQL y Redis se crean una vez por
+  proceso durante el `lifespan` y se cierran durante el apagado.
+- Cada turno crea una `ModelSession` ligera; STS crea una `RealtimeModelSession` por
+  WebSocket y la cierra al desconectar o alcanzar su tiempo máximo.
 - No se guarda usuario, historial ni `response_id` en servicios compartidos.
 - El worker se inicia y detiene con el `lifespan`; una interrupción libera su job.
 - El coordinador se inicia con el `lifespan`; una interrupción libera su comando.
@@ -577,10 +751,11 @@ Consulta [.env.example](.env.example) para ver una configuración completa.
   ejecutan concurrentemente y sus resultados se devuelven juntos.
 - Las cancelaciones se propagan y los streams se liberan mediante context managers.
 
-`InteractionCommand.source` distingue `text_user`, `speech_user` y `worker_agent`, y
-`InteractionOutput.modality` distingue `text` y `audio`. Hoy solo hay gateways y eventos
-de texto. Estas etiquetas permiten incorporar una sesión STS como otro productor y
-consumidor del mismo coordinador, sin duplicar la inbox, las leases ni el protocolo A2A.
+`InteractionCommand.source` distingue `text_user`, `speech_user` y `worker_agent`. El
+camino durable por turnos usa inbox/outbox; el camino STS prioriza baja latencia y comunica
+media directamente. Ambos convergen en historial textual neutral, tools A2A y control de
+propiedad. Los resultados proactivos del worker continúan siendo durables en
+`/v1/agent/ws`; desde STS también pueden consultarse mediante las tools A2A.
 
 ## Seguridad y límites actuales
 
@@ -590,6 +765,7 @@ consumidor del mismo coordinador, sin duplicar la inbox, las leases ni el protoc
   para evitar alterar información sensible.
 - Mensajes, argumentos y resultados sí forman parte del historial persistido. El
   cifrado, la clasificación de datos y la retención legal dependen del despliegue.
+- El audio realtime no se persiste, pero sus transcripciones sí forman parte del historial.
 - Esta base no implementa todavía autenticación, autorización externa, cifrado a nivel
   de aplicación ni políticas regulatorias específicas.
 

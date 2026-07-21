@@ -23,7 +23,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container = await build_container(settings)
         app.state.container = container
         container.start()
-        logger.info("application_started", app_name=settings.app_name, model=settings.openai_model)
+        logger.info(
+            "application_started",
+            app_name=settings.app_name,
+            interactive_flow=settings.interactive_flow,
+            interactive_provider=container.model_runtime.interactive_provider,
+            interactive_model=container.default_agent.model,
+            worker_provider=container.model_runtime.worker_provider,
+            worker_model=container.model_runtime.worker_definition.model,
+        )
         try:
             yield
         finally:

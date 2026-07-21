@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,10 +13,16 @@ from starlette.websockets import WebSocketDisconnect
 from api.middleware import request_logging_middleware
 from api.routes import router
 from application.conversations import ConversationNotFoundError
-from domain.agent import AgentResult
+from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import Conversation, ConversationKey
 from domain.events import AgentStreamCompleted, AgentTextDelta
 from domain.interactions import InteractionCommand, InteractionOutput
+from domain.realtime import (
+    RealtimeAgentEvent,
+    RealtimeAudioDelta,
+    RealtimeOutputTranscriptDelta,
+    RealtimeTurnCompleted,
+)
 
 SESSION_UID = "12345678-1234-4678-9234-567812345678"
 REQUEST_UID = "87654321-4321-4765-8321-876543218765"
@@ -133,14 +140,93 @@ class StubConversationService:
         return True
 
 
+class StubRealtimeSession:
+    """Capture realtime WebSocket input and emit deterministic binary output."""
+
+    def __init__(self) -> None:
+        """Initialize media captures and an asynchronous event queue."""
+        self.audio: list[bytes] = []
+        self.started_turns: list[str] = []
+        self.audio_end_count = 0
+        self.pending: asyncio.Queue[RealtimeAgentEvent] = asyncio.Queue()
+
+    async def start_audio(self, turn_id: str) -> None:
+        """Capture one logical audio start boundary."""
+        self.started_turns.append(turn_id)
+
+    async def send_audio(self, data: bytes) -> None:
+        """Capture one raw binary client frame."""
+        self.audio.append(data)
+
+    async def end_audio(self) -> None:
+        """Capture one paused input stream."""
+        self.audio_end_count += 1
+
+    async def send_text(self, turn_id: str, text: str) -> None:
+        """Emit transcript, raw audio, and completion for one fallback turn."""
+        assert text == "Hola realtime"
+        await self.pending.put(RealtimeOutputTranscriptDelta(turn_id=turn_id, text="Respuesta"))
+        await self.pending.put(
+            RealtimeAudioDelta(
+                turn_id=turn_id,
+                data=b"\x01\x02",
+                mime_type="audio/pcm;rate=24000",
+            )
+        )
+        await self.pending.put(
+            RealtimeTurnCompleted(
+                turn_id=turn_id,
+                result=AgentResult(
+                    answer="Respuesta",
+                    response_id="realtime-response",
+                    conversation_id=SESSION_UID,
+                ),
+            )
+        )
+
+    async def events(self) -> AsyncIterator[RealtimeAgentEvent]:
+        """Wait for and yield events until socket cancellation."""
+        while True:
+            yield await self.pending.get()
+
+
+class StubRealtimeService:
+    """Open one deterministic realtime application session."""
+
+    def __init__(self) -> None:
+        """Expose one reusable session for transport assertions."""
+        self.session = StubRealtimeSession()
+
+    @asynccontextmanager
+    async def open_session(
+        self,
+        definition: AgentDefinition,
+        conversation_key: ConversationKey,
+    ) -> AsyncIterator[StubRealtimeSession]:
+        """Validate route composition and yield the transport double."""
+        assert definition.model == "realtime-model"
+        assert conversation_key == ConversationKey(
+            conversation_id=SESSION_UID,
+            user_id="user-1",
+        )
+        yield self.session
+
+
 def build_test_app(
     coordinator: StubConversationCoordinator | None = None,
+    realtime_service: StubRealtimeService | None = None,
 ) -> FastAPI:
     """Build the API with coordinator and conversation lifecycle doubles."""
     app = FastAPI()
     app.state.container = SimpleNamespace(
         conversation_coordinator=coordinator or StubConversationCoordinator(),
         conversation_service=StubConversationService(),
+        realtime_agent_service=realtime_service,
+        default_agent=AgentDefinition(
+            model="realtime-model",
+            instructions="Be helpful.",
+            tool_names=(),
+        ),
     )
     app.middleware("http")(request_logging_middleware)
     app.include_router(router)
@@ -266,6 +352,71 @@ def test_agent_websocket_disconnect_does_not_discard_the_submitted_command() -> 
             assert websocket.receive_json()["data"] == {"text": "Hola"}
 
     assert len(coordinator.commands) == 1
+
+
+def test_realtime_websocket_bridges_binary_pcm_and_semantic_events() -> None:
+    """Keep PCM frames binary while control, transcripts, and completion remain JSON."""
+    service = StubRealtimeService()
+    with TestClient(build_test_app(realtime_service=service)) as client:
+        with client.websocket_connect(
+            f"/v1/agent/realtime?session_uid={SESSION_UID}&user_id=user-1"
+        ) as websocket:
+            connected = websocket.receive_json()
+            ready = websocket.receive_json()
+            websocket.send_json({"type": "audio_start", "turn_id": REQUEST_UID})
+            started = websocket.receive_json()
+            websocket.send_bytes(b"\x00\x00\x01\x00")
+            websocket.send_json({"type": "audio_end"})
+            ended = websocket.receive_json()
+            websocket.send_json(
+                {
+                    "type": "text",
+                    "turn_id": SECOND_REQUEST_UID,
+                    "text": "Hola realtime",
+                }
+            )
+            transcript = websocket.receive_json()
+            audio = websocket.receive_bytes()
+            completed = websocket.receive_json()
+
+    assert connected["type"] == "connected"
+    assert connected["data"]["flow"] == "speech_to_speech"
+    assert ready == {
+        "type": "realtime_ready",
+        "data": {
+            "input_audio": "audio/pcm;rate=16000",
+            "output_audio": "audio/pcm;rate=24000",
+            "binary_audio_frames": True,
+        },
+    }
+    assert started == {
+        "type": "audio_started",
+        "data": {"turn_id": REQUEST_UID},
+    }
+    assert ended == {"type": "audio_ended", "data": {}}
+    assert service.session.audio == [b"\x00\x00\x01\x00"]
+    assert service.session.audio_end_count == 1
+    assert transcript == {
+        "type": "output_transcript_delta",
+        "data": {"turn_id": SECOND_REQUEST_UID, "text": "Respuesta"},
+    }
+    assert audio == b"\x01\x02"
+    assert completed["type"] == "turn_completed"
+    assert completed["data"]["turn_id"] == SECOND_REQUEST_UID
+    assert completed["data"]["answer"] == "Respuesta"
+
+
+def test_realtime_websocket_requires_speech_to_speech_configuration() -> None:
+    """Reject the realtime handshake when no full-duplex service was composed."""
+    with TestClient(build_test_app()) as client:
+        with pytest.raises(WebSocketDisconnect) as raised:
+            with client.websocket_connect(
+                f"/v1/agent/realtime?session_uid={SESSION_UID}&user_id=user-1"
+            ):
+                pass
+
+    assert raised.value.code == 1008
+    assert raised.value.reason == "speech_to_speech flow is not configured"
 
 
 async def test_stream_rejects_an_unknown_session_before_starting_sse() -> None:

@@ -9,7 +9,12 @@ from application.agent import AgentService
 from application.ports import InteractionRepository, InteractiveAgent
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey
-from domain.events import AgentStreamCompleted, AgentStreamFailed
+from domain.events import (
+    AgentAudioDelta,
+    AgentAudioInterrupted,
+    AgentStreamCompleted,
+    AgentStreamFailed,
+)
 from domain.interactions import (
     InteractionCommand,
     InteractionEmission,
@@ -25,16 +30,16 @@ class InteractionQueueFullError(RuntimeError):
     """Raised when a conversation already has its configured pending command limit."""
 
 
-class TextInteractionAgent:
-    """Adapt the existing text AgentService to the modality-neutral coordinator port."""
+class TurnInteractionAgent:
+    """Adapt turn-based AgentService events to the modality-neutral coordinator."""
 
     def __init__(self, service: AgentService, definition: AgentDefinition) -> None:
-        """Bind text orchestration and its immutable model definition."""
+        """Bind shared orchestration and its immutable model definition."""
         self._service = service
         self._definition = definition
 
     async def stream(self, command: InteractionCommand) -> AsyncIterator[InteractionEmission]:
-        """Tag every existing agent event as text while preserving input provenance."""
+        """Tag audio and non-audio events while preserving input provenance."""
         events = self._service.stream(
             command.message,
             self._definition,
@@ -43,7 +48,14 @@ class TextInteractionAgent:
         )
         async with aclosing(events):
             async for event in events:
-                yield InteractionEmission(modality="text", event=event)
+                if isinstance(event, AgentAudioDelta | AgentAudioInterrupted):
+                    yield InteractionEmission(modality="audio", event=event)
+                else:
+                    yield InteractionEmission(modality="text", event=event)
+
+
+class TextInteractionAgent(TurnInteractionAgent):
+    """Backward-compatible name for the turn-based interaction adapter."""
 
 
 class ConversationCoordinator:

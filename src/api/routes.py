@@ -15,6 +15,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from starlette.requests import HTTPConnection
 
+from api.realtime_websocket import serve_realtime_websocket
 from api.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
@@ -29,6 +30,7 @@ from application.conversations import (
     ConversationService,
 )
 from application.interactions import ConversationCoordinator, InteractionQueueFullError
+from application.realtime import RealtimeAgentService
 from bootstrap import AppContainer
 from domain.conversations import ConversationKey
 
@@ -53,6 +55,13 @@ def get_conversation_service(
 ) -> ConversationService:
     """Resolve conversation lifecycle operations for an HTTP request."""
     return container.conversation_service
+
+
+def get_realtime_agent_service(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> RealtimeAgentService | None:
+    """Resolve the optional full-duplex service selected at process startup."""
+    return container.realtime_agent_service
 
 
 @router.get("/health", tags=["system"])
@@ -171,6 +180,60 @@ async def agent_websocket(
     )
     logger.info("agent_websocket_connected")
     await serve_agent_websocket(websocket, coordinator, key)
+
+
+@router.websocket("/v1/agent/realtime")
+async def realtime_agent_websocket(
+    websocket: WebSocket,
+    session_uid: Annotated[UUID, Query()],
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    service: Annotated[RealtimeAgentService | None, Depends(get_realtime_agent_service)],
+    container: Annotated[AppContainer, Depends(get_container)],
+    conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
+    tenant_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+) -> None:
+    """Bridge raw PCM frames to a configured full-duplex provider session."""
+    if service is None:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="speech_to_speech flow is not configured",
+        )
+    key = ConversationKey(
+        conversation_id=str(session_uid),
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
+    try:
+        await conversation_service.require(key)
+    except ConversationNotFoundError as exc:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Session not found",
+        ) from exc
+    except ConversationAccessDeniedError as exc:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Conversation access denied",
+        ) from exc
+    connection_id = websocket.headers.get("x-request-id") or str(uuid4())
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        connection_id=connection_id,
+        conversation_id=key.conversation_id,
+    )
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "connected",
+            "data": {
+                "connection_id": connection_id,
+                "session_uid": str(session_uid),
+                "flow": "speech_to_speech",
+            },
+        }
+    )
+    logger.info("realtime_websocket_connected")
+    await serve_realtime_websocket(websocket, service, container.default_agent, key)
 
 
 @router.delete("/v1/conversations/{conversation_id}", tags=["agent"])

@@ -1,11 +1,16 @@
+import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, Generic, TypeVar
 
+import structlog
 from pydantic import BaseModel, ConfigDict
 
 from domain.conversations import ConversationKey
-from domain.tools import ToolSpec
+from domain.tools import ToolCall, ToolCallRecord, ToolResult, ToolSpec
 from domain.types import JsonObject
+
+logger = structlog.get_logger(__name__)
 
 
 class ToolArguments(BaseModel):
@@ -113,3 +118,73 @@ class ToolRegistry:
         except KeyError as exc:
             raise ToolNotFoundError(f"Unknown tool: {name}") from exc
         return await tool.invoke(arguments, context)
+
+
+class ToolExecutor:
+    """Execute validated model tool calls and produce neutral audit records."""
+
+    async def execute(
+        self,
+        calls: tuple[ToolCall, ...],
+        tools: ToolRegistry,
+        context: ToolExecutionContext,
+    ) -> tuple[tuple[ToolCallRecord, ...], tuple[ToolResult, ...]]:
+        """Execute one complete batch concurrently and preserve call ordering."""
+        executions = await asyncio.gather(
+            *(self._execute_call(call, tools, context) for call in calls)
+        )
+        records, results = zip(*executions, strict=True)
+        return tuple(records), tuple(results)
+
+    async def _execute_call(
+        self,
+        call: ToolCall,
+        tools: ToolRegistry,
+        context: ToolExecutionContext,
+    ) -> tuple[ToolCallRecord, ToolResult]:
+        """Measure one invocation and convert expected failures into model results."""
+        started = time.perf_counter()
+        logger.info("tool_call_started", call_id=call.call_id, tool_name=call.tool_name)
+        try:
+            output = await tools.execute(call.tool_name, call.arguments, context)
+            duration_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                "tool_call_completed",
+                call_id=call.call_id,
+                tool_name=call.tool_name,
+                duration_ms=round(duration_ms, 2),
+            )
+            return (
+                ToolCallRecord(
+                    call_id=call.call_id,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    status="success",
+                    output=output,
+                    error=None,
+                    duration_ms=duration_ms,
+                ),
+                ToolResult(call_id=call.call_id, output=output),
+            )
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - started) * 1000
+            error_message = str(exc) or type(exc).__name__
+            logger.warning(
+                "tool_call_failed",
+                call_id=call.call_id,
+                tool_name=call.tool_name,
+                error_type=type(exc).__name__,
+                duration_ms=round(duration_ms, 2),
+            )
+            return (
+                ToolCallRecord(
+                    call_id=call.call_id,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    status="error",
+                    output=None,
+                    error=error_message,
+                    duration_ms=duration_ms,
+                ),
+                ToolResult(call_id=call.call_id, error=error_message),
+            )

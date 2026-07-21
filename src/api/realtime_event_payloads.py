@@ -1,0 +1,48 @@
+from typing import Any
+
+from api.schemas import ToolCallResponse
+from domain.realtime import (
+    RealtimeAgentEvent,
+    RealtimeAudioInterrupted,
+    RealtimeInputTranscriptDelta,
+    RealtimeOutputTranscriptDelta,
+    RealtimeToolCompleted,
+    RealtimeToolStarted,
+    RealtimeTurnCompleted,
+)
+
+
+def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, Any]]:
+    """Translate one non-media realtime event into a public JSON payload."""
+    if isinstance(event, RealtimeInputTranscriptDelta):
+        return "input_transcript_delta", {"turn_id": event.turn_id, "text": event.text}
+    if isinstance(event, RealtimeOutputTranscriptDelta):
+        return "output_transcript_delta", {"turn_id": event.turn_id, "text": event.text}
+    if isinstance(event, RealtimeAudioInterrupted):
+        return "audio_interrupted", {"turn_id": event.turn_id}
+    if isinstance(event, RealtimeToolStarted):
+        return "tool_started", {
+            "turn_id": event.turn_id,
+            "call_id": event.call_id,
+            "tool_name": event.tool_name,
+        }
+    if isinstance(event, RealtimeToolCompleted):
+        record = event.record
+        payload = ToolCallResponse(
+            call_id=record.call_id,
+            tool_name=record.tool_name,
+            arguments=record.arguments,
+            status=record.status,
+            output=record.output,
+            error=record.error,
+            duration_ms=round(record.duration_ms, 2),
+        ).model_dump(mode="json")
+        return "tool_completed", {"turn_id": event.turn_id, **payload}
+    if isinstance(event, RealtimeTurnCompleted):
+        return "turn_completed", {
+            "turn_id": event.turn_id,
+            "answer": event.result.answer,
+            "response_id": event.result.response_id,
+            "session_uid": event.result.conversation_id,
+        }
+    raise TypeError(f"Unsupported realtime JSON event: {type(event).__name__}")

@@ -14,13 +14,28 @@ class ModelTextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelAudioDelta:
+    """Provider-neutral PCM fragment emitted while a model is responding."""
+
+    data: bytes
+    mime_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelAudioInterrupted:
+    """Signal that buffered model audio must be discarded after interruption."""
+
+
+@dataclass(frozen=True, slots=True)
 class ModelStreamCompleted:
     """Terminal model-stream event containing the fully accumulated reply."""
 
     reply: ModelReply
 
 
-ModelStreamEvent: TypeAlias = ModelTextDelta | ModelStreamCompleted
+ModelStreamEvent: TypeAlias = (
+    ModelTextDelta | ModelAudioDelta | ModelAudioInterrupted | ModelStreamCompleted
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +43,19 @@ class AgentTextDelta:
     """Text fragment ready to be forwarded to an agent-stream consumer."""
 
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAudioDelta:
+    """Provider-neutral PCM fragment ready for a realtime transport consumer."""
+
+    data: bytes
+    mime_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAudioInterrupted:
+    """Tell clients to discard buffered playback after a model interruption."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +90,8 @@ class AgentStreamFailed:
 
 AgentStreamEvent: TypeAlias = (
     AgentTextDelta
+    | AgentAudioDelta
+    | AgentAudioInterrupted
     | AgentToolStarted
     | AgentToolCompleted
     | AgentStreamCompleted

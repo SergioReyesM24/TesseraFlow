@@ -140,12 +140,13 @@ async def test_openai_session_translates_tool_calls_and_results() -> None:
         ]
     )
     client = SimpleNamespace(responses=resource)
-    session = OpenAIResponsesGateway(client).create_session(definition(), (calculator_spec(),), ())
-
-    first_reply = await session.send_message("Suma 2 y 3")
-    final_reply = await session.send_tool_results(
-        (ToolResult(call_id="call_1", output={"result": 5}),)
-    )
+    async with OpenAIResponsesGateway(client).open_session(
+        definition(), (calculator_spec(),), ()
+    ) as session:
+        first_reply = await session.send_message("Suma 2 y 3")
+        final_reply = await session.send_tool_results(
+            (ToolResult(call_id="call_1", output={"result": 5}),)
+        )
 
     assert first_reply.tool_calls[0].tool_name == "calculator"
     assert first_reply.tool_calls[0].arguments == {"a": 2, "b": 3}
@@ -173,11 +174,12 @@ async def test_gateway_creates_isolated_sessions_with_a_shared_client() -> None:
     )
     client = SimpleNamespace(responses=resource)
     gateway = OpenAIResponsesGateway(client)
-    session_a = gateway.create_session(definition(), (), ())
-    session_b = gateway.create_session(definition(), (), ())
-
-    await session_a.send_message("Mensaje A")
-    await session_b.send_message("Mensaje B")
+    async with (
+        gateway.open_session(definition(), (), ()) as session_a,
+        gateway.open_session(definition(), (), ()) as session_b,
+    ):
+        await session_a.send_message("Mensaje A")
+        await session_b.send_message("Mensaje B")
 
     assert resource.requests[0]["input"] == [{"role": "user", "content": "Mensaje A"}]
     assert resource.requests[1]["input"] == [{"role": "user", "content": "Mensaje B"}]
@@ -211,15 +213,16 @@ async def test_openai_stream_normalizes_deltas_and_continues_after_a_tool() -> N
         ],
     )
     client = SimpleNamespace(responses=resource)
-    session = OpenAIResponsesGateway(client).create_session(definition(), (calculator_spec(),), ())
-
-    first_events = [event async for event in session.stream_message("Suma 2 y 3")]
-    second_events = [
-        event
-        async for event in session.stream_tool_results(
-            (ToolResult(call_id="call_1", output={"result": 5}),)
-        )
-    ]
+    async with OpenAIResponsesGateway(client).open_session(
+        definition(), (calculator_spec(),), ()
+    ) as session:
+        first_events = [event async for event in session.stream_message("Suma 2 y 3")]
+        second_events = [
+            event
+            async for event in session.stream_tool_results(
+                (ToolResult(call_id="call_1", output={"result": 5}),)
+            )
+        ]
 
     assert isinstance(first_events[-1], ModelStreamCompleted)
     assert first_events[-1].reply.tool_calls[0].tool_name == "calculator"
@@ -248,9 +251,8 @@ async def test_openai_session_translates_neutral_history_to_provider_input() -> 
         ToolResult(call_id="call_old", output={"result": 5}),
         ConversationMessage(role="assistant", content="El resultado es 5."),
     )
-    session = OpenAIResponsesGateway(client).create_session(definition(), (), history)
-
-    await session.send_message("Continúa")
+    async with OpenAIResponsesGateway(client).open_session(definition(), (), history) as session:
+        await session.send_message("Continúa")
 
     assert resource.requests[0]["input"] == [
         {"role": "user", "content": "Hola"},
