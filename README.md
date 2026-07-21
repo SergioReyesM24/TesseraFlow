@@ -425,7 +425,9 @@ SQL se han aplicado. No contiene conversaciones, mensajes ni estado de los agent
 Las migraciones `001_conversations.sql`, `002_a2a_jobs.sql` y
 `003_interaction_inbox_outbox.sql` crean esas tablas por bloques. La migración
 `004_interaction_notifications.sql` añade triggers `LISTEN/NOTIFY` sin convertir las
-notificaciones en fuente de verdad. Su estructura principal es la siguiente:
+notificaciones en fuente de verdad. `005_interaction_audio_events.sql` amplía el outbox
+para persistir los eventos neutrales `audio_delta` y `audio_interrupted`. Su estructura
+principal es la siguiente:
 
 ```text
 conversations

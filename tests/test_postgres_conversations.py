@@ -264,8 +264,13 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "CREATE TABLE IF NOT EXISTS a2a_jobs" in combined_sql
     assert "CREATE TRIGGER interaction_command_notify_trigger" in combined_sql
     assert "CREATE TRIGGER interaction_output_notify_trigger" in combined_sql
+    assert "'audio_delta'" in combined_sql
+    assert "'audio_interrupted'" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
     assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)
     assert any(
         args == ("004_interaction_notifications.sql",) for _, args in pool.connection.statements
+    )
+    assert any(
+        args == ("005_interaction_audio_events.sql",) for _, args in pool.connection.statements
     )
