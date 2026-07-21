@@ -1,18 +1,28 @@
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from domain.agent import AgentResult
 
 
 class StreamAgentRequest(BaseModel):
-    """Validated streaming input for a previously created session."""
+    """Validated input for the backwards-compatible SSE endpoint."""
 
     message: str = Field(min_length=1, max_length=20_000)
     session_uid: UUID
     user_id: str = Field(min_length=1, max_length=128)
     tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class AgentWebSocketRequest(BaseModel):
+    """One correlated user turn received through an established agent socket."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["message"]
+    request_id: UUID = Field(default_factory=uuid4)
+    message: str = Field(min_length=1, max_length=20_000)
 
 
 class CreateSessionRequest(BaseModel):

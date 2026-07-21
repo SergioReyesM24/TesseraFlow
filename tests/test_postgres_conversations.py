@@ -261,4 +261,7 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "metadata JSONB" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS conversation_items" in combined_sql
     assert "REFERENCES conversations(id) ON DELETE CASCADE" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS a2a_threads" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS a2a_jobs" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
+    assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)

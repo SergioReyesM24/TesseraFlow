@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field
 
-from application.tools import AgentTool, ToolArguments
+from application.tools import AgentTool, ToolArguments, ToolExecutionContext
 
 
 class CurrentTimeArguments(ToolArguments):
@@ -22,8 +22,13 @@ class CurrentTimeTool(AgentTool[CurrentTimeArguments]):
     description = "Returns the current date and time in an IANA timezone."
     arguments_model: ClassVar[type[CurrentTimeArguments]] = CurrentTimeArguments
 
-    async def execute(self, arguments: CurrentTimeArguments) -> object:
+    async def execute(
+        self,
+        arguments: CurrentTimeArguments,
+        context: ToolExecutionContext,
+    ) -> object:
         """Resolve the timezone and return an ISO 8601 timestamp."""
+        del context
         try:
             timezone = ZoneInfo(arguments.timezone)
         except ZoneInfoNotFoundError as exc:

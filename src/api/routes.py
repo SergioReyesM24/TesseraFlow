@@ -1,7 +1,19 @@
 from typing import Annotated, cast
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+import structlog
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    WebSocket,
+    WebSocketException,
+    status,
+)
 from fastapi.responses import StreamingResponse
+from starlette.requests import HTTPConnection
 
 from api.schemas import (
     CreateSessionRequest,
@@ -9,6 +21,7 @@ from api.schemas import (
     StreamAgentRequest,
 )
 from api.sse import encode_agent_stream
+from api.websocket import serve_agent_websocket
 from application.agent import AgentService
 from application.conversations import (
     ConversationAccessDeniedError,
@@ -21,11 +34,12 @@ from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
 
 
-def get_container(request: Request) -> AppContainer:
-    """Return the application container attached during FastAPI startup."""
-    return cast(AppContainer, request.app.state.container)
+def get_container(connection: HTTPConnection) -> AppContainer:
+    """Return the application container for an HTTP or WebSocket connection."""
+    return cast(AppContainer, connection.app.state.container)
 
 
 def get_agent_service(
@@ -98,6 +112,55 @@ async def stream_agent(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.websocket("/v1/agent/ws")
+async def agent_websocket(
+    websocket: WebSocket,
+    session_uid: Annotated[UUID, Query()],
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    agent_service: Annotated[AgentService, Depends(get_agent_service)],
+    conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
+    definition: Annotated[AgentDefinition, Depends(get_agent_definition)],
+    tenant_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+) -> None:
+    """Keep an owned conversation open and stream each correlated turn as JSON."""
+    key = ConversationKey(
+        conversation_id=str(session_uid),
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
+    try:
+        await conversation_service.require(key)
+    except ConversationNotFoundError as exc:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Session not found",
+        ) from exc
+    except ConversationAccessDeniedError as exc:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Conversation access denied",
+        ) from exc
+
+    connection_id = websocket.headers.get("x-request-id") or str(uuid4())
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        connection_id=connection_id,
+        conversation_id=key.conversation_id,
+    )
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "connected",
+            "data": {
+                "connection_id": connection_id,
+                "session_uid": str(session_uid),
+            },
+        }
+    )
+    logger.info("agent_websocket_connected")
+    await serve_agent_websocket(websocket, agent_service, definition, key)
 
 
 @router.delete("/v1/conversations/{conversation_id}", tags=["agent"])

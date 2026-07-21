@@ -1,12 +1,12 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import structlog
 
 from application.conversations import ConversationNotFoundError
 from application.ports import ConversationRepository, ModelGateway
-from application.tools import ToolRegistry
+from application.tools import ToolExecutionContext, ToolRegistry
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import (
     Conversation,
@@ -94,7 +94,11 @@ class AgentService:
             if not reply.tool_calls:
                 break
 
-            round_records, results = await self._execute_tools(reply.tool_calls, selected_tools)
+            round_records, results = await self._execute_tools(
+                reply.tool_calls,
+                selected_tools,
+                ToolExecutionContext.from_conversation(conversation_key),
+            )
             records.extend(round_records)
             turn_items.extend(reply.tool_calls)
             turn_items.extend(results)
@@ -123,7 +127,7 @@ class AgentService:
         message: str,
         definition: AgentDefinition,
         conversation_key: ConversationKey,
-    ) -> AsyncIterator[AgentStreamEvent]:
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
         """Stream one conversation turn and persist it before terminal success."""
         conversation = await self._load_conversation(conversation_key)
         selected_tools = self._tools.select(definition.tool_names)
@@ -185,7 +189,9 @@ class AgentService:
             for call in completed_reply.tool_calls:
                 yield AgentToolStarted(call_id=call.call_id, tool_name=call.tool_name)
             round_records, results = await self._execute_tools(
-                completed_reply.tool_calls, selected_tools
+                completed_reply.tool_calls,
+                selected_tools,
+                ToolExecutionContext.from_conversation(conversation_key),
             )
             records.extend(round_records)
             turn_items.extend(completed_reply.tool_calls)
@@ -215,9 +221,12 @@ class AgentService:
         self,
         calls: tuple[ToolCall, ...],
         tools: ToolRegistry,
+        context: ToolExecutionContext,
     ) -> tuple[tuple[ToolCallRecord, ...], tuple[ToolResult, ...]]:
         """Execute a batch of independent tool calls concurrently."""
-        executions = await asyncio.gather(*(self._execute_tool_call(call, tools) for call in calls))
+        executions = await asyncio.gather(
+            *(self._execute_tool_call(call, tools, context) for call in calls)
+        )
         records, results = zip(*executions, strict=True)
         return tuple(records), tuple(results)
 
@@ -225,13 +234,14 @@ class AgentService:
         self,
         call: ToolCall,
         tools: ToolRegistry,
+        context: ToolExecutionContext,
     ) -> tuple[ToolCallRecord, ToolResult]:
         """Execute and measure one tool call, converting failures into results."""
         started = time.perf_counter()
         logger.info("tool_call_started", call_id=call.call_id, tool_name=call.tool_name)
 
         try:
-            output = await tools.execute(call.tool_name, call.arguments)
+            output = await tools.execute(call.tool_name, call.arguments, context)
             duration_ms = (time.perf_counter() - started) * 1000
             logger.info(
                 "tool_call_completed",

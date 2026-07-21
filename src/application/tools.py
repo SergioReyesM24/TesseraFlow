@@ -3,6 +3,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
+from domain.conversations import ConversationKey
 from domain.tools import ToolSpec
 from domain.types import JsonObject
 
@@ -16,6 +17,31 @@ class ToolArguments(BaseModel):
 ArgumentsT = TypeVar("ArgumentsT", bound=ToolArguments)
 
 
+class ToolExecutionContext(BaseModel):
+    """Explicit multiuser context supplied to tools for one isolated execution."""
+
+    conversation_id: str
+    user_id: str
+    tenant_id: str | None = None
+
+    @classmethod
+    def from_conversation(cls, key: ConversationKey) -> "ToolExecutionContext":
+        """Build a validated tool context from the owned conversation key."""
+        return cls(
+            conversation_id=key.conversation_id,
+            user_id=key.user_id,
+            tenant_id=key.tenant_id,
+        )
+
+    def conversation_key(self) -> ConversationKey:
+        """Recover the neutral ownership key needed by application services."""
+        return ConversationKey(
+            conversation_id=self.conversation_id,
+            user_id=self.user_id,
+            tenant_id=self.tenant_id,
+        )
+
+
 class AgentTool(ABC, Generic[ArgumentsT]):
     """Small interface implemented by every local function tool."""
 
@@ -24,7 +50,7 @@ class AgentTool(ABC, Generic[ArgumentsT]):
     arguments_model: ClassVar[type[ArgumentsT]]
 
     @abstractmethod
-    async def execute(self, arguments: ArgumentsT) -> Any:
+    async def execute(self, arguments: ArgumentsT, context: ToolExecutionContext) -> Any:
         """Execute validated arguments and return a JSON-serializable value."""
 
     def spec(self) -> ToolSpec:
@@ -35,10 +61,10 @@ class AgentTool(ABC, Generic[ArgumentsT]):
             arguments_schema=self.arguments_model.model_json_schema(),
         )
 
-    async def invoke(self, raw_arguments: JsonObject) -> Any:
+    async def invoke(self, raw_arguments: JsonObject, context: ToolExecutionContext) -> Any:
         """Validate untrusted model arguments before invoking the implementation."""
         arguments = self.arguments_model.model_validate(raw_arguments)
-        return await self.execute(arguments)
+        return await self.execute(arguments, context)
 
 
 class ToolNotFoundError(LookupError):
@@ -75,10 +101,15 @@ class ToolRegistry:
         except KeyError as exc:
             raise ToolNotFoundError(f"Unknown tool in agent definition: {exc.args[0]}") from exc
 
-    async def execute(self, name: str, arguments: JsonObject) -> Any:
+    async def execute(
+        self,
+        name: str,
+        arguments: JsonObject,
+        context: ToolExecutionContext,
+    ) -> Any:
         """Execute a named tool after validating its provider-neutral arguments."""
         try:
             tool = self._tools[name]
         except KeyError as exc:
             raise ToolNotFoundError(f"Unknown tool: {name}") from exc
-        return await tool.invoke(arguments)
+        return await tool.invoke(arguments, context)

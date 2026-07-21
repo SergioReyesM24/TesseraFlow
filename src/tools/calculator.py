@@ -4,7 +4,7 @@ from typing import ClassVar, Literal
 
 from pydantic import Field
 
-from application.tools import AgentTool, ToolArguments
+from application.tools import AgentTool, ToolArguments, ToolExecutionContext
 
 
 class CalculatorArguments(ToolArguments):
@@ -24,8 +24,13 @@ class CalculatorTool(AgentTool[CalculatorArguments]):
     description = "Performs one exact arithmetic operation with two decimal numbers."
     arguments_model: ClassVar[type[CalculatorArguments]] = CalculatorArguments
 
-    async def execute(self, arguments: CalculatorArguments) -> object:
+    async def execute(
+        self,
+        arguments: CalculatorArguments,
+        context: ToolExecutionContext,
+    ) -> object:
         """Apply the requested arithmetic operation to two decimal operands."""
+        del context
         operations = {
             "add": operator.add,
             "subtract": operator.sub,

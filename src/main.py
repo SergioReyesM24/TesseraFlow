@@ -22,6 +22,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Create shared resources on startup and close them during shutdown."""
         container = await build_container(settings)
         app.state.container = container
+        container.start()
         logger.info("application_started", app_name=settings.app_name, model=settings.openai_model)
         try:
             yield
