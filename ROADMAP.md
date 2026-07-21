@@ -58,12 +58,57 @@ binario a 16 kHz, devuelve PCM16 a 24 kHz, conserva ambas transcripciones, sopor
 barge-in, varios turnos, tools neutrales, degradación textual, backpressure y límites de
 tamaño y duración. El audio es efímero; el historial semántico se persiste por turno.
 
+### Robustez del canal bidireccional
+
+El flujo futuro concentrará todas las escrituras hacia la sesión realtime en una única
+tarea por conexión:
+
+```text
+Tarea WebSocket:
+  audio/texto/audio_end ─┐
+                         │
+Tarea de eventos/tools:  ├──> cola acotada ──> único escritor ──> proveedor realtime
+  tool_results ─────────┘
+```
+
+Aspectos que deberá cubrir:
+
+- Introducir un único escritor por sesión hacia el proveedor realtime. Audio, texto,
+  señales de actividad, finalización del stream, respuestas de tools y cierre deberán
+  representarse mediante comandos neutrales y ser enviados exclusivamente por una
+  coroutine propietaria de la conexión. Ninguna otra tarea deberá invocar directamente
+  métodos de envío del SDK.
+- Alimentar el escritor mediante una cola acotada por sesión, con backpressure y límites
+  configurables por número de mensajes, bytes o tiempo máximo de audio pendiente. Definir
+  una política explícita ante saturación que evite tanto el crecimiento ilimitado de
+  memoria como la acumulación de audio obsoleto, y registrar métricas de profundidad,
+  tiempo en cola y descartes.
+- Añadir reanudación de sesiones realtime y tratamiento de señales de desconexión
+  anticipada como `GoAway`. El adaptador deberá conservar de forma efímera el handle de
+  reanudación, reconstruir la conexión sin duplicar el historial ni los resultados de
+  tools y aplicar límites explícitos de intentos y tiempo. Estos conceptos deberán
+  exponerse al núcleo mediante eventos neutrales, sin filtrar formatos de Gemini.
+- Exponer eventos neutrales de actividad de voz, como inicio y fin de habla, y permitir
+  configurar por sesión detección automática del proveedor o señales explícitas generadas
+  por el cliente. La configuración deberá admitir futuros proveedores con capacidades VAD
+  diferentes y mantener separados el estado de la interfaz, la delimitación lógica del
+  turno y los mensajes concretos del SDK.
+
+Pruebas previstas:
+
+- Verificar que audio, texto y resultados de tools concurrentes nunca producen llamadas
+  simultáneas al SDK ni alteran su orden causal.
+- Saturar la cola y comprobar backpressure, límites de memoria, política de descarte y
+  propagación de cancelaciones.
+- Simular una desconexión recuperable y comprobar que la sesión se reanuda sin duplicar
+  historial, tool calls ni turnos persistidos.
+- Comprobar VAD automático y explícito, barge-in y publicación correcta de los eventos de
+  inicio y fin de actividad.
+
 Extensiones que continúan fuera de alcance:
 
 - Añadir WebRTC cuando se necesiten jitter buffers, negociación de codecs, cancelación de
   eco y transporte adaptativo frente a WebSocket PCM.
-- Publicar eventos explícitos de actividad de voz cuando un frontend necesite representar
-  el estado VAD además de las transcripciones y delimitaciones actuales.
 - Entregar finalizaciones proactivas del worker dentro de la misma sesión de voz; hoy son
   durables en el WebSocket por turnos y consultables desde STS mediante tools A2A.
 - Definir políticas desplegables de consentimiento, retención de transcripciones y borrado
