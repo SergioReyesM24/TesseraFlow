@@ -41,6 +41,22 @@ class RealtimeAudioEndRequest(BaseModel):
     type: Literal["audio_end"]
 
 
+class RealtimeActivityStartRequest(BaseModel):
+    """Mark explicit start of user speech activity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["activity_start"]
+
+
+class RealtimeActivityEndRequest(BaseModel):
+    """Mark explicit end of user speech activity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["activity_end"]
+
+
 class RealtimeTextRequest(BaseModel):
     """Send a text fallback through an established realtime model session."""
 

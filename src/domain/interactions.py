@@ -6,6 +6,7 @@ from domain.turn_events import AgentStreamEvent
 
 InteractionCommandKind = Literal["user_message", "worker_completed"]
 InteractionSource = Literal["text_user", "speech_user", "worker_agent"]
+InteractionDeliveryMode = Literal["turn_based", "realtime"]
 InteractionModality = Literal["text", "audio"]
 InteractionCommandStatus = Literal["queued", "running", "completed", "failed"]
 
@@ -20,6 +21,7 @@ class InteractionCommand:
     kind: InteractionCommandKind
     source: InteractionSource
     message: str
+    delivery_mode: InteractionDeliveryMode = "turn_based"
     causation_id: str | None = None
     status: InteractionCommandStatus = "queued"
     attempt_count: int = 0

@@ -10,6 +10,7 @@ from domain.interactions import (
     InteractionCommand,
     InteractionCommandKind,
     InteractionCommandStatus,
+    InteractionDeliveryMode,
     InteractionModality,
     InteractionOutput,
     InteractionSource,
@@ -27,13 +28,14 @@ WITH locked_conversation AS (
     FROM interaction_commands AS command
     JOIN locked_conversation ON locked_conversation.id = command.conversation_id
     WHERE command.status IN ('queued', 'running')
+      AND command.delivery_mode = $7
 )
 INSERT INTO interaction_commands (
-    id, request_id, conversation_id, kind, source, message, causation_id
+    id, request_id, conversation_id, kind, source, message, delivery_mode, causation_id
 )
-SELECT $1, $2, locked_conversation.id, $4, $5, $6, $7
+SELECT $1, $2, locked_conversation.id, $4, $5, $6, $7, $8
 FROM locked_conversation, pending
-WHERE pending.count < $8
+WHERE pending.count < $9
 ON CONFLICT (id) DO NOTHING
 RETURNING id
 """
@@ -47,10 +49,52 @@ WITH candidate AS (
         command.status = 'queued'
         OR (command.status = 'running' AND command.lease_expires_at < NOW())
     )
+      AND command.delivery_mode = 'turn_based'
       AND NOT EXISTS (
           SELECT 1
           FROM interaction_commands AS earlier
           WHERE earlier.conversation_id = command.conversation_id
+            AND earlier.sequence < command.sequence
+            AND earlier.delivery_mode = command.delivery_mode
+            AND earlier.status IN ('queued', 'running')
+      )
+    ORDER BY command.sequence
+    LIMIT 1
+    FOR UPDATE OF command SKIP LOCKED
+)
+UPDATE interaction_commands AS command
+SET status = 'running',
+    worker_id = $1,
+    lease_expires_at = NOW() + ($2 * INTERVAL '1 second'),
+    attempt_count = command.attempt_count + 1,
+    started_at = COALESCE(command.started_at, NOW()),
+    completed_at = NULL,
+    error_code = NULL
+FROM candidate
+WHERE command.id = candidate.id
+RETURNING command.id, command.request_id, command.conversation_id, command.kind,
+          command.source, command.message, command.delivery_mode, command.causation_id,
+          command.status,
+          command.attempt_count, candidate.user_id
+"""
+
+CLAIM_NEXT_REALTIME_COMMAND = """
+WITH candidate AS (
+    SELECT command.id, conversation.user_id
+    FROM interaction_commands AS command
+    JOIN conversations AS conversation ON conversation.id = command.conversation_id
+    WHERE command.conversation_id = $3
+      AND conversation.user_id = $4
+      AND command.delivery_mode = 'realtime'
+      AND (
+          command.status = 'queued'
+          OR (command.status = 'running' AND command.lease_expires_at < NOW())
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM interaction_commands AS earlier
+          WHERE earlier.conversation_id = command.conversation_id
+            AND earlier.delivery_mode = command.delivery_mode
             AND earlier.sequence < command.sequence
             AND earlier.status IN ('queued', 'running')
       )
@@ -69,8 +113,8 @@ SET status = 'running',
 FROM candidate
 WHERE command.id = candidate.id
 RETURNING command.id, command.request_id, command.conversation_id, command.kind,
-          command.source, command.message, command.causation_id, command.status,
-          command.attempt_count, candidate.user_id
+          command.source, command.message, command.delivery_mode, command.causation_id,
+          command.status, command.attempt_count, candidate.user_id
 """
 
 INSERT_OUTPUT = """
@@ -158,6 +202,7 @@ class PostgresInteractionRepository(InteractionRepository):
                 command.kind,
                 command.source,
                 command.message,
+                command.delivery_mode,
                 command.causation_id,
                 self._max_pending_commands,
             )
@@ -172,6 +217,23 @@ class PostgresInteractionRepository(InteractionRepository):
         """Lease the globally oldest runnable command without overlapping one chat."""
         async with self._pool.acquire() as connection, connection.transaction():
             row = await connection.fetchrow(CLAIM_NEXT_COMMAND, worker_id, lease_seconds)
+        return self._command_from_row(row) if row is not None else None
+
+    async def claim_next_realtime(
+        self,
+        conversation: ConversationKey,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> InteractionCommand | None:
+        """Lease one realtime completion through its complete ownership scope."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
+                CLAIM_NEXT_REALTIME_COMMAND,
+                worker_id,
+                lease_seconds,
+                conversation.conversation_id,
+                conversation.user_id,
+            )
         return self._command_from_row(row) if row is not None else None
 
     async def append_output(self, output: InteractionOutput) -> None:
@@ -254,6 +316,10 @@ class PostgresInteractionRepository(InteractionRepository):
             kind=cast(InteractionCommandKind, str(row["kind"])),
             source=cast(InteractionSource, str(row["source"])),
             message=str(row["message"]),
+            delivery_mode=cast(
+                InteractionDeliveryMode,
+                str(row.get("delivery_mode", "turn_based")),
+            ),
             causation_id=(str(row["causation_id"]) if row["causation_id"] is not None else None),
             status=cast(InteractionCommandStatus, str(row["status"])),
             attempt_count=int(row["attempt_count"]),

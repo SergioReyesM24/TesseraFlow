@@ -27,9 +27,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.info(
                 "application_started",
                 app_name=settings.app_name,
-                interactive_flow=settings.interactive_flow,
-                interactive_provider=container.model_runtime.interactive_provider,
-                interactive_model=container.default_agent.model,
+                text_agent_provider=container.model_runtime.text_agent_provider,
+                text_agent_model=container.text_definition.model,
+                realtime_agent_provider=container.model_runtime.realtime_agent_provider,
+                realtime_agent_model=container.realtime_definition.model,
                 worker_provider=container.model_runtime.worker_provider,
                 worker_model=container.model_runtime.worker_definition.model,
             )

@@ -91,6 +91,32 @@ async def test_command_notification_advances_every_competing_subscription() -> N
             await second.wait_for_change(second_checkpoint, 30)
 
 
+async def test_realtime_command_notification_only_wakes_the_matching_conversation() -> None:
+    """Route realtime hints without waking another active speech session."""
+    listener = notifier()
+    async with (
+        listener.subscribe_realtime_commands("conversation-1") as matching,
+        listener.subscribe_realtime_commands("conversation-2") as unrelated,
+        listener.subscribe_commands() as turn_based,
+    ):
+        matching_checkpoint = matching.checkpoint()
+        unrelated_checkpoint = unrelated.checkpoint()
+        turn_based_checkpoint = turn_based.checkpoint()
+
+        listener._handle_command(  # type: ignore[arg-type]
+            None,
+            1,
+            "commands",
+            '{"command_id":"command-1","conversation_id":"conversation-1",'
+            '"delivery_mode":"realtime"}',
+        )
+
+        async with asyncio.timeout(0.1):
+            await matching.wait_for_change(matching_checkpoint, 30)
+        assert unrelated.checkpoint() == unrelated_checkpoint
+        assert turn_based.checkpoint() == turn_based_checkpoint
+
+
 async def test_a2a_job_notification_advances_every_competing_subscription() -> None:
     """Wake all local A2A workers while durable claiming selects the owner."""
     listener = notifier()

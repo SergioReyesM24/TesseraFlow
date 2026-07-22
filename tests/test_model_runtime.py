@@ -84,16 +84,19 @@ def empty_tools() -> ToolRegistry:
     return ToolRegistry([])
 
 
-async def test_text_runtime_shares_one_openai_client_between_roles(
+async def test_runtime_composes_independent_text_realtime_and_worker_roles(
     monkeypatch: Any,
 ) -> None:
-    """Select a text flow entirely by settings and encapsulate its shared client."""
+    """Compose both endpoints while sharing clients only within each provider."""
     FakeOpenAIClient.instances = []
+    FakeGeminiClient.instances = []
     monkeypatch.setattr(runtime_module, "AsyncOpenAI", FakeOpenAIClient)
+    monkeypatch.setattr(runtime_module.genai, "Client", FakeGeminiClient)
     settings = Settings(
-        interactive_flow="text",
-        interactive_provider="openai",
-        interactive_model="interactive-text-model",
+        text_agent_provider="openai",
+        text_agent_model="interactive-text-model",
+        realtime_agent_provider="gemini",
+        realtime_agent_model="realtime-model",
         worker_provider="openai",
         worker_agent_model="worker-model",
         openai_api_key="test-key",
@@ -107,98 +110,32 @@ async def test_text_runtime_shares_one_openai_client_between_roles(
         worker_tools=empty_tools(),
     )
 
-    assert runtime.interactive_provider == "openai"
-    assert runtime.default_agent.model == "interactive-text-model"
+    assert runtime.text_agent_provider == "openai"
+    assert runtime.realtime_agent_provider == "gemini"
+    assert runtime.text_definition.model == "interactive-text-model"
+    assert runtime.realtime_definition.model == "realtime-model"
     assert runtime.worker_definition.model == "worker-model"
-    assert "spoken as native audio" not in runtime.default_agent.instructions
-    assert runtime.realtime_agent_service is None
-    assert isinstance(runtime.interactive_agent, TurnInteractionAgent)
+    assert "spoken as native audio" not in runtime.text_definition.instructions
+    assert "spoken as native audio" in runtime.realtime_definition.instructions
+    assert isinstance(runtime.text_agent, TurnInteractionAgent)
     assert len(FakeOpenAIClient.instances) == 1
+    assert len(FakeGeminiClient.instances) == 1
     client = FakeOpenAIClient.instances[0]
     assert client.kwargs["api_key"] == "test-key"
     assert client.kwargs["base_url"] == "https://example.test/v1"
     await runtime.close()
     assert client.closed is True
-
-
-async def test_live_runtime_owns_separate_gemini_and_openai_clients(
-    monkeypatch: Any,
-) -> None:
-    """Compose different providers for interaction and heavy work from configuration."""
-    FakeOpenAIClient.instances = []
-    FakeGeminiClient.instances = []
-    monkeypatch.setattr(runtime_module, "AsyncOpenAI", FakeOpenAIClient)
-    monkeypatch.setattr(runtime_module.genai, "Client", FakeGeminiClient)
-    settings = Settings(
-        interactive_flow="live_audio",
-        interactive_provider="gemini",
-        interactive_model="gemini-live-model",
-        worker_provider="openai",
-        worker_agent_model="openai-worker-model",
-        gemini_api_key="gemini-key",
-        openai_api_key="openai-key",
-    )
-
-    runtime = build_model_runtime(
-        settings,
-        conversations=StubConversations(),
-        interactive_tools=empty_tools(),
-        worker_tools=empty_tools(),
-    )
-
-    assert runtime.default_agent.model == "gemini-live-model"
-    assert runtime.worker_definition.model == "openai-worker-model"
-    assert "spoken as native audio" in runtime.default_agent.instructions
-    assert runtime.realtime_agent_service is None
-    assert len(FakeGeminiClient.instances) == 1
-    assert len(FakeOpenAIClient.instances) == 1
-    gemini = FakeGeminiClient.instances[0]
-    openai = FakeOpenAIClient.instances[0]
-    await runtime.close()
-    assert gemini.aio.closed is True
-    assert openai.closed is True
-
-
-async def test_speech_to_speech_runtime_shares_one_gemini_client_for_both_gateways(
-    monkeypatch: Any,
-) -> None:
-    """Compose turn fallback and full-duplex adapters over one Gemini client."""
-    FakeOpenAIClient.instances = []
-    FakeGeminiClient.instances = []
-    monkeypatch.setattr(runtime_module, "AsyncOpenAI", FakeOpenAIClient)
-    monkeypatch.setattr(runtime_module.genai, "Client", FakeGeminiClient)
-    settings = Settings(
-        interactive_flow="speech_to_speech",
-        interactive_provider="gemini",
-        worker_provider="openai",
-        gemini_api_key="gemini-key",
-        openai_api_key="openai-key",
-    )
-
-    runtime = build_model_runtime(
-        settings,
-        conversations=StubConversations(),
-        interactive_tools=empty_tools(),
-        worker_tools=empty_tools(),
-    )
-
-    assert runtime.realtime_agent_service is not None
-    assert len(FakeGeminiClient.instances) == 1
-    assert len(FakeOpenAIClient.instances) == 1
-    await runtime.close()
     assert FakeGeminiClient.instances[0].aio.closed is True
-    assert FakeOpenAIClient.instances[0].closed is True
 
 
-def test_runtime_rejects_unregistered_flow_provider_combinations() -> None:
-    """Fail at composition instead of branching on providers inside the core."""
+def test_runtime_rejects_unregistered_role_provider() -> None:
+    """Fail at composition without provider checks leaking into the core."""
     settings = Settings(
-        interactive_flow="text",
-        interactive_provider="gemini",
+        realtime_agent_provider="unsupported",
         worker_provider="openai",
     )
 
-    with pytest.raises(ValueError, match="Unsupported interactive"):
+    with pytest.raises(ValueError, match="Unsupported realtime agent provider"):
         build_model_runtime(
             settings,
             conversations=StubConversations(),

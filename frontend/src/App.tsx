@@ -142,6 +142,12 @@ function Workspace({
   const activeConnection = mode === 'text' ? text.connection : voice.connection
   const activeError = mode === 'text' ? text.error : voice.error
 
+  /** Enter voice mode while the click still grants browser audio permission. */
+  const selectVoiceMode = () => {
+    void voice.activateAudio().catch(() => undefined)
+    onModeChange('voice')
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -179,7 +185,7 @@ function Workspace({
           <button
             className={mode === 'voice' ? 'active' : ''}
             type="button"
-            onClick={() => onModeChange('voice')}
+            onClick={selectVoiceMode}
           >
             <AudioLines size={18} />
             <span>
@@ -238,7 +244,7 @@ function Workspace({
                 onSend={text.sendMessage}
                 disabled={text.connection !== 'connected'}
                 placeholder="Escribe un mensaje a TesseraFlow"
-                voiceShortcut={() => onModeChange('voice')}
+                voiceShortcut={selectVoiceMode}
               />
             </>
           ) : (
@@ -307,7 +313,7 @@ function Workspace({
         <button
           className={mode === 'voice' ? 'active' : ''}
           type="button"
-          onClick={() => onModeChange('voice')}
+          onClick={selectVoiceMode}
         >
           <Mic size={18} /> Voz
         </button>

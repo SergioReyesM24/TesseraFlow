@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from domain.conversations import ConversationKey
+from domain.interactions import InteractionDeliveryMode
 
 A2AJobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
@@ -73,6 +74,7 @@ class A2AJob:
     parent_conversation: ConversationKey
     worker_conversation_id: str
     message: str
+    delivery_mode: InteractionDeliveryMode = "turn_based"
     status: A2AJobStatus = "queued"
     answer: str | None = None
     response_id: str | None = None

@@ -153,7 +153,10 @@ async def test_postgres_a2a_creates_and_loads_owned_protocol_state() -> None:
         INSERT_THREAD,
         ("thread-1", "parent-1", "worker-conversation-1", "user-1"),
     ) in pool.connection.executed
-    assert (INSERT_JOB, ("job-1", "thread-1", "Investiga")) in pool.connection.executed
+    assert (
+        INSERT_JOB,
+        ("job-1", "thread-1", "Investiga", "turn_based"),
+    ) in pool.connection.executed
 
 
 async def test_postgres_a2a_claim_combines_job_and_thread_without_losing_ids() -> None:
@@ -168,6 +171,26 @@ async def test_postgres_a2a_claim_combines_job_and_thread_without_losing_ids() -
     assert claimed.status == "running"
     assert claimed.worker_conversation_id == "worker-conversation-1"
     assert (CLAIM_NEXT_JOB, ("process-1", 630)) in pool.connection.executed
+
+
+async def test_postgres_a2a_persists_realtime_delivery_per_job() -> None:
+    """Keep the originating endpoint mode durable through worker execution."""
+    pool = FakePool()
+    job = A2AJob(
+        job_id="job-2",
+        thread_id="thread-1",
+        parent_conversation=parent_key(),
+        worker_conversation_id="worker-conversation-1",
+        message="Investiga por voz",
+        delivery_mode="realtime",
+    )
+
+    await repository(pool).enqueue(job)
+
+    assert (
+        INSERT_JOB,
+        ("job-2", "thread-1", "Investiga por voz", "realtime"),
+    ) in pool.connection.executed
 
 
 async def test_postgres_a2a_rejects_completion_after_a_claim_is_lost() -> None:
@@ -206,3 +229,5 @@ async def test_postgres_a2a_publishes_completion_with_the_job_update() -> None:
         COMPLETE_JOB,
         ("job-1", "process-1", "Respuesta", "resp-1", "notification"),
     ) in pool.connection.executed
+    assert "RETURNING id, thread_id, delivery_mode" in COMPLETE_JOB
+    assert "completed.delivery_mode" in COMPLETE_JOB

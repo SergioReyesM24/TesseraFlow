@@ -7,7 +7,12 @@ from domain.agent import AgentDefinition
 from domain.conversations import Conversation, ConversationItem, ConversationKey
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
-from domain.realtime import AudioChunk, RealtimeModelEvent
+from domain.realtime import (
+    AudioChunk,
+    RealtimeModelEvent,
+    RealtimeSessionCapabilities,
+    RealtimeSessionOptions,
+)
 from domain.tools import ToolResult, ToolSpec
 from domain.turn_events import ModelStreamEvent
 
@@ -59,6 +64,14 @@ class RealtimeModelSession(Protocol):
         """Signal that the current client audio stream is temporarily paused."""
         ...
 
+    async def start_activity(self) -> None:
+        """Signal explicit start of user activity when configured."""
+        ...
+
+    async def end_activity(self) -> None:
+        """Signal explicit end of user activity when configured."""
+        ...
+
     async def send_text(self, text: str) -> None:
         """Send a textual turn through the same low-latency session."""
         ...
@@ -75,11 +88,17 @@ class RealtimeModelSession(Protocol):
 class RealtimeModelGateway(Protocol):
     """Open persistent full-duplex sessions over provider-level shared resources."""
 
+    @property
+    def capabilities(self) -> RealtimeSessionCapabilities:
+        """Describe stable features available before opening a connection."""
+        ...
+
     def open_session(
         self,
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
+        options: RealtimeSessionOptions,
     ) -> AbstractAsyncContextManager[RealtimeModelSession]:
         """Open and eventually release one isolated realtime provider connection."""
         ...
@@ -205,6 +224,15 @@ class InteractionRepository(Protocol):
         """Lease the oldest runnable command while serializing each conversation."""
         ...
 
+    async def claim_next_realtime(
+        self,
+        conversation: ConversationKey,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> InteractionCommand | None:
+        """Lease the oldest realtime command for one owned conversation."""
+        ...
+
     async def append_output(self, output: InteractionOutput) -> None:
         """Append one idempotent event to the durable outbox."""
         ...
@@ -262,6 +290,13 @@ class InteractionNotifier(Protocol):
 
     def subscribe_commands(self) -> AbstractAsyncContextManager[NotificationSubscription]:
         """Subscribe one coordinator worker to newly runnable commands."""
+        ...
+
+    def subscribe_realtime_commands(
+        self,
+        conversation_id: str,
+    ) -> AbstractAsyncContextManager[NotificationSubscription]:
+        """Subscribe one live session to durable commands for its conversation."""
         ...
 
     def subscribe_outputs(

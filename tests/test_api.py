@@ -13,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 from api.middleware import request_logging_middleware
 from api.routes import router
 from application.conversations import ConversationNotFoundError
+from application.realtime import RealtimeBackpressureError
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import Conversation, ConversationKey
 from domain.interactions import InteractionCommand, InteractionOutput
@@ -20,6 +21,8 @@ from domain.realtime import (
     RealtimeAgentEvent,
     RealtimeAudioDelta,
     RealtimeOutputTranscriptDelta,
+    RealtimeSessionCapabilities,
+    RealtimeSessionOptions,
     RealtimeTurnCompleted,
 )
 from domain.turn_events import AgentStreamCompleted, AgentTextDelta
@@ -160,6 +163,12 @@ class StubRealtimeSession:
         """Capture one paused input stream."""
         self.audio_end_count += 1
 
+    async def start_activity(self) -> None:
+        """Accept the explicit activity control in the transport double."""
+
+    async def end_activity(self) -> None:
+        """Accept the explicit activity control in the transport double."""
+
     async def send_text(self, turn_id: str, text: str) -> None:
         """Emit transcript, raw audio, and completion for one fallback turn."""
         assert text == "Hola realtime"
@@ -179,6 +188,7 @@ class StubRealtimeSession:
                     response_id="realtime-response",
                     conversation_id=SESSION_UID,
                 ),
+                source="text_user",
             )
         )
 
@@ -195,11 +205,23 @@ class StubRealtimeService:
         """Expose one reusable session for transport assertions."""
         self.session = StubRealtimeSession()
 
+    @property
+    def capabilities(self) -> RealtimeSessionCapabilities:
+        """Advertise deterministic provider-neutral media features."""
+        return RealtimeSessionCapabilities(
+            input_audio_mime_type="audio/pcm;rate=16000",
+            output_audio_mime_type="audio/pcm;rate=24000",
+            activity_detection_modes=("automatic", "explicit"),
+            supports_barge_in=True,
+            recovery_mode="transparent",
+        )
+
     @asynccontextmanager
     async def open_session(
         self,
         definition: AgentDefinition,
         conversation_key: ConversationKey,
+        options: RealtimeSessionOptions | None = None,
     ) -> AsyncIterator[StubRealtimeSession]:
         """Validate route composition and yield the transport double."""
         assert definition.model == "realtime-model"
@@ -207,7 +229,17 @@ class StubRealtimeService:
             conversation_id=SESSION_UID,
             user_id="user-1",
         )
+        assert options is not None
         yield self.session
+
+
+class BackpressuredRealtimeSession(StubRealtimeSession):
+    """Reject binary audio after the outbound provider queue saturates."""
+
+    async def send_audio(self, data: bytes) -> None:
+        """Raise the application signal consumed by the WebSocket boundary."""
+        del data
+        raise RealtimeBackpressureError("Realtime outbound queue was exhausted")
 
 
 def build_test_app(
@@ -219,8 +251,8 @@ def build_test_app(
     app.state.container = SimpleNamespace(
         conversation_coordinator=coordinator or StubConversationCoordinator(),
         conversation_service=StubConversationService(),
-        realtime_agent_service=realtime_service,
-        default_agent=AgentDefinition(
+        realtime_agent_service=realtime_service or StubRealtimeService(),
+        realtime_definition=AgentDefinition(
             model="realtime-model",
             instructions="Be helpful.",
             tool_names=(),
@@ -385,6 +417,10 @@ def test_realtime_websocket_bridges_binary_pcm_and_semantic_events() -> None:
             "input_audio": "audio/pcm;rate=16000",
             "output_audio": "audio/pcm;rate=24000",
             "binary_audio_frames": True,
+            "activity_detection": "automatic",
+            "activity_detection_modes": ["automatic", "explicit"],
+            "barge_in": True,
+            "recovery_mode": "transparent",
         },
     }
     assert started == {
@@ -404,17 +440,41 @@ def test_realtime_websocket_bridges_binary_pcm_and_semantic_events() -> None:
     assert completed["data"]["answer"] == "Respuesta"
 
 
-def test_realtime_websocket_requires_speech_to_speech_configuration() -> None:
-    """Reject the realtime handshake when no full-duplex service was composed."""
+def test_realtime_websocket_is_always_composed() -> None:
+    """Expose speech-to-speech independently from the text agent configuration."""
     with TestClient(build_test_app()) as client:
-        with pytest.raises(WebSocketDisconnect) as raised:
-            with client.websocket_connect(
-                f"/v1/agent/realtime?session_uid={SESSION_UID}&user_id=user-1"
-            ):
-                pass
+        with client.websocket_connect(
+            f"/v1/agent/realtime?session_uid={SESSION_UID}&user_id=user-1"
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "connected"
+            assert websocket.receive_json()["type"] == "realtime_ready"
 
-    assert raised.value.code == 1008
-    assert raised.value.reason == "speech_to_speech flow is not configured"
+
+def test_realtime_websocket_closes_with_a_specific_backpressure_error() -> None:
+    """Stop accepting media instead of dropping saturated audio frames."""
+    service = StubRealtimeService()
+    service.session = BackpressuredRealtimeSession()
+    with TestClient(build_test_app(realtime_service=service)) as client:
+        with client.websocket_connect(
+            f"/v1/agent/realtime?session_uid={SESSION_UID}&user_id=user-1"
+        ) as websocket:
+            websocket.receive_json()
+            websocket.receive_json()
+            websocket.send_json({"type": "audio_start", "turn_id": REQUEST_UID})
+            websocket.receive_json()
+            websocket.send_bytes(b"\x00\x00")
+            error = websocket.receive_json()
+            with pytest.raises(WebSocketDisconnect) as raised:
+                websocket.receive_json()
+
+    assert error == {
+        "type": "error",
+        "data": {
+            "code": "realtime_backpressure_exceeded",
+            "message": "Realtime outbound queue was exhausted",
+        },
+    }
+    assert raised.value.code == 1013
 
 
 async def test_stream_rejects_an_unknown_session_before_starting_sse() -> None:

@@ -7,12 +7,18 @@ from openai import AsyncOpenAI
 
 from application.agent import AgentService
 from application.interactions import TurnInteractionAgent
-from application.ports import ConversationRepository, InteractiveAgent, ModelGateway
+from application.ports import (
+    ConversationRepository,
+    InteractionNotifier,
+    InteractionRepository,
+    InteractiveAgent,
+    ModelGateway,
+    RealtimeModelGateway,
+)
 from application.realtime import RealtimeAgentService
 from application.tools import ToolRegistry
 from config import Settings
 from domain.agent import AgentDefinition
-from infrastructure.gemini_live_gateway import GeminiLiveGateway
 from infrastructure.gemini_realtime_gateway import GeminiRealtimeGateway
 from infrastructure.openai_gateway import OpenAIResponsesGateway
 
@@ -21,15 +27,17 @@ AsyncCloser = Callable[[], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class ModelRuntime:
-    """Provider-neutral services, definitions, and owned client lifecycle."""
+    """Provider-neutral role runtimes and their process-owned client lifecycle."""
 
-    interactive_agent: InteractiveAgent
-    agent_service: AgentService
-    default_agent: AgentDefinition
+    text_agent: InteractiveAgent
+    text_agent_service: AgentService
+    text_definition: AgentDefinition
     worker_agent_service: AgentService
     worker_definition: AgentDefinition
-    realtime_agent_service: RealtimeAgentService | None
-    interactive_provider: str
+    realtime_agent_service: RealtimeAgentService
+    realtime_definition: AgentDefinition
+    text_agent_provider: str
+    realtime_agent_provider: str
     worker_provider: str
     _closers: tuple[AsyncCloser, ...]
 
@@ -45,17 +53,18 @@ def build_model_runtime(
     conversations: ConversationRepository,
     interactive_tools: ToolRegistry,
     worker_tools: ToolRegistry,
+    interactions: InteractionRepository | None = None,
+    interaction_notifier: InteractionNotifier | None = None,
 ) -> ModelRuntime:
-    """Select provider adapters by configuration and compose shared orchestration."""
+    """Compose independent text, realtime, and worker provider roles."""
     _validate_selection(settings)
     closers: list[AsyncCloser] = []
     openai_gateway: OpenAIResponsesGateway | None = None
     gemini_client: genai.Client | None = None
-    gemini_gateway: GeminiLiveGateway | None = None
     gemini_realtime_gateway: GeminiRealtimeGateway | None = None
 
     def get_openai_gateway() -> OpenAIResponsesGateway:
-        """Create one shared OpenAI client lazily for every selected role."""
+        """Create one shared OpenAI client lazily for text-compatible roles."""
         nonlocal openai_gateway
         if openai_gateway is None:
             client = AsyncOpenAI(
@@ -73,7 +82,7 @@ def build_model_runtime(
         return openai_gateway
 
     def get_gemini_client() -> genai.Client:
-        """Create one shared Gemini client lazily for turn and realtime gateways."""
+        """Create the process-shared client used by registered Gemini adapters."""
         nonlocal gemini_client
         if gemini_client is None:
             gemini_client = genai.Client(
@@ -83,46 +92,50 @@ def build_model_runtime(
             closers.append(gemini_client.aio.aclose)
         return gemini_client
 
-    def get_gemini_gateway() -> GeminiLiveGateway:
-        """Create the turn-based Gemini adapter over the shared provider client."""
-        nonlocal gemini_gateway
-        if gemini_gateway is None:
-            gemini_gateway = GeminiLiveGateway(
-                get_gemini_client(),
-                voice_name=settings.gemini_live_voice_name,
-                input_language_code=settings.gemini_live_language_code,
-            )
-        return gemini_gateway
-
     def get_gemini_realtime_gateway() -> GeminiRealtimeGateway:
-        """Create the full-duplex Gemini adapter over the shared provider client."""
+        """Create the current STS adapter without exposing it to the core."""
         nonlocal gemini_realtime_gateway
         if gemini_realtime_gateway is None:
             gemini_realtime_gateway = GeminiRealtimeGateway(
                 get_gemini_client(),
+                model=settings.realtime_agent_model,
                 voice_name=settings.gemini_live_voice_name,
                 input_language_code=settings.gemini_live_language_code,
+                max_resumption_attempts=settings.realtime_resumption_max_attempts,
+                resumption_timeout_seconds=settings.realtime_resumption_timeout_seconds,
             )
         return gemini_realtime_gateway
 
-    gateways: dict[str, Callable[[], ModelGateway]] = {
+    text_gateways: dict[str, Callable[[], ModelGateway]] = {
         "openai": get_openai_gateway,
-        "gemini": get_gemini_gateway,
     }
-    interactive_gateway = gateways[settings.interactive_provider]()
-    worker_gateway = gateways[settings.worker_provider]()
-    default_agent = AgentDefinition(
-        model=_interactive_model(settings),
-        instructions=_interactive_instructions(settings),
+    worker_gateways: dict[str, Callable[[], ModelGateway]] = {
+        "openai": get_openai_gateway,
+    }
+    realtime_gateways: dict[str, Callable[[], RealtimeModelGateway]] = {
+        "gemini": get_gemini_realtime_gateway,
+    }
+    text_gateway = text_gateways[settings.text_agent_provider]()
+    worker_gateway = worker_gateways[settings.worker_provider]()
+    realtime_gateway = realtime_gateways[settings.realtime_agent_provider]()
+
+    text_definition = AgentDefinition(
+        model=settings.text_agent_model,
+        instructions=settings.agent_instructions,
+        tool_names=interactive_tools.names,
+    )
+    realtime_definition = AgentDefinition(
+        model=settings.realtime_agent_model,
+        instructions=f"{settings.agent_instructions}\n\n{settings.realtime_agent_instructions}",
         tool_names=interactive_tools.names,
     )
     worker_definition = AgentDefinition(
-        model=settings.worker_agent_model or settings.openai_model,
+        model=settings.worker_agent_model,
         instructions=settings.worker_agent_instructions,
         tool_names=worker_tools.names,
     )
-    agent_service = AgentService(
-        model_gateway=interactive_gateway,
+    text_agent_service = AgentService(
+        model_gateway=text_gateway,
         tools=interactive_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
@@ -133,57 +146,41 @@ def build_model_runtime(
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
     )
-    realtime_agent_service = None
-    if settings.interactive_flow == "speech_to_speech":
-        realtime_agent_service = RealtimeAgentService(
-            model_gateway=get_gemini_realtime_gateway(),
-            tools=interactive_tools,
-            conversations=conversations,
-            max_audio_chunk_bytes=settings.realtime_audio_max_chunk_bytes,
-            max_tool_rounds=settings.max_tool_rounds,
-            max_session_seconds=settings.realtime_session_max_seconds,
-        )
+    realtime_agent_service = RealtimeAgentService(
+        model_gateway=realtime_gateway,
+        tools=interactive_tools,
+        conversations=conversations,
+        interactions=interactions,
+        notifier=interaction_notifier,
+        max_audio_chunk_bytes=settings.realtime_audio_max_chunk_bytes,
+        max_tool_rounds=settings.max_tool_rounds,
+        max_session_seconds=settings.realtime_session_max_seconds,
+        outbound_max_messages=settings.realtime_outbound_max_messages,
+        outbound_max_audio_bytes=settings.realtime_outbound_max_audio_bytes,
+        outbound_enqueue_timeout_seconds=settings.realtime_outbound_enqueue_timeout_seconds,
+        proactive_turn_timeout_seconds=settings.realtime_proactive_turn_timeout_seconds,
+        command_reconciliation_seconds=settings.realtime_command_reconciliation_seconds,
+    )
     return ModelRuntime(
-        interactive_agent=TurnInteractionAgent(agent_service, default_agent),
-        agent_service=agent_service,
-        default_agent=default_agent,
+        text_agent=TurnInteractionAgent(text_agent_service, text_definition),
+        text_agent_service=text_agent_service,
+        text_definition=text_definition,
         worker_agent_service=worker_agent_service,
         worker_definition=worker_definition,
         realtime_agent_service=realtime_agent_service,
-        interactive_provider=settings.interactive_provider,
+        realtime_definition=realtime_definition,
+        text_agent_provider=settings.text_agent_provider,
+        realtime_agent_provider=settings.realtime_agent_provider,
         worker_provider=settings.worker_provider,
         _closers=tuple(closers),
     )
 
 
 def _validate_selection(settings: Settings) -> None:
-    """Reject provider and flow combinations without a concrete adapter."""
-    supported_interactive = {
-        ("text", "openai"),
-        ("live_audio", "gemini"),
-        ("speech_to_speech", "gemini"),
-    }
-    selection = (settings.interactive_flow, settings.interactive_provider)
-    if selection not in supported_interactive:
-        raise ValueError(
-            "Unsupported interactive flow/provider combination: "
-            f"{settings.interactive_flow}/{settings.interactive_provider}"
-        )
+    """Reject roles lacking a concrete provider adapter at composition time."""
+    if settings.text_agent_provider != "openai":
+        raise ValueError(f"Unsupported text agent provider: {settings.text_agent_provider}")
+    if settings.realtime_agent_provider != "gemini":
+        raise ValueError(f"Unsupported realtime agent provider: {settings.realtime_agent_provider}")
     if settings.worker_provider != "openai":
         raise ValueError(f"Unsupported worker provider: {settings.worker_provider}")
-
-
-def _interactive_model(settings: Settings) -> str:
-    """Resolve the explicit interactive model or its provider-compatible default."""
-    if settings.interactive_model is not None:
-        return settings.interactive_model
-    if settings.interactive_provider == "gemini":
-        return settings.gemini_live_model
-    return settings.openai_model
-
-
-def _interactive_instructions(settings: Settings) -> str:
-    """Add voice-specific guidance only when the selected flow produces audio."""
-    if settings.interactive_flow in ("live_audio", "speech_to_speech"):
-        return f"{settings.agent_instructions}\n\n{settings.live_audio_instructions}"
-    return settings.agent_instructions

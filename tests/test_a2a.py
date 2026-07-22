@@ -421,6 +421,28 @@ async def test_a2a_status_is_scoped_to_the_parent_conversation() -> None:
         await service.status(parent_key("other-user"), receipt.job_id)
 
 
+async def test_a2a_jobs_preserve_the_delivery_mode_of_each_originating_turn() -> None:
+    """Route realtime completions back to STS without changing the thread contract."""
+    conversations = InMemoryConversationRepository()
+    jobs = InMemoryA2AJobRepository()
+    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+
+    first = await service.delegate(
+        parent_key(),
+        "Trabajo iniciado por voz",
+        delivery_mode="realtime",
+    )
+    followup = await service.continue_thread(
+        parent_key(),
+        first.thread_id,
+        "Amplía el resultado por voz",
+        delivery_mode="realtime",
+    )
+
+    assert jobs.jobs[first.job_id].delivery_mode == "realtime"
+    assert jobs.jobs[followup.job_id].delivery_mode == "realtime"
+
+
 async def test_a2a_queue_serializes_messages_within_one_thread() -> None:
     """Keep a follow-up blocked while an earlier message in its thread is running."""
     conversations = InMemoryConversationRepository()

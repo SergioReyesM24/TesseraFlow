@@ -8,6 +8,7 @@ from domain.turn_events import AgentTextDelta
 from infrastructure.postgres_interactions import (
     ACKNOWLEDGE_OUTPUT,
     CLAIM_NEXT_COMMAND,
+    CLAIM_NEXT_REALTIME_COMMAND,
     COMPLETE_COMMAND,
     INSERT_COMMAND,
     INSERT_OUTPUT,
@@ -50,7 +51,7 @@ class FakeConnection:
         self.executed.append((query, args))
         if query == INSERT_COMMAND:
             return {"id": "command-1"}
-        if query != CLAIM_NEXT_COMMAND:
+        if query not in {CLAIM_NEXT_COMMAND, CLAIM_NEXT_REALTIME_COMMAND}:
             raise AssertionError(f"Unexpected query: {query}")
         return {
             "id": "command-1",
@@ -59,6 +60,7 @@ class FakeConnection:
             "kind": "user_message",
             "source": "speech_user",
             "message": "Transcripción",
+            "delivery_mode": ("realtime" if query == CLAIM_NEXT_REALTIME_COMMAND else "turn_based"),
             "causation_id": None,
             "status": "running",
             "attempt_count": 1,
@@ -187,6 +189,7 @@ async def test_postgres_interactions_translate_commands_and_outputs() -> None:
             "user_message",
             "speech_user",
             "Transcripción",
+            "turn_based",
             None,
             16,
         ),
@@ -218,3 +221,19 @@ async def test_postgres_interactions_reject_a_stale_completion() -> None:
         COMPLETE_COMMAND,
         ("command-1", "stale-coordinator"),
     ) in pool.connection.executed
+
+
+async def test_postgres_interactions_claim_realtime_only_for_the_owned_conversation() -> None:
+    """Scope realtime inbox claims by delivery mode, conversation, and owner."""
+    pool = FakePool()
+
+    claimed = await repository(pool).claim_next_realtime(key(), "socket-1", 150)
+
+    assert claimed is not None
+    assert claimed.delivery_mode == "realtime"
+    assert (
+        CLAIM_NEXT_REALTIME_COMMAND,
+        ("socket-1", 150, "conversation-1", "user-1"),
+    ) in pool.connection.executed
+    assert "command.delivery_mode = 'turn_based'" in CLAIM_NEXT_COMMAND
+    assert "command.delivery_mode = 'realtime'" in CLAIM_NEXT_REALTIME_COMMAND

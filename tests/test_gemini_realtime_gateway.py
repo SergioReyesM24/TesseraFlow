@@ -1,7 +1,9 @@
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 from google.genai import types
 
+from domain.agent import AgentDefinition
 from domain.realtime import (
     AudioChunk,
     RealtimeModelAudioDelta,
@@ -9,9 +11,13 @@ from domain.realtime import (
     RealtimeModelOutputTranscriptDelta,
     RealtimeModelToolCall,
     RealtimeModelTurnCompleted,
+    RealtimeSessionOptions,
 )
 from domain.tools import ToolResult
-from infrastructure.gemini_realtime_gateway import GeminiRealtimeModelSession
+from infrastructure.gemini_realtime_gateway import (
+    GeminiRealtimeGateway,
+    GeminiRealtimeModelSession,
+)
 
 
 class FakeGeminiRealtimeSession:
@@ -42,6 +48,26 @@ class FakeGeminiRealtimeSession:
         if self._receive_count == 1:
             for message in self._messages:
                 yield message
+
+
+def test_gemini_developer_api_config_omits_vertex_only_fields() -> None:
+    """Avoid setup fields rejected by the Gemini Developer API SDK."""
+    gateway = GeminiRealtimeGateway(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        voice_name="Zephyr",
+        input_language_code=None,
+    )
+
+    config = gateway._config(  # type: ignore[attr-defined]
+        AgentDefinition(model="gemini-live", instructions="Ayuda", tool_names=()),
+        (),
+        RealtimeSessionOptions(),
+        handle=None,
+    )
+
+    assert config.session_resumption == types.SessionResumptionConfig(handle=None)
+    assert config.session_resumption.transparent is None
+    assert config.explicit_vad_signal is None
 
 
 async def test_gemini_realtime_session_translates_full_duplex_media_and_tools() -> None:
@@ -103,3 +129,38 @@ async def test_gemini_realtime_session_translates_full_duplex_media_and_tools() 
     assert response.id == "call-1"
     assert response.name == "lookup"
     assert response.response == {"ok": True, "result": {"found": True}}
+
+
+async def test_gemini_recovery_resumes_without_replaying_client_writes() -> None:
+    """Use the provider handle without duplicating writes after reconnection."""
+    provider = FakeGeminiRealtimeSession([])
+    session = GeminiRealtimeModelSession(  # type: ignore[arg-type]
+        provider,
+        max_resumption_attempts=1,
+        resumption_timeout_seconds=1,
+    )
+    await session.send_audio(AudioChunk(data=b"\x00\x00"))
+    await session.send_text("Pendiente")
+    session._apply_resumption_update(  # type: ignore[arg-type]
+        SimpleNamespace(
+            resumable=True,
+            new_handle="private-handle",
+        )
+    )
+
+    async def keep_test_connection(handle: str) -> None:
+        """Model a successful replacement while retaining the capture double."""
+        assert handle == "private-handle"
+
+    session._replace_connection = keep_test_connection  # type: ignore[method-assign]
+    await session._recover()
+
+    assert provider.realtime_input == [
+        {
+            "audio": types.Blob(
+                data=b"\x00\x00",
+                mime_type="audio/pcm;rate=16000",
+            )
+        },
+        {"text": "Pendiente"},
+    ]

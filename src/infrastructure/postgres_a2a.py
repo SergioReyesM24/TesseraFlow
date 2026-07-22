@@ -5,6 +5,7 @@ import asyncpg
 from application.ports import A2AJobRepository
 from domain.a2a import A2AJob, A2AJobStatus, A2AThread
 from domain.conversations import ConversationKey
+from domain.interactions import InteractionDeliveryMode
 
 INSERT_THREAD = """
 INSERT INTO a2a_threads (
@@ -13,8 +14,8 @@ INSERT INTO a2a_threads (
 """
 
 INSERT_JOB = """
-INSERT INTO a2a_jobs (id, thread_id, message)
-VALUES ($1, $2, $3)
+INSERT INTO a2a_jobs (id, thread_id, message, delivery_mode)
+VALUES ($1, $2, $3, $4)
 """
 
 SELECT_THREAD = """
@@ -34,6 +35,7 @@ SELECT
     j.answer,
     j.response_id,
     j.error_code,
+    j.delivery_mode,
     t.parent_conversation_id,
     t.worker_conversation_id,
     t.user_id
@@ -74,7 +76,7 @@ SET status = 'running',
 FROM candidate
 WHERE job.id = candidate.id
 RETURNING job.id, job.thread_id, job.message, job.status, job.answer,
-          job.response_id, job.error_code
+          job.response_id, job.error_code, job.delivery_mode
 """
 
 COMPLETE_JOB = """
@@ -88,10 +90,10 @@ WITH completed AS (
         lease_expires_at = NULL,
         completed_at = NOW()
     WHERE id = $1 AND worker_id = $2 AND status = 'running'
-    RETURNING id, thread_id
+    RETURNING id, thread_id, delivery_mode
 )
 INSERT INTO interaction_commands (
-    id, request_id, conversation_id, kind, source, message, causation_id
+    id, request_id, conversation_id, kind, source, message, delivery_mode, causation_id
 )
 SELECT 'a2a-result:' || completed.id,
        completed.id,
@@ -99,6 +101,7 @@ SELECT 'a2a-result:' || completed.id,
        'worker_completed',
        'worker_agent',
        $5,
+       completed.delivery_mode,
        completed.id
 FROM completed
 JOIN a2a_threads AS thread ON thread.id = completed.thread_id
@@ -117,10 +120,10 @@ WITH failed AS (
         lease_expires_at = NULL,
         completed_at = NOW()
     WHERE id = $1 AND worker_id = $2 AND status = 'running'
-    RETURNING id, thread_id
+    RETURNING id, thread_id, delivery_mode
 )
 INSERT INTO interaction_commands (
-    id, request_id, conversation_id, kind, source, message, causation_id
+    id, request_id, conversation_id, kind, source, message, delivery_mode, causation_id
 )
 SELECT 'a2a-result:' || failed.id,
        failed.id,
@@ -128,6 +131,7 @@ SELECT 'a2a-result:' || failed.id,
        'worker_completed',
        'worker_agent',
        $4,
+       failed.delivery_mode,
        failed.id
 FROM failed
 JOIN a2a_threads AS thread ON thread.id = failed.thread_id
@@ -173,6 +177,7 @@ class PostgresA2AJobRepository(A2AJobRepository):
                 first_job.job_id,
                 first_job.thread_id,
                 first_job.message,
+                first_job.delivery_mode,
             )
 
     async def load_thread(
@@ -193,7 +198,13 @@ class PostgresA2AJobRepository(A2AJobRepository):
     async def enqueue(self, job: A2AJob) -> None:
         """Append one durable message to the worker thread."""
         async with self._pool.acquire() as connection:
-            await connection.execute(INSERT_JOB, job.job_id, job.thread_id, job.message)
+            await connection.execute(
+                INSERT_JOB,
+                job.job_id,
+                job.thread_id,
+                job.message,
+                job.delivery_mode,
+            )
 
     async def load_job(
         self,
@@ -288,6 +299,10 @@ class PostgresA2AJobRepository(A2AJobRepository):
             ),
             worker_conversation_id=str(row["worker_conversation_id"]),
             message=str(row["message"]),
+            delivery_mode=cast(
+                InteractionDeliveryMode,
+                str(row.get("delivery_mode", "turn_based")),
+            ),
             status=cast(A2AJobStatus, str(row["status"])),
             answer=str(row["answer"]) if row["answer"] is not None else None,
             response_id=str(row["response_id"]) if row["response_id"] is not None else None,

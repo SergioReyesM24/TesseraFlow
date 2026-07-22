@@ -2,10 +2,14 @@ from typing import Any
 
 from api.schemas import ToolCallResponse
 from domain.realtime import (
+    RealtimeActivityEnded,
+    RealtimeActivityStarted,
     RealtimeAgentEvent,
     RealtimeAudioInterrupted,
     RealtimeInputTranscriptDelta,
     RealtimeOutputTranscriptDelta,
+    RealtimeReconnected,
+    RealtimeReconnectRequested,
     RealtimeToolCompleted,
     RealtimeToolStarted,
     RealtimeTurnCompleted,
@@ -20,6 +24,14 @@ def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, An
         return "output_transcript_delta", {"turn_id": event.turn_id, "text": event.text}
     if isinstance(event, RealtimeAudioInterrupted):
         return "audio_interrupted", {"turn_id": event.turn_id}
+    if isinstance(event, RealtimeActivityStarted):
+        return "activity_started", {"turn_id": event.turn_id}
+    if isinstance(event, RealtimeActivityEnded):
+        return "activity_ended", {"turn_id": event.turn_id}
+    if isinstance(event, RealtimeReconnectRequested):
+        return "reconnecting", {"deadline_seconds": event.deadline_seconds}
+    if isinstance(event, RealtimeReconnected):
+        return "reconnected", {"resumed": event.resumed}
     if isinstance(event, RealtimeToolStarted):
         return "tool_started", {
             "turn_id": event.turn_id,
@@ -44,5 +56,8 @@ def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, An
             "answer": event.result.answer,
             "response_id": event.result.response_id,
             "session_uid": event.result.conversation_id,
+            "source": event.source,
+            "job_id": event.job_id,
+            "causation_id": event.causation_id,
         }
     raise TypeError(f"Unsupported realtime JSON event: {type(event).__name__}")

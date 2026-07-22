@@ -7,6 +7,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from domain.conversations import ConversationKey
+from domain.interactions import InteractionDeliveryMode
 from domain.tools import ToolCall, ToolCallRecord, ToolResult, ToolSpec
 from domain.types import JsonObject
 
@@ -27,13 +28,20 @@ class ToolExecutionContext(BaseModel):
 
     conversation_id: str
     user_id: str
+    delivery_mode: InteractionDeliveryMode = "turn_based"
 
     @classmethod
-    def from_conversation(cls, key: ConversationKey) -> "ToolExecutionContext":
+    def from_conversation(
+        cls,
+        key: ConversationKey,
+        *,
+        delivery_mode: InteractionDeliveryMode = "turn_based",
+    ) -> "ToolExecutionContext":
         """Build a validated tool context from the owned conversation key."""
         return cls(
             conversation_id=key.conversation_id,
             user_id=key.user_id,
+            delivery_mode=delivery_mode,
         )
 
     def conversation_key(self) -> ConversationKey:

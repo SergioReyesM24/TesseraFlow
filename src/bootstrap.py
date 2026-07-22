@@ -32,10 +32,11 @@ class AppContainer:
     model_runtime: ModelRuntime
     redis_client: Redis
     postgres_pool: asyncpg.Pool
-    agent_service: AgentService
+    text_agent_service: AgentService
     conversation_service: ConversationService
-    default_agent: AgentDefinition
-    realtime_agent_service: RealtimeAgentService | None
+    text_definition: AgentDefinition
+    realtime_definition: AgentDefinition
+    realtime_agent_service: RealtimeAgentService
     a2a_service: A2AService
     a2a_worker: A2AWorker
     interaction_notifier: InteractionNotifier
@@ -105,6 +106,8 @@ async def build_container(settings: Settings) -> AppContainer:
     model_runtime = build_model_runtime(
         settings,
         conversations=conversations,
+        interactions=interactions,
+        interaction_notifier=interaction_notifier,
         interactive_tools=interactive_tools,
         worker_tools=worker_tools,
     )
@@ -121,7 +124,7 @@ async def build_container(settings: Settings) -> AppContainer:
     conversation_coordinator = ConversationCoordinator(
         interactions,
         interaction_notifier,
-        model_runtime.interactive_agent,
+        model_runtime.text_agent,
         worker_id=str(uuid4()),
         reconciliation_seconds=settings.interaction_coordinator_reconciliation_seconds,
         output_reconciliation_seconds=settings.interaction_output_reconciliation_seconds,
@@ -132,9 +135,10 @@ async def build_container(settings: Settings) -> AppContainer:
         model_runtime=model_runtime,
         redis_client=redis_client,
         postgres_pool=postgres_pool,
-        agent_service=model_runtime.agent_service,
+        text_agent_service=model_runtime.text_agent_service,
         conversation_service=ConversationService(conversations),
-        default_agent=model_runtime.default_agent,
+        text_definition=model_runtime.text_definition,
+        realtime_definition=model_runtime.realtime_definition,
         realtime_agent_service=model_runtime.realtime_agent_service,
         a2a_service=a2a_service,
         a2a_worker=a2a_worker,

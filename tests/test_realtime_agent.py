@@ -1,37 +1,56 @@
+import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from application.ports import RealtimeModelSession
 from application.realtime import (
+    RealtimeAgentService,
     RealtimeAgentSession,
     RealtimeAudioChunkError,
+    RealtimeBackpressureError,
     RealtimeSessionStateError,
+    RealtimeUnsupportedOptionError,
 )
 from application.tools import AgentTool, ToolArguments, ToolExecutionContext, ToolRegistry
+from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
     ConversationItem,
     ConversationKey,
     ConversationMessage,
 )
+from domain.interactions import InteractionCommand
 from domain.realtime import (
     AudioChunk,
+    RealtimeActivityConfig,
+    RealtimeActivityEnded,
+    RealtimeActivityStarted,
     RealtimeAudioDelta,
     RealtimeInputTranscriptDelta,
+    RealtimeModelActivityEnded,
+    RealtimeModelActivityStarted,
     RealtimeModelAudioDelta,
     RealtimeModelEvent,
     RealtimeModelInputTranscriptDelta,
     RealtimeModelOutputTranscriptDelta,
+    RealtimeModelReconnected,
+    RealtimeModelReconnectRequested,
     RealtimeModelToolCall,
     RealtimeModelTurnCompleted,
     RealtimeOutputTranscriptDelta,
+    RealtimeReconnected,
+    RealtimeReconnectRequested,
+    RealtimeSessionCapabilities,
+    RealtimeSessionOptions,
     RealtimeToolCompleted,
     RealtimeToolStarted,
     RealtimeTurnCompleted,
 )
-from domain.tools import ToolCall, ToolResult
+from domain.tools import ToolCall, ToolResult, ToolSpec
 
 
 class LookupArguments(ToolArguments):
@@ -53,7 +72,11 @@ class LookupTool(AgentTool[LookupArguments]):
         context: ToolExecutionContext,
     ) -> Any:
         """Echo the value and owning user without external I/O."""
-        return {"value": arguments.value, "user_id": context.user_id}
+        return {
+            "value": arguments.value,
+            "user_id": context.user_id,
+            "delivery_mode": context.delivery_mode,
+        }
 
 
 class StubRealtimeModelSession(RealtimeModelSession):
@@ -66,6 +89,7 @@ class StubRealtimeModelSession(RealtimeModelSession):
         self.audio_ended = False
         self.text: list[str] = []
         self.tool_results: list[tuple[ToolResult, ...]] = []
+        self.activities: list[str] = []
 
     async def send_audio(self, chunk: AudioChunk) -> None:
         """Capture one validated PCM fragment."""
@@ -74,6 +98,14 @@ class StubRealtimeModelSession(RealtimeModelSession):
     async def end_audio(self) -> None:
         """Capture the audio stream boundary."""
         self.audio_ended = True
+
+    async def start_activity(self) -> None:
+        """Capture one explicit activity boundary."""
+        self.activities.append("start")
+
+    async def end_activity(self) -> None:
+        """Capture one explicit activity boundary."""
+        self.activities.append("end")
 
     async def send_text(self, text: str) -> None:
         """Capture a text fallback turn."""
@@ -126,6 +158,159 @@ class StubConversations:
         return key == self.conversation.key
 
 
+class QueueRealtimeModelSession(StubRealtimeModelSession):
+    """Keep one provider stream open so durable commands can arrive asynchronously."""
+
+    def __init__(self) -> None:
+        """Initialize an empty event channel and observable text-write barrier."""
+        super().__init__([])
+        self.events_queue: asyncio.Queue[RealtimeModelEvent | None] = asyncio.Queue()
+        self.text_sent = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        """Capture proactive input and wake the test producer."""
+        await super().send_text(text)
+        self.text_sent.set()
+
+    async def receive(self) -> AsyncIterator[RealtimeModelEvent]:
+        """Yield provider events until the test closes the stream."""
+        while True:
+            event = await self.events_queue.get()
+            if event is None:
+                return
+            yield event
+
+
+class StubInteractionSubscription:
+    """Provide reconciliation waits without carrying durable command data."""
+
+    def checkpoint(self) -> int:
+        """Return one stable generation for polling-based test delivery."""
+        return 0
+
+    async def wait_for_change(self, checkpoint: int, deadline_seconds: float) -> None:
+        """Yield control briefly so a missing command does not spin."""
+        del checkpoint
+        await asyncio.sleep(min(deadline_seconds, 0.01))
+
+
+class StubInteractionNotifier:
+    """Open conversation-scoped subscriptions for realtime dispatcher tests."""
+
+    def __init__(self) -> None:
+        """Track every conversation observed by a live session."""
+        self.conversations: list[str] = []
+
+    @asynccontextmanager
+    async def subscribe_realtime_commands(
+        self,
+        conversation_id: str,
+    ) -> AsyncIterator[StubInteractionSubscription]:
+        """Yield one reconciliation subscription for the requested conversation."""
+        self.conversations.append(conversation_id)
+        yield StubInteractionSubscription()
+
+
+class StubRealtimeInteractions:
+    """Lease one realtime completion and record its terminal transition."""
+
+    def __init__(self, command: InteractionCommand) -> None:
+        """Initialize one queued durable command."""
+        self.command = command
+        self.claimed_by: str | None = None
+        self.completed: list[tuple[str, str]] = []
+        self.requeued: list[tuple[str, str]] = []
+
+    async def claim_next_realtime(
+        self,
+        conversation: ConversationKey,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> InteractionCommand | None:
+        """Lease the command only through its exact conversation ownership key."""
+        assert conversation == self.command.conversation
+        assert lease_seconds > 0
+        if self.claimed_by is not None or self.command.status != "queued":
+            return None
+        self.claimed_by = worker_id
+        self.command = replace(self.command, status="running", attempt_count=1)
+        return self.command
+
+    async def complete(self, command_id: str, worker_id: str) -> None:
+        """Record completion only for the current lease owner."""
+        assert command_id == self.command.command_id
+        assert worker_id == self.claimed_by
+        self.command = replace(self.command, status="completed")
+        self.completed.append((command_id, worker_id))
+
+    async def requeue(self, command_id: str, worker_id: str) -> None:
+        """Return an interrupted claim to the durable queue."""
+        assert command_id == self.command.command_id
+        assert worker_id == self.claimed_by
+        self.claimed_by = None
+        self.command = replace(self.command, status="queued")
+        self.requeued.append((command_id, worker_id))
+
+
+class SerialWriteRealtimeModelSession(StubRealtimeModelSession):
+    """Detect overlapping provider writes and optionally block the first call."""
+
+    def __init__(self, *, block_writes: bool = False) -> None:
+        """Initialize concurrency counters and a controllable write gate."""
+        super().__init__([])
+        self.active_writes = 0
+        self.max_active_writes = 0
+        self.first_write_started = asyncio.Event()
+        self.release_writes = asyncio.Event()
+        if not block_writes:
+            self.release_writes.set()
+
+    async def send_audio(self, chunk: AudioChunk) -> None:
+        """Hold one write while recording whether another enters concurrently."""
+        self.active_writes += 1
+        self.max_active_writes = max(self.max_active_writes, self.active_writes)
+        self.first_write_started.set()
+        try:
+            await self.release_writes.wait()
+            await asyncio.sleep(0)
+            await super().send_audio(chunk)
+        finally:
+            self.active_writes -= 1
+
+
+class AlternateRealtimeGateway:
+    """Demonstrate that application code accepts a non-Gemini STS adapter."""
+
+    def __init__(self, model: StubRealtimeModelSession) -> None:
+        """Bind one neutral model session and capture handshake options."""
+        self.model = model
+        self.options: list[RealtimeSessionOptions] = []
+
+    @property
+    def capabilities(self) -> RealtimeSessionCapabilities:
+        """Advertise a deliberately different media and activity profile."""
+        return RealtimeSessionCapabilities(
+            input_audio_mime_type="audio/pcm;rate=8000",
+            output_audio_mime_type="audio/pcm;rate=16000",
+            activity_detection_modes=("explicit",),
+            supports_barge_in=False,
+            recovery_mode="restart",
+        )
+
+    @asynccontextmanager
+    async def open_session(
+        self,
+        definition: AgentDefinition,
+        tools: tuple[ToolSpec, ...],
+        history: tuple[ConversationItem, ...],
+        options: RealtimeSessionOptions,
+    ) -> AsyncIterator[StubRealtimeModelSession]:
+        """Open through neutral arguments without provider-specific branching."""
+        del definition, tools, history
+        self.options.append(options)
+        yield self.model
+
+
 async def test_realtime_session_streams_media_executes_tools_and_persists_transcripts() -> None:
     """Keep media ephemeral while persisting one complete neutral speech turn."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
@@ -174,7 +359,16 @@ async def test_realtime_session_streams_media_executes_tools_and_persists_transc
     assert isinstance(events[5], RealtimeTurnCompleted)
     assert events[5].result.answer == "Resultado siete"
     assert model.tool_results == [
-        (ToolResult(call_id="call-1", output={"value": 7, "user_id": "user-1"}),)
+        (
+            ToolResult(
+                call_id="call-1",
+                output={
+                    "value": 7,
+                    "user_id": "user-1",
+                    "delivery_mode": "realtime",
+                },
+            ),
+        )
     ]
     turn = conversations.saved_turns[0]
     assert turn[0] == ConversationMessage(
@@ -216,6 +410,29 @@ async def test_realtime_session_rejects_unbounded_or_misaligned_pcm() -> None:
         await session.end_audio()
 
 
+async def test_realtime_explicit_activity_uses_neutral_boundaries() -> None:
+    """Forward client-delimited activity without applying automatic stream end."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = StubRealtimeModelSession([])
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        StubConversations(key),
+        key,
+        activity_detection="explicit",
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=1,
+    )
+
+    await session.start_audio("turn-1")
+    await session.start_activity()
+    await session.end_activity()
+    await session.end_audio()
+
+    assert model.activities == ["start", "end"]
+    assert model.audio_ended is False
+
+
 async def test_realtime_session_keeps_continuous_audio_open_across_vad_turns() -> None:
     """Allow Gemini VAD to complete multiple turns without restarting the microphone."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
@@ -248,3 +465,206 @@ async def test_realtime_session_keeps_continuous_audio_open_across_vad_turns() -
     assert completed[0].turn_id == "turn-1"
     assert completed[1].turn_id != completed[0].turn_id
     assert [turn[0].content for turn in conversations.saved_turns] == ["Primero", "Segundo"]  # type: ignore[union-attr]
+
+
+async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_terminal() -> None:
+    """Use the active STS session, never the turn-based agent, for realtime jobs."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    notifier = StubInteractionNotifier()
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=notifier,  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+
+    async with session.lifecycle():
+        stream = session.events()
+        first_event = asyncio.create_task(anext(stream))
+        async with asyncio.timeout(0.5):
+            await model.text_sent.wait()
+        assert interactions.completed == []
+        await model.events_queue.put(
+            RealtimeModelOutputTranscriptDelta(text="El trabajo ha terminado")
+        )
+        await model.events_queue.put(RealtimeModelTurnCompleted(response_id="realtime-1"))
+        output = await first_event
+        terminal = await anext(stream)
+        await stream.aclose()
+
+    assert isinstance(output, RealtimeOutputTranscriptDelta)
+    assert terminal == RealtimeTurnCompleted(
+        turn_id="job-1",
+        result=terminal.result,
+        source="worker_agent",
+        job_id="job-1",
+        causation_id="job-1",
+    )
+    assert terminal.result.answer == "El trabajo ha terminado"
+    assert len(interactions.completed) == 1
+    assert notifier.conversations == ["conversation-1"]
+    assert model.text == [command.message]
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(
+                role="user",
+                content=command.message,
+                source="worker_agent",
+            ),
+            ConversationMessage(
+                role="assistant",
+                content="El trabajo ha terminado",
+                source="assistant",
+            ),
+        )
+    ]
+
+
+async def test_realtime_single_writer_serializes_concurrent_audio_commands() -> None:
+    """Prevent WebSocket producers from invoking provider writes concurrently."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = SerialWriteRealtimeModelSession()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    async with session.lifecycle():
+        await session.start_audio("turn-1")
+        await asyncio.gather(*(session.send_audio(b"\x00\x00") for _ in range(8)))
+
+    assert model.max_active_writes == 1
+    assert len(model.audio) == 8
+
+
+async def test_realtime_queue_applies_backpressure_without_dropping_audio() -> None:
+    """Fail a saturated producer after its configured bounded wait."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = SerialWriteRealtimeModelSession(block_writes=True)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        outbound_max_messages=1,
+        outbound_max_audio_bytes=16,
+        outbound_enqueue_timeout_seconds=0.02,
+    )
+
+    async with session.lifecycle():
+        await session.start_audio("turn-1")
+        first = asyncio.create_task(session.send_audio(b"\x00\x00"))
+        await model.first_write_started.wait()
+        second = asyncio.create_task(session.send_audio(b"\x01\x00"))
+        await asyncio.sleep(0)
+        with pytest.raises(RealtimeBackpressureError, match="queue was exhausted"):
+            await session.send_audio(b"\x02\x00")
+        model.release_writes.set()
+        await asyncio.gather(first, second)
+
+    assert model.audio == [
+        AudioChunk(data=b"\x00\x00"),
+        AudioChunk(data=b"\x01\x00"),
+    ]
+
+
+async def test_realtime_normalizes_activity_and_recovery_events() -> None:
+    """Expose VAD and recovery state without any Gemini payloads in the core."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelActivityStarted(),
+            RealtimeModelActivityEnded(),
+            RealtimeModelReconnectRequested(deadline_seconds=3.5),
+            RealtimeModelReconnected(resumed=True),
+        ]
+    )
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+    await session.start_audio("turn-1")
+
+    events = [event async for event in session.events()]
+
+    assert session.connection_state == "disconnected"
+    assert events == [
+        RealtimeActivityStarted(turn_id="turn-1"),
+        RealtimeActivityEnded(turn_id="turn-1"),
+        RealtimeReconnectRequested(deadline_seconds=3.5),
+        RealtimeReconnected(resumed=True),
+    ]
+
+
+async def test_realtime_service_accepts_an_alternate_provider_and_rejects_capabilities() -> None:
+    """Select STS behavior from neutral capabilities rather than provider identity."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    gateway = AlternateRealtimeGateway(StubRealtimeModelSession([]))
+    service = RealtimeAgentService(
+        gateway,
+        ToolRegistry([]),
+        StubConversations(key),
+        interactions=None,
+        notifier=None,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        max_session_seconds=30,
+        outbound_max_messages=4,
+        outbound_max_audio_bytes=16,
+        outbound_enqueue_timeout_seconds=0.1,
+        proactive_turn_timeout_seconds=1,
+        command_reconciliation_seconds=0.1,
+    )
+    definition = AgentDefinition(model="alternate-sts", instructions="Speak", tool_names=())
+    supported = RealtimeSessionOptions(
+        activity=RealtimeActivityConfig(
+            detection="explicit",
+            interrupt_on_activity=False,
+        )
+    )
+
+    async with service.open_session(definition, key, supported):
+        pass
+
+    assert gateway.options == [supported]
+    assert service.capabilities.recovery_mode == "restart"
+    with pytest.raises(RealtimeUnsupportedOptionError, match="Barge-in"):
+        async with service.open_session(
+            definition,
+            key,
+            RealtimeSessionOptions(
+                activity=RealtimeActivityConfig(
+                    detection="explicit",
+                    interrupt_on_activity=True,
+                )
+            ),
+        ):
+            pass

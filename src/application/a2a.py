@@ -16,6 +16,7 @@ from domain.a2a import (
 )
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey, ConversationMessage
+from domain.interactions import InteractionDeliveryMode
 
 logger = structlog.get_logger(__name__)
 
@@ -43,7 +44,13 @@ class A2AService:
         self._conversations = conversations
         self._uid_factory = uid_factory
 
-    async def delegate(self, parent: ConversationKey, message: str) -> A2AJobReceipt:
+    async def delegate(
+        self,
+        parent: ConversationKey,
+        message: str,
+        *,
+        delivery_mode: InteractionDeliveryMode = "turn_based",
+    ) -> A2AJobReceipt:
         """Start a worker conversation and enqueue the interactive agent's message."""
         thread_id = str(self._uid_factory())
         job_id = str(self._uid_factory())
@@ -62,6 +69,7 @@ class A2AService:
             parent_conversation=parent,
             worker_conversation_id=worker_key.conversation_id,
             message=message,
+            delivery_mode=delivery_mode,
         )
         await self._conversations.create(worker_key)
         try:
@@ -83,6 +91,8 @@ class A2AService:
         parent: ConversationKey,
         thread_id: str,
         message: str,
+        *,
+        delivery_mode: InteractionDeliveryMode = "turn_based",
     ) -> A2AJobReceipt:
         """Append a human-style follow-up to an existing worker-agent history."""
         thread = await self._jobs.load_thread(thread_id, parent)
@@ -94,6 +104,7 @@ class A2AService:
             parent_conversation=parent,
             worker_conversation_id=thread.worker_conversation_id,
             message=message,
+            delivery_mode=delivery_mode,
         )
         await self._jobs.enqueue(job)
         logger.info("a2a_message_enqueued", thread_id=thread_id, job_id=job.job_id)

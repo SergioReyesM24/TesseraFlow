@@ -1,6 +1,5 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,7 +14,7 @@ def load_prompt(filename: str) -> str:
 
 
 DEFAULT_AGENT_INSTRUCTIONS = load_prompt("interactive_agent.md")
-DEFAULT_LIVE_AUDIO_INSTRUCTIONS = load_prompt("live_audio_agent.md")
+DEFAULT_REALTIME_AGENT_INSTRUCTIONS = load_prompt("realtime_agent.md")
 DEFAULT_WORKER_AGENT_INSTRUCTIONS = load_prompt("worker_agent.md")
 
 
@@ -30,22 +29,28 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "TesseraFlow"
-    interactive_flow: Literal["text", "live_audio", "speech_to_speech"] = "speech_to_speech"
-    interactive_provider: str = "gemini"
-    interactive_model: str | None = None
+    text_agent_provider: str = "openai"
+    text_agent_model: str = "gpt-5-mini"
+    realtime_agent_provider: str = "gemini"
+    realtime_agent_model: str = "gemini-3.1-flash-live-preview"
     worker_provider: str = "openai"
     openai_api_key: str = Field(default="", repr=False)
     openai_base_url: str | None = None
-    openai_model: str = "gpt-5-mini"
-    worker_agent_model: str | None = None
+    worker_agent_model: str = "gpt-5-mini"
     openai_connect_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     gemini_api_key: str = Field(default="", repr=False)
-    gemini_live_model: str = "gemini-3.1-flash-live-preview"
     gemini_live_api_version: str = "v1beta"
     gemini_live_voice_name: str = "Zephyr"
     gemini_live_language_code: str | None = None
     realtime_audio_max_chunk_bytes: int = Field(default=32_768, ge=2, le=1_048_576)
     realtime_session_max_seconds: float = Field(default=1_800.0, ge=10, le=14_400)
+    realtime_outbound_max_messages: int = Field(default=128, ge=1, le=10_000)
+    realtime_outbound_max_audio_bytes: int = Field(default=131_072, ge=2, le=16_777_216)
+    realtime_outbound_enqueue_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    realtime_resumption_max_attempts: int = Field(default=3, ge=0, le=20)
+    realtime_resumption_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    realtime_proactive_turn_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
+    realtime_command_reconciliation_seconds: float = Field(default=5.0, gt=0, le=60)
     log_level: str = "INFO"
     log_json: bool = False
     max_tool_rounds: int = Field(default=8, ge=1, le=50)
@@ -62,7 +67,7 @@ class Settings(BaseSettings):
     conversation_max_characters: int = Field(default=200_000, ge=2)
     conversation_max_bytes: int = Field(default=512_000, ge=256)
     agent_instructions: str = DEFAULT_AGENT_INSTRUCTIONS
-    live_audio_instructions: str = DEFAULT_LIVE_AUDIO_INSTRUCTIONS
+    realtime_agent_instructions: str = DEFAULT_REALTIME_AGENT_INSTRUCTIONS
     worker_agent_instructions: str = DEFAULT_WORKER_AGENT_INSTRUCTIONS
     a2a_worker_reconciliation_seconds: float = Field(
         default=5.0,

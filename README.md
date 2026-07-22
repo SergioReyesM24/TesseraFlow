@@ -29,6 +29,9 @@ OpenAI ejecuta el agente de trabajo pesado.
 > necesite, `user_id` debe obtenerse en una capa externa y no confiarse directamente al
 > cliente. Consulta [ROADMAP.md](ROADMAP.md) para conocer las siguientes fases.
 
+Consulta también las [preguntas frecuentes](FAQ.md) para conocer el comportamiento de
+los jobs, el historial y las colas de los canales textual y realtime.
+
 ## Núcleo: doble capa multimodal
 
 El núcleo de TesseraFlow no es un transporte ni un proveedor concreto, sino una
@@ -47,12 +50,12 @@ Audio STS realtime ──────┘
 | --- | --- | --- | --- |
 | `POST /v1/agent/stream` | Agente por turnos; entrada textual y salida según el modelo configurado | Worker textual durable | El job continúa, pero el SSE inicial no permanece abierto para su resultado posterior |
 | `WS /v1/agent/ws` | Agente por turnos con comandos y outputs durables | Worker textual durable | Proactiva mediante inbox/outbox en `/v1/agent/ws`, incluso después del turno inicial |
-| `WS /v1/agent/realtime` | Agente STS con audio full-duplex, VAD y barge-in | El mismo worker textual durable | Consultable mediante tools A2A; la reinyección automática como voz aún no está implementada |
+| `WS /v1/agent/realtime` | Agente STS full-duplex independiente del proveedor | El mismo worker textual durable | Proactiva en la sesión de voz mediante inbox durable y escritor único |
 
-Las tres entradas comparten las definiciones de agente, las tools A2A, el historial
-neutral, el control de propiedad y el worker. Lo que cambia es la semántica de la primera
-capa y del transporte: los comandos por turnos priorizan durabilidad; STS prioriza
-latencia y mantiene el audio crudo fuera de la persistencia.
+Las tres entradas comparten contratos neutrales, tools A2A, historial, control de
+propiedad y worker, pero texto y realtime tienen proveedor, modelo y definición propios.
+Los comandos por turnos priorizan durabilidad; STS prioriza latencia y mantiene el audio
+crudo fuera de la persistencia.
 
 ## Características
 
@@ -60,12 +63,12 @@ latencia y mantiene el audio crudo fuera de la persistencia.
 - Agente interactivo aislado de las tools pesadas mediante tres tools de protocolo A2A.
 - Conversaciones propias del worker, con historial de tool calls y respuestas entre jobs.
 - Cola durable en PostgreSQL con leases, recuperación y orden estricto por thread A2A.
-- Inbox por conversación que serializa mensajes de usuario y finalizaciones del worker.
-- Respuesta proactiva al completar jobs mediante un outbox durable y recuperable.
+- Inbox por conversación y modo que serializa mensajes y finalizaciones del worker.
+- Entrega proactiva mediante outbox textual o inyección en la sesión STS activa.
 - Consulta de estados públicos `queued`, `running`, `completed` y `failed`.
-- Sesiones Gemini Live aisladas por turno o WebSocket realtime sobre un cliente compartido.
+- Sesiones realtime STS aisladas por WebSocket sobre clientes compartidos por proveedor.
 - Audio PCM nativo a 24 kHz con transcripción textual y eventos de interrupción neutrales.
-- STS bidireccional con PCM16 binario a 16 kHz, VAD de Gemini y barge-in.
+- STS bidireccional con formatos anunciados por el adaptador, VAD neutral y barge-in.
 - Proveedor y modelo configurables por rol; un mismo proveedor comparte cliente y pool.
 - Function calling estricto con argumentos validados por Pydantic.
 - Ejecución concurrente de las tools que el worker solicita en una misma respuesta.
@@ -140,8 +143,8 @@ npm run dev
 Abre `http://127.0.0.1:5173`. El proxy de Vite reenvía HTTP y WebSocket a la API local.
 Para usar otro backend, copia `frontend/.env.example` a `frontend/.env` y cambia
 `TESSERAFLOW_BACKEND_URL`; también puedes indicar una URL desde la configuración de la
-interfaz. El micrófono requiere un contexto seguro (`https` o `localhost`) y el backend
-debe tener `INTERACTIVE_FLOW=speech_to_speech` para habilitar la voz realtime.
+interfaz. El micrófono requiere un contexto seguro (`https` o `localhost`); el endpoint
+realtime está disponible siempre que su proveedor y modelo configurados sean válidos.
 
 El cliente crea una sesión mediante `POST /v1/sessions` al cargar y cada vez que se pulsa
 **Nueva conversación**. El `user_id` de demostración y la URL de conexión se guardan solo
@@ -190,8 +193,8 @@ socket.onopen = () => socket.send(JSON.stringify({
 }));
 ```
 
-Para micrófono bidireccional configura `INTERACTIVE_FLOW=speech_to_speech` y usa el
-endpoint realtime. Los frames binarios cliente → servidor son PCM16 mono little-endian
+Para micrófono bidireccional usa el endpoint realtime, que siempre está compuesto. Con el
+adaptador Gemini actual, los frames binarios cliente → servidor son PCM16 mono little-endian
 a 16 kHz; los frames binarios servidor → cliente son PCM16 mono a 24 kHz:
 
 ```javascript
@@ -294,17 +297,16 @@ api ----------> application <---------- infrastructure
 textual y trabajo pesado. `RealtimeAgentService` representa la semántica distinta de una
 conexión full-duplex: audio concurrente, varios turnos VAD, interrupciones y cierre ligado
 al socket. Ambos comparten `ToolExecutor`, contratos de tools, `AgentDefinition` y el
-repositorio neutral. `OpenAIModelSession`, `GeminiLiveModelSession` y
-`GeminiRealtimeModelSession` conservan los tipos y estados de sus SDK en `infrastructure`.
+repositorio neutral. Cada `ModelSession` o `RealtimeModelSession` concreto conserva los
+tipos y estados de su SDK exclusivamente en `infrastructure`.
 
 `ModelRuntime` selecciona y crea gateways, definiciones y clientes desde la configuración,
 comparte un cliente cuando dos roles usan el mismo proveedor y encapsula su cierre. El
 `bootstrap.py` solo recibe servicios neutrales y no importa ningún SDK de modelos.
 
-Con `live_audio`, cada comando textual abre una sesión Gemini aislada y publica audio y
-transcripción en el outbox durable. Con `speech_to_speech`, un segundo endpoint mantiene
-una conexión Gemini durante la vida del WebSocket: el audio cruza de forma efímera y las
-transcripciones, tool calls y resultados se guardan al completar cada turno.
+El endpoint textual abre sesiones turn-based aisladas. El endpoint realtime mantiene una
+conexión STS durante la vida del WebSocket: el audio cruza de forma efímera y las
+transcripciones, tool calls, resultados y respuestas proactivas se guardan por turno.
 
 ## Protocolo entre agentes
 
@@ -324,7 +326,9 @@ usuario -> agente interactivo -> delegate_to_worker_agent -> queued
 PostgreSQL <- worker agent <- tools operativas <- ModelSession propia
      |
      v
-comando worker_completed -> coordinador -> agente interactivo -> outbox -> usuario
+comando worker_completed con delivery_mode
+     |-- turn_based -> coordinador -> agente textual -> outbox -> usuario
+     `-- realtime   -> sesión STS activa -> audio/transcripción -> usuario
 ```
 
 Cada thread A2A apunta a una conversación interna independiente. El mensaje generado por
@@ -345,12 +349,19 @@ el repositorio cambia el estado del job y crea un comando
 `worker_completed` en una sola operación SQL. El worker nunca llama al modelo principal
 ni escribe directamente al WebSocket.
 
-`ConversationCoordinator` reclama tanto ese comando como los mensajes del usuario desde
-la misma inbox. Solo permite un comando activo por conversación, así que si ambos llegan
-a la vez gana el menor `sequence`; el otro espera y después carga el historial ya
-actualizado. El resultado A2A usa el envelope versionado `tesseraflow.a2a.result` y abre
-un turno nuevo del agente interactivo. Sus eventos se guardan en el outbox antes de ser
-entregados, por lo que siguen disponibles si no hay un socket conectado.
+Cada job conserva el `delivery_mode` de la ejecución que lo creó. El
+`ConversationCoordinator` solo reclama comandos `turn_based`; el resultado A2A abre un
+turno nuevo del agente textual y sus eventos se guardan en el outbox antes de entregarse.
+La sesión realtime solo reclama comandos `realtime` de su conversación y propietario,
+cuando no hay un turno o micrófono activo. Si no existe socket, el comando permanece
+durable hasta la siguiente conexión. Se inyecta el envelope versionado
+`tesseraflow.a2a.result` en la sesión STS, y el claim se confirma únicamente después de
+persistir el evento terminal real del proveedor. Por tanto una finalización realtime no
+puede arrancar el agente textual ni crear una respuesta assistant fantasma.
+
+La precedencia por `sequence` se aplica dentro de cada modo. Las leases y
+`FOR UPDATE SKIP LOCKED` impiden que dos sockets consuman el mismo comando; una
+desconexión o cancelación lo devuelve a la inbox.
 
 Los inserts de jobs, inbox y outbox emiten señales PostgreSQL `NOTIFY` después del commit. Una
 única conexión `LISTEN` por proceso distribuye esos avisos a los consumidores locales por
@@ -446,16 +457,18 @@ SQL se han aplicado. No contiene conversaciones, mensajes ni estado de los agent
 | `conversations` | Cabecera e identidad de una conversación. | Propietario, versión y título. |
 | `conversation_items` | Historial que recibe el modelo. | Mensajes, tool calls y tool results. |
 | `a2a_threads` | Relación estable entre una conversación principal y una conversación del worker. | `parent_conversation_id` y `worker_conversation_id`. |
-| `a2a_jobs` | Cola y estado de tareas pesadas. | Mensaje, estado, lease y resultado. |
-| `interaction_commands` | Cola serializada de entradas del agente principal. | Mensajes del usuario y finalizaciones del worker. |
+| `a2a_jobs` | Cola y estado de tareas pesadas. | Mensaje, modo de entrega, estado, lease y resultado. |
+| `interaction_commands` | Inbox durable separada por modo de entrega. | Mensajes del usuario y finalizaciones del worker. |
 | `interaction_outbox` | Eventos pendientes de entregar al cliente. | Deltas, estados de tools, respuestas finales y errores. |
 
 Las migraciones `001_conversations.sql`, `002_a2a_jobs.sql` y
 `003_interaction_inbox_outbox.sql` crean esas tablas por bloques. La migración
 `004_interaction_notifications.sql` añade triggers `LISTEN/NOTIFY` sin convertir las
 notificaciones en fuente de verdad. `005_interaction_audio_events.sql` amplía el outbox
-para persistir los eventos neutrales `audio_delta` y `audio_interrupted`. Su estructura
-principal es la siguiente:
+para persistir los eventos neutrales `audio_delta` y `audio_interrupted`;
+`006_a2a_job_notifications.sql` despierta workers A2A y
+`007_interaction_delivery_modes.sql` separa los claims `turn_based` y `realtime`, con
+`turn_based` como valor para filas existentes. Su estructura principal es la siguiente:
 
 ```text
 conversations
@@ -474,12 +487,12 @@ a2a_threads
 └── user_id
 
 a2a_jobs
-├── thread_id, sequence, message, status
+├── thread_id, sequence, message, delivery_mode, status
 ├── worker_id, lease_expires_at, attempt_count
 └── answer, response_id, error_code
 
 interaction_commands
-├── conversation_id, request_id, kind, source, message
+├── conversation_id, request_id, kind, source, message, delivery_mode
 ├── sequence, status, worker_id, lease_expires_at
 └── causation_id, attempt_count, error_code
 
@@ -570,7 +583,7 @@ compatibilidad. Los nuevos clientes deben usar el WebSocket.
 
 ### WebSocket speech-to-speech
 
-El flujo `speech_to_speech` habilita una conexión distinta:
+El endpoint STS habilita una conexión distinta:
 
 ```text
 ws://127.0.0.1:8000/v1/agent/realtime?session_uid=<uuid>&user_id=<owner>
@@ -578,7 +591,7 @@ ws://127.0.0.1:8000/v1/agent/realtime?session_uid=<uuid>&user_id=<owner>
 
 Después de `connected` y `realtime_ready`, el cliente abre la captura con
 `{"type":"audio_start","turn_id":"<uuid>"}`, envía frames binarios PCM16 y la pausa
-con `{"type":"audio_end"}`. Gemini usa VAD, de modo que un mismo flujo de micrófono puede
+con `{"type":"audio_end"}`. El adaptador actual usa VAD, de modo que un mismo flujo puede
 producir varios `turn_completed`. Los turnos posteriores reciben un `turn_id` generado por
 el servidor. También se admite `{"type":"text","turn_id":"<uuid>","text":"..."}` como
 degradación textual dentro de la misma sesión.
@@ -587,19 +600,21 @@ El servidor devuelve audio como frames binarios sin base64. El resto son frames 
 
 | Evento | Significado |
 | --- | --- |
-| `realtime_ready` | Informa formatos PCM y confirma la conexión con Gemini. |
+| `realtime_ready` | Informa formatos, actividad y recuperación soportados por el adaptador. |
 | `audio_started` / `audio_ended` | Confirma los límites del flujo de captura. |
 | `input_transcript_delta` | Fragmento reconocido del micrófono. |
 | `output_transcript_delta` | Fragmento transcrito del audio del asistente. |
 | `audio_interrupted` | Vacía inmediatamente el buffer de reproducción. |
+| `activity_started` / `activity_ended` | Expone actividad de voz neutral al proveedor. |
+| `reconnecting` / `reconnected` | Informa recuperación transparente de la sesión STS. |
 | `tool_started` / `tool_completed` | Estado de una tool neutral ejecutada durante la voz. |
 | `turn_completed` | Cierra un turno VAD, pero mantiene la sesión abierta. |
 | `error` | Error seguro de control, límites o sesión. |
 
-Los bytes de micrófono y reproducción son efímeros y tienen backpressure directo: no se
-guardan en PostgreSQL, Redis ni el outbox. Al completar un turno se persisten únicamente
-las transcripciones, tool calls y resultados. La desconexión cancela la sesión realtime;
-a diferencia del endpoint durable, los frames de audio no se recuperan al reconectar.
+Los bytes de micrófono y reproducción son efímeros y pasan por una cola acotada con
+backpressure y un único escritor: no se guardan en PostgreSQL, Redis ni el outbox. Al
+completar un turno se persisten únicamente las transcripciones, tool calls y resultados.
+Los adaptadores con recuperación transparente reenvían solo comandos no confirmados.
 
 ## Endpoints
 
@@ -685,34 +700,40 @@ a todas las tools.
 Los prompts por defecto están versionados como Markdown en:
 
 - `src/prompts/interactive_agent.md`: agente que conversa con el usuario.
-- `src/prompts/live_audio_agent.md`: reglas añadidas solo al flujo de audio nativo.
+- `src/prompts/realtime_agent.md`: reglas añadidas solo al agente STS persistente.
 - `src/prompts/worker_agent.md`: agente persistente que ejecuta las tools operativas.
 
 `config.py` los carga mediante una ruta relativa al código, independientemente del
-directorio desde el que se arranque el proceso. `AGENT_INSTRUCTIONS` y
-`WORKER_AGENT_INSTRUCTIONS` pueden seguir sobrescribiéndolos desde el entorno sin
-modificar los archivos versionados.
+directorio desde el que se arranque el proceso. `AGENT_INSTRUCTIONS`,
+`REALTIME_AGENT_INSTRUCTIONS` y `WORKER_AGENT_INSTRUCTIONS` pueden sobrescribirlos desde
+el entorno sin modificar los archivos versionados.
 
 ## Configuración
 
 | Variable | Valor por defecto | Propósito |
 | --- | --- | --- |
-| `INTERACTIVE_FLOW` | `speech_to_speech` | Flujo: `text`, `live_audio` o `speech_to_speech`. |
-| `INTERACTIVE_PROVIDER` | `gemini` | Proveedor del agente dirigido al usuario. |
-| `INTERACTIVE_MODEL` | según proveedor | Modelo interactivo; sobrescribe el default del proveedor. |
+| `TEXT_AGENT_PROVIDER` | `openai` | Proveedor turn-based de `/v1/agent/ws` y SSE. |
+| `TEXT_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente textual. |
+| `REALTIME_AGENT_PROVIDER` | `gemini` | Adaptador STS de `/v1/agent/realtime`. |
+| `REALTIME_AGENT_MODEL` | `gemini-3.1-flash-live-preview` | Modelo del agente realtime. |
 | `WORKER_PROVIDER` | `openai` | Proveedor del agente de trabajo pesado. |
 | `OPENAI_API_KEY` | — | Credencial de OpenAI. |
 | `OPENAI_BASE_URL` | — | Base URL alternativa compatible. |
-| `OPENAI_MODEL` | `gpt-5-mini` | Modelo OpenAI usado como fallback del worker. |
-| `WORKER_AGENT_MODEL` | igual que `OPENAI_MODEL` | Modelo del agente de trabajo. |
+| `WORKER_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente de trabajo. |
 | `OPENAI_CONNECT_TIMEOUT_SECONDS` | `15` | Timeout de conexión. |
-| `GEMINI_API_KEY` | — | Credencial independiente para la capa interactiva. |
-| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Modelo nativo de audio dirigido al usuario. |
+| `GEMINI_API_KEY` | — | Credencial del adaptador Gemini realtime disponible inicialmente. |
 | `GEMINI_LIVE_API_VERSION` | `v1beta` | Versión de la API Live usada por el SDK. |
 | `GEMINI_LIVE_VOICE_NAME` | `Zephyr` | Voz predefinida de salida. |
 | `GEMINI_LIVE_LANGUAGE_CODE` | inferido | Idioma opcional de la voz. |
 | `REALTIME_AUDIO_MAX_CHUNK_BYTES` | `32768` | Máximo por frame PCM16 de entrada. |
 | `REALTIME_SESSION_MAX_SECONDS` | `1800` | Duración máxima de una conexión STS. |
+| `REALTIME_OUTBOUND_MAX_MESSAGES` | `128` | Comandos pendientes máximos del escritor único. |
+| `REALTIME_OUTBOUND_MAX_AUDIO_BYTES` | `131072` | Audio PCM máximo pendiente por sesión. |
+| `REALTIME_OUTBOUND_ENQUEUE_TIMEOUT_SECONDS` | `5` | Presupuesto de backpressure antes de cerrar. |
+| `REALTIME_RESUMPTION_MAX_ATTEMPTS` | `3` | Intentos máximos de recuperación transparente. |
+| `REALTIME_RESUMPTION_TIMEOUT_SECONDS` | `15` | Presupuesto por intento de recuperación. |
+| `REALTIME_PROACTIVE_TURN_TIMEOUT_SECONDS` | `120` | Tiempo máximo para anunciar un resultado A2A. |
+| `REALTIME_COMMAND_RECONCILIATION_SECONDS` | `5` | Recuperación de notificaciones realtime perdidas. |
 | `POSTGRES_URL` | `postgresql://.../tesseraflow` | Fuente canónica de conversaciones. |
 | `POSTGRES_POOL_MIN_SIZE` | `1` | Conexiones mínimas por proceso. |
 | `POSTGRES_POOL_MAX_SIZE` | `10` | Conexiones máximas por proceso. |
@@ -733,35 +754,16 @@ modificar los archivos versionados.
 | `LOG_LEVEL` | `INFO` | Nivel de logging. |
 | `LOG_JSON` | `false` | Activa logs JSON estructurados. |
 
-Para conversación textual con OpenAI en ambas capas:
+Los endpoints textual y realtime se configuran simultáneamente:
 
 ```dotenv
-INTERACTIVE_FLOW=text
-INTERACTIVE_PROVIDER=openai
-INTERACTIVE_MODEL=gpt-5-mini
+TEXT_AGENT_PROVIDER=openai
+TEXT_AGENT_MODEL=gpt-5-mini
+REALTIME_AGENT_PROVIDER=gemini
+REALTIME_AGENT_MODEL=gemini-3.1-flash-live-preview
 WORKER_PROVIDER=openai
 WORKER_AGENT_MODEL=gpt-5
-```
-
-Para Gemini Live delante y OpenAI en el worker:
-
-```dotenv
-INTERACTIVE_FLOW=live_audio
-INTERACTIVE_PROVIDER=gemini
-INTERACTIVE_MODEL=gemini-3.1-flash-live-preview
-WORKER_PROVIDER=openai
-WORKER_AGENT_MODEL=gpt-5
-```
-
-Para micrófono speech-to-speech con Gemini y trabajo pesado en OpenAI:
-
-```dotenv
-INTERACTIVE_FLOW=speech_to_speech
-INTERACTIVE_PROVIDER=gemini
-INTERACTIVE_MODEL=gemini-3.1-flash-live-preview
 GEMINI_API_KEY=...
-WORKER_PROVIDER=openai
-WORKER_AGENT_MODEL=gpt-5
 OPENAI_API_KEY=...
 REALTIME_AUDIO_MAX_CHUNK_BYTES=32768
 REALTIME_SESSION_MAX_SECONDS=1800

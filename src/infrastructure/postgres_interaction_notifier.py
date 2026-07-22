@@ -56,6 +56,9 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
         self._command_timeout_seconds = command_timeout_seconds
         self._connection: asyncpg.Connection | None = None
         self._command_subscribers: set[_NotificationSubscription] = set()
+        self._realtime_command_subscribers: dict[str, set[_NotificationSubscription]] = defaultdict(
+            set
+        )
         self._a2a_job_subscribers: set[_NotificationSubscription] = set()
         self._command_output_subscribers: dict[str, set[_NotificationSubscription]] = defaultdict(
             set
@@ -116,6 +119,22 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
             self._a2a_job_subscribers.discard(subscription)
 
     @asynccontextmanager
+    async def subscribe_realtime_commands(
+        self,
+        conversation_id: str,
+    ) -> AsyncIterator[NotificationSubscription]:
+        """Observe realtime inbox changes for one live conversation."""
+        subscription = _NotificationSubscription()
+        subscribers = self._realtime_command_subscribers[conversation_id]
+        subscribers.add(subscription)
+        try:
+            yield subscription
+        finally:
+            subscribers.discard(subscription)
+            if not subscribers:
+                self._realtime_command_subscribers.pop(conversation_id, None)
+
+    @asynccontextmanager
     async def subscribe_outputs(
         self,
         conversation_id: str,
@@ -149,10 +168,26 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
         channel: str,
         payload: object,
     ) -> None:
-        """Wake all competing local workers without trusting notification payloads."""
-        del connection, process_id, channel, payload
-        for subscription in tuple(self._command_subscribers):
-            subscription.publish()
+        """Wake turn workers and the matching realtime conversation consumer."""
+        del connection, process_id, channel
+        try:
+            if not isinstance(payload, str):
+                raise TypeError("notification payload must be text")
+            decoded: Any = json.loads(payload)
+            conversation_id = decoded["conversation_id"]
+            delivery_mode = decoded["delivery_mode"]
+            if not isinstance(conversation_id, str) or not isinstance(delivery_mode, str):
+                raise TypeError("notification routing fields must be strings")
+        except (json.JSONDecodeError, KeyError, TypeError):
+            for subscription in tuple(self._command_subscribers):
+                subscription.publish()
+            return
+        if delivery_mode == "turn_based":
+            for subscription in tuple(self._command_subscribers):
+                subscription.publish()
+        elif delivery_mode == "realtime":
+            for subscription in tuple(self._realtime_command_subscribers.get(conversation_id, ())):
+                subscription.publish()
 
     def _handle_a2a_job(
         self,
@@ -203,6 +238,11 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
         subscriptions = (
             *self._command_subscribers,
             *self._a2a_job_subscribers,
+            *(
+                subscription
+                for subscribers in self._realtime_command_subscribers.values()
+                for subscription in subscribers
+            ),
             *(
                 subscription
                 for subscribers in self._command_output_subscribers.values()

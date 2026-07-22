@@ -21,6 +21,7 @@ interface RealtimeSocketController {
   error: string | null
   ready: boolean
   recording: boolean
+  activateAudio: () => Promise<void>
   startRecording: () => Promise<void>
   stopRecording: () => Promise<void>
   sendText: (message: string) => boolean
@@ -63,6 +64,9 @@ export function useRealtimeSocket(
   const [recording, setRecording] = useState(false)
   const socketRef = useRef<WebSocket | null>(null)
   const currentTurnRef = useRef<string | null>(null)
+  const activityModeRef = useRef<'automatic' | 'explicit'>('automatic')
+  const outputSampleRateRef = useRef(24_000)
+  const readyRef = useRef(false)
   const [capture] = useState(() => new MicrophoneCapture())
   const [player] = useState(() => new PcmPlayer())
 
@@ -75,6 +79,12 @@ export function useRealtimeSocket(
         return
       }
       if (event.type === 'realtime_ready') {
+        activityModeRef.current = data.activity_detection === 'explicit' ? 'explicit' : 'automatic'
+        if (typeof data.output_audio === 'string') {
+          const rate = /(?:^|;)rate=(\d+)(?:;|$)/.exec(data.output_audio)?.[1]
+          if (rate) outputSampleRateRef.current = Number(rate)
+        }
+        readyRef.current = true
         setConnection('connected')
         setReady(true)
         setError(null)
@@ -129,6 +139,7 @@ export function useRealtimeSocket(
             content: typeof data.answer === 'string' ? data.answer : message.content,
             status: 'complete',
           }))
+          if (data.source === 'worker_agent') return withAssistant
           return updateTurnMessage(withAssistant, turnId, 'user', (message) => ({
             ...message,
             status: 'complete',
@@ -137,15 +148,50 @@ export function useRealtimeSocket(
         if (currentTurnRef.current === turnId) currentTurnRef.current = null
       } else if (event.type === 'audio_interrupted') {
         player.clear()
+      } else if (event.type === 'reconnecting') {
+        readyRef.current = false
+        void capture.stop()
+        setRecording(false)
+        setReady(false)
+        setConnection('connecting')
+      } else if (event.type === 'reconnected') {
+        readyRef.current = true
+        setReady(true)
+        setConnection('connected')
       } else if (event.type === 'error') {
         setError(String(data.message ?? 'La sesión de voz no pudo continuar.'))
       }
+    },
+    [capture, player],
+  )
+
+  const activateAudio = useCallback(async (): Promise<void> => {
+    try {
+      await player.resume()
+      setError(null)
+    } catch (cause) {
+      const detail = cause instanceof Error ? ` (${cause.message})` : ''
+      setError(`El navegador bloqueó la salida de audio${detail}.`)
+      throw cause
+    }
+  }, [player])
+
+  const playAudio = useCallback(
+    (payload: ArrayBuffer | Blob): void => {
+      void (async () => {
+        const bytes = payload instanceof Blob ? await payload.arrayBuffer() : payload
+        await player.enqueue(bytes, outputSampleRateRef.current)
+      })().catch((cause: unknown) => {
+        const detail = cause instanceof Error ? ` (${cause.message})` : ''
+        setError(`Se recibió audio, pero no pudo reproducirse${detail}.`)
+      })
     },
     [player],
   )
 
   useEffect(() => {
     if (!enabled) {
+      readyRef.current = false
       socketRef.current?.close(1000, 'mode changed')
       socketRef.current = null
       void capture.stop()
@@ -169,8 +215,8 @@ export function useRealtimeSocket(
         attempts = 0
       }
       socket.onmessage = (message) => {
-        if (message.data instanceof ArrayBuffer) {
-          void player.enqueue(message.data, 24_000)
+        if (message.data instanceof ArrayBuffer || message.data instanceof Blob) {
+          playAudio(message.data)
           return
         }
         if (typeof message.data !== 'string') return
@@ -182,6 +228,7 @@ export function useRealtimeSocket(
       }
       socket.onerror = () => setError('No se pudo conectar con el canal realtime.')
       socket.onclose = (closeEvent) => {
+        readyRef.current = false
         if (socketRef.current === socket) socketRef.current = null
         void capture.stop()
         setRecording(false)
@@ -206,7 +253,7 @@ export function useRealtimeSocket(
       socketRef.current = null
       void capture.stop()
     }
-  }, [apiBaseUrl, capture, enabled, handleEnvelope, player, sessionUid, userId])
+  }, [apiBaseUrl, capture, enabled, handleEnvelope, playAudio, sessionUid, userId])
 
   useEffect(() => () => void player.close(), [player])
 
@@ -215,7 +262,11 @@ export function useRealtimeSocket(
     if (!ready || recording || socket?.readyState !== WebSocket.OPEN) return
     setError(null)
     try {
-      await player.resume()
+      await activateAudio()
+    } catch {
+      return
+    }
+    try {
       const pendingChunks: ArrayBuffer[] = []
       let audioStarted = false
       await capture.start((chunk) => {
@@ -224,11 +275,16 @@ export function useRealtimeSocket(
           return
         }
         const activeSocket = socketRef.current
-        if (activeSocket?.readyState === WebSocket.OPEN) activeSocket.send(chunk)
+        if (readyRef.current && activeSocket?.readyState === WebSocket.OPEN) {
+          activeSocket.send(chunk)
+        }
       })
       const turnId = crypto.randomUUID()
       currentTurnRef.current = turnId
       socket.send(JSON.stringify({ type: 'audio_start', turn_id: turnId }))
+      if (activityModeRef.current === 'explicit') {
+        socket.send(JSON.stringify({ type: 'activity_start' }))
+      }
       audioStarted = true
       for (const chunk of pendingChunks) {
         if (socket.readyState === WebSocket.OPEN) socket.send(chunk)
@@ -238,13 +294,16 @@ export function useRealtimeSocket(
       await capture.stop()
       setError('No se pudo acceder al micrófono. Revisa el permiso del navegador.')
     }
-  }, [capture, player, ready, recording])
+  }, [activateAudio, capture, ready, recording])
 
   const stopRecording = useCallback(async (): Promise<void> => {
     if (!recording) return
     await capture.stop()
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN) {
+      if (activityModeRef.current === 'explicit') {
+        socket.send(JSON.stringify({ type: 'activity_end' }))
+      }
       socket.send(JSON.stringify({ type: 'audio_end' }))
     }
     setRecording(false)
@@ -253,7 +312,8 @@ export function useRealtimeSocket(
   const sendText = useCallback((message: string): boolean => {
     const socket = socketRef.current
     const content = message.trim()
-    if (!content || socket?.readyState !== WebSocket.OPEN) return false
+    if (!readyRef.current || !content || socket?.readyState !== WebSocket.OPEN) return false
+    void activateAudio().catch(() => undefined)
     const turnId = crypto.randomUUID()
     currentTurnRef.current = turnId
     socket.send(JSON.stringify({ type: 'text', turn_id: turnId, text: content }))
@@ -267,7 +327,7 @@ export function useRealtimeSocket(
       },
     ])
     return true
-  }, [])
+  }, [activateAudio])
 
   return {
     messages,
@@ -275,6 +335,7 @@ export function useRealtimeSocket(
     error,
     ready: enabled && ready,
     recording: enabled && recording,
+    activateAudio,
     startRecording,
     stopRecording,
     sendText,

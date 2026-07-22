@@ -268,6 +268,9 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "'queued', 'completed', 'failed', 'cancelled'" in combined_sql
     assert "'audio_delta'" in combined_sql
     assert "'audio_interrupted'" in combined_sql
+    assert "a2a_jobs_delivery_mode_check" in combined_sql
+    assert "interaction_commands_delivery_mode_check" in combined_sql
+    assert "interaction_commands_realtime_claim_idx" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
     assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)
     assert any(
@@ -277,3 +280,6 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
         args == ("005_interaction_audio_events.sql",) for _, args in pool.connection.statements
     )
     assert any(args == ("006_a2a_job_notifications.sql",) for _, args in pool.connection.statements)
+    assert any(
+        args == ("007_interaction_delivery_modes.sql",) for _, args in pool.connection.statements
+    )

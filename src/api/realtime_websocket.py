@@ -7,6 +7,8 @@ from pydantic import Field, TypeAdapter, ValidationError
 
 from api.realtime_event_payloads import realtime_event_payload
 from api.schemas import (
+    RealtimeActivityEndRequest,
+    RealtimeActivityStartRequest,
     RealtimeAudioEndRequest,
     RealtimeAudioStartRequest,
     RealtimeTextRequest,
@@ -15,16 +17,21 @@ from application.realtime import (
     RealtimeAgentService,
     RealtimeAgentSession,
     RealtimeAudioChunkError,
+    RealtimeBackpressureError,
     RealtimeSessionStateError,
 )
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey
-from domain.realtime import RealtimeAudioDelta
+from domain.realtime import RealtimeAudioDelta, RealtimeSessionOptions
 
 logger = structlog.get_logger(__name__)
 
 RealtimeControl = Annotated[
-    RealtimeAudioStartRequest | RealtimeAudioEndRequest | RealtimeTextRequest,
+    RealtimeAudioStartRequest
+    | RealtimeAudioEndRequest
+    | RealtimeActivityStartRequest
+    | RealtimeActivityEndRequest
+    | RealtimeTextRequest,
     Field(discriminator="type"),
 ]
 realtime_control_adapter: TypeAdapter[RealtimeControl] = TypeAdapter(RealtimeControl)
@@ -39,20 +46,26 @@ async def serve_realtime_websocket(
     service: RealtimeAgentService,
     definition: AgentDefinition,
     conversation_key: ConversationKey,
+    options: RealtimeSessionOptions,
 ) -> None:
     """Bridge one client socket and one provider session with bounded media flow."""
     send_lock = asyncio.Lock()
     try:
-        async with service.open_session(definition, conversation_key) as session:
+        async with service.open_session(definition, conversation_key, options) as session:
+            capabilities = service.capabilities
             await _send_json(
                 websocket,
                 send_lock,
                 {
                     "type": "realtime_ready",
                     "data": {
-                        "input_audio": "audio/pcm;rate=16000",
-                        "output_audio": "audio/pcm;rate=24000",
+                        "input_audio": capabilities.input_audio_mime_type,
+                        "output_audio": capabilities.output_audio_mime_type,
                         "binary_audio_frames": True,
+                        "activity_detection": options.activity.detection,
+                        "activity_detection_modes": capabilities.activity_detection_modes,
+                        "barge_in": capabilities.supports_barge_in,
+                        "recovery_mode": capabilities.recovery_mode,
                     },
                 },
             )
@@ -113,8 +126,29 @@ async def _receive_realtime_input(
             elif isinstance(control, RealtimeAudioEndRequest):
                 await session.end_audio()
                 await _send_json(websocket, send_lock, {"type": "audio_ended", "data": {}})
+            elif isinstance(control, RealtimeActivityStartRequest):
+                await session.start_activity()
+            elif isinstance(control, RealtimeActivityEndRequest):
+                await session.end_activity()
             else:
                 await session.send_text(str(control.turn_id), control.text)
+        except RealtimeBackpressureError as exc:
+            await _send_json(
+                websocket,
+                send_lock,
+                {
+                    "type": "error",
+                    "data": {
+                        "code": "realtime_backpressure_exceeded",
+                        "message": str(exc),
+                    },
+                },
+            )
+            await websocket.close(code=1013, reason="realtime_backpressure_exceeded")
+            raise WebSocketDisconnect(
+                code=1013,
+                reason="realtime_backpressure_exceeded",
+            ) from exc
         except (
             InvalidRealtimeMessageError,
             RealtimeAudioChunkError,

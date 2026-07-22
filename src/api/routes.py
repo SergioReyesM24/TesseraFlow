@@ -1,4 +1,4 @@
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID, uuid4
 
 import structlog
@@ -33,6 +33,7 @@ from application.interactions import ConversationCoordinator, InteractionQueueFu
 from application.realtime import RealtimeAgentService
 from bootstrap import AppContainer
 from domain.conversations import ConversationKey
+from domain.realtime import RealtimeActivityConfig, RealtimeSessionOptions
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -59,8 +60,8 @@ def get_conversation_service(
 
 def get_realtime_agent_service(
     container: Annotated[AppContainer, Depends(get_container)],
-) -> RealtimeAgentService | None:
-    """Resolve the optional full-duplex service selected at process startup."""
+) -> RealtimeAgentService:
+    """Resolve the always-composed full-duplex service."""
     return container.realtime_agent_service
 
 
@@ -184,20 +185,41 @@ async def realtime_agent_websocket(
     websocket: WebSocket,
     session_uid: Annotated[UUID, Query()],
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
-    service: Annotated[RealtimeAgentService | None, Depends(get_realtime_agent_service)],
+    service: Annotated[RealtimeAgentService, Depends(get_realtime_agent_service)],
     container: Annotated[AppContainer, Depends(get_container)],
     conversation_service: Annotated[ConversationService, Depends(get_conversation_service)],
+    activity_detection: Annotated[Literal["automatic", "explicit"], Query()] = "automatic",
+    start_sensitivity: Annotated[Literal["high", "low"] | None, Query()] = None,
+    end_sensitivity: Annotated[Literal["high", "low"] | None, Query()] = None,
+    prefix_padding_ms: Annotated[int | None, Query(ge=0, le=10_000)] = None,
+    silence_duration_ms: Annotated[int | None, Query(ge=0, le=60_000)] = None,
+    interrupt_on_activity: Annotated[bool, Query()] = True,
 ) -> None:
     """Bridge raw PCM frames to a configured full-duplex provider session."""
-    if service is None:
-        raise WebSocketException(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="speech_to_speech flow is not configured",
-        )
     key = ConversationKey(
         conversation_id=str(session_uid),
         user_id=user_id,
     )
+    options = RealtimeSessionOptions(
+        activity=RealtimeActivityConfig(
+            detection=activity_detection,
+            start_sensitivity=start_sensitivity,
+            end_sensitivity=end_sensitivity,
+            prefix_padding_ms=prefix_padding_ms,
+            silence_duration_ms=silence_duration_ms,
+            interrupt_on_activity=interrupt_on_activity,
+        )
+    )
+    if activity_detection not in service.capabilities.activity_detection_modes:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Requested activity detection mode is not supported",
+        )
+    if interrupt_on_activity and not service.capabilities.supports_barge_in:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Requested barge-in behavior is not supported",
+        )
     try:
         await conversation_service.require(key)
     except ConversationNotFoundError as exc:
@@ -228,7 +250,13 @@ async def realtime_agent_websocket(
         }
     )
     logger.info("realtime_websocket_connected")
-    await serve_realtime_websocket(websocket, service, container.default_agent, key)
+    await serve_realtime_websocket(
+        websocket,
+        service,
+        container.realtime_definition,
+        key,
+        options,
+    )
 
 
 @router.delete("/v1/conversations/{conversation_id}", tags=["agent"])

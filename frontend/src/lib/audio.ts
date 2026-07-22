@@ -31,6 +31,9 @@ export class PcmPlayer {
     if (context.state === 'suspended') {
       await context.resume()
     }
+    if (context.state !== 'running') {
+      throw new Error(`El contexto de audio está ${context.state}`)
+    }
   }
 
   /** Queue one mono PCM16 chunk at its declared sample rate. */
@@ -75,7 +78,11 @@ export class PcmPlayer {
 
   /** Lazily create the playback context to avoid autoplay-policy failures on load. */
   private getContext(): AudioContext {
-    this.context ??= new AudioContext({ latencyHint: 'interactive' })
+    if (!this.context || this.context.state === 'closed') {
+      this.context = new AudioContext({ latencyHint: 'interactive' })
+      this.nextStartTime = 0
+      this.sources.clear()
+    }
     return this.context
   }
 }

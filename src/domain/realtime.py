@@ -7,9 +7,10 @@ client must correlate output inside the shared connection.
 """
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from domain.agent import AgentResult
+from domain.interactions import InteractionSource
 from domain.tools import ToolCall, ToolCallRecord
 
 # Media sent into the provider session.
@@ -21,6 +22,41 @@ class AudioChunk:
 
     data: bytes
     mime_type: str = "audio/pcm;rate=16000"
+
+
+RealtimeActivityDetection = Literal["automatic", "explicit"]
+RealtimeRecoveryMode = Literal["transparent", "restart", "none"]
+RealtimeConnectionState = Literal["connected", "recovering", "disconnected"]
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeActivityConfig:
+    """Provider-neutral speech activity policy selected for one connection."""
+
+    detection: RealtimeActivityDetection = "automatic"
+    start_sensitivity: Literal["high", "low"] | None = None
+    end_sensitivity: Literal["high", "low"] | None = None
+    prefix_padding_ms: int | None = None
+    silence_duration_ms: int | None = None
+    interrupt_on_activity: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeSessionOptions:
+    """Connection-scoped behavior requested independently of any provider SDK."""
+
+    activity: RealtimeActivityConfig = RealtimeActivityConfig()
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeSessionCapabilities:
+    """Stable media and recovery features implemented by a realtime adapter."""
+
+    input_audio_mime_type: str
+    output_audio_mime_type: str
+    activity_detection_modes: tuple[RealtimeActivityDetection, ...]
+    supports_barge_in: bool
+    recovery_mode: RealtimeRecoveryMode
 
 
 # Provider gateway events received throughout the connection.
@@ -67,6 +103,30 @@ class RealtimeModelTurnCompleted:
     response_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class RealtimeModelActivityStarted:
+    """Report provider-observed start of user speech activity."""
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeModelActivityEnded:
+    """Report provider-observed end of user speech activity."""
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeModelReconnectRequested:
+    """Report that the adapter must replace its connection before a deadline."""
+
+    deadline_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeModelReconnected:
+    """Report that the adapter restored or restarted its provider connection."""
+
+    resumed: bool
+
+
 RealtimeModelEvent: TypeAlias = (
     RealtimeModelInputTranscriptDelta
     | RealtimeModelOutputTranscriptDelta
@@ -74,6 +134,10 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelAudioInterrupted
     | RealtimeModelToolCall
     | RealtimeModelTurnCompleted
+    | RealtimeModelActivityStarted
+    | RealtimeModelActivityEnded
+    | RealtimeModelReconnectRequested
+    | RealtimeModelReconnected
 )
 
 
@@ -135,6 +199,37 @@ class RealtimeTurnCompleted:
 
     turn_id: str
     result: AgentResult
+    source: InteractionSource
+    job_id: str | None = None
+    causation_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeActivityStarted:
+    """Expose the start of user activity without leaking provider VAD formats."""
+
+    turn_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeActivityEnded:
+    """Expose the end of user activity without closing the connection."""
+
+    turn_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeReconnectRequested:
+    """Tell the client that the provider connection is being recovered."""
+
+    deadline_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeReconnected:
+    """Tell the client that provider traffic may resume."""
+
+    resumed: bool
 
 
 RealtimeAgentEvent: TypeAlias = (
@@ -145,4 +240,8 @@ RealtimeAgentEvent: TypeAlias = (
     | RealtimeToolStarted
     | RealtimeToolCompleted
     | RealtimeTurnCompleted
+    | RealtimeActivityStarted
+    | RealtimeActivityEnded
+    | RealtimeReconnectRequested
+    | RealtimeReconnected
 )
