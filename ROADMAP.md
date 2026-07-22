@@ -51,6 +51,90 @@ fuera de alcance:
   la cancelación, los timeouts, los resultados fuera de orden y los fallos parciales de
   cada capa.
 
+## Escalado independiente de la cola A2A
+
+La cola A2A actual ya usa PostgreSQL como fuente de verdad, `LISTEN/NOTIFY` como señal de
+baja latencia y reconciliación periódica para recuperar notificaciones perdidas y leases
+vencidas. Existe un `A2AWorker` por proceso FastAPI, por lo que el número de consumidores
+A2A crece actualmente con las réplicas web y cada `NOTIFY` despierta a todos esos
+consumidores. No se crea un listener por usuario o conversación, pero a gran escala el
+broadcast entre procesos podría producir demasiados intentos fallidos de `claim_next()`.
+
+La siguiente evolución deberá desacoplar la capacidad web de la capacidad de trabajo A2A:
+
+- Crear puntos de entrada o roles de despliegue explícitos para API y worker, de modo que
+  los procesos FastAPI puedan limitarse a aceptar tráfico y persistir jobs, mientras uno o
+  varios procesos A2A independientes los consumen.
+- Mantener PostgreSQL y `A2AJobRepository.claim_next()` como autoridad de orden, leases y
+  ownership. El payload de `NOTIFY` seguirá siendo únicamente una señal para reconciliar
+  estado durable, nunca una orden de ejecución confiable.
+- Crear un `A2AWorkerPool` con una sola suscripción `LISTEN` por proceso, una capacidad
+  concurrente explícita y acotada, y un bucle que reclame jobs hasta llenar sus slots
+  disponibles. No crear una suscripción independiente por coroutine ejecutora.
+- Permitir configurar por separado el número de réplicas worker y la concurrencia local,
+  por ejemplo mediante `A2A_WORKER_CONCURRENCY`, sin vincularlos al número de workers de
+  Uvicorn ni al número de usuarios conectados.
+- Ejecutar simultáneamente jobs de threads distintos, conservando la serialización actual
+  dentro de cada thread mediante la consulta durable. La concurrencia local no deberá
+  introducir un segundo mecanismo de orden en memoria.
+- Coordinar notificaciones, slots liberados, reconciliación y apagado mediante primitivas
+  acotadas. El cierre deberá dejar de reclamar trabajo, propagar cancelaciones y reencolar
+  de forma segura las claims interrumpidas sin cerrar clientes compartidos prematuramente.
+- Separar el listener A2A del listener usado por los procesos API cuando se desplieguen
+  roles distintos, evitando que una réplica web consulte `a2a_jobs` si no ejecutará jobs.
+- Añadir reconexión con backoff y jitter a la conexión PostgreSQL `LISTEN`. Mientras se
+  recupera la conexión, la reconciliación periódica deberá preservar la corrección aunque
+  aumente temporalmente la latencia.
+
+Observabilidad necesaria antes de aumentar consumidores:
+
+- Medir profundidad de la cola y tiempo `created_at` a `started_at` por job y thread.
+- Contabilizar intentos de `claim_next()` exitosos y vacíos, distinguiendo despertares por
+  `NOTIFY`, capacidad liberada y reconciliación periódica.
+- Medir jobs activos, utilización del pool, duración, timeouts, leases vencidas y valores
+  de `attempt_count` superiores a uno.
+- Registrar conexiones y reconexiones del listener, señales recibidas y tiempo hasta el
+  primer claim, sin incluir mensajes, argumentos de tools ni resultados.
+- Definir umbrales operativos para escalar réplicas o concurrencia sin saturar PostgreSQL,
+  proveedores de modelos ni sistemas externos invocados por las tools.
+
+Si el broadcast entre réplicas worker se convierte en un cuello de botella, evaluar en
+este orden:
+
+1. Reducir y controlar el número de procesos que escuchan A2A mediante el despliegue
+   independiente y el pool local.
+2. Particionar opcionalmente por un hash estable de `thread_id`, asignando todos los jobs
+   del mismo thread al mismo shard y canales de notificación. Deberán diseñarse
+   explícitamente el rebalanceo, la recuperación de workers caídos, los shards calientes
+   y el aprovechamiento de capacidad libre.
+3. Adoptar un broker con competing consumers —por ejemplo Redis Streams, RabbitMQ, SQS o
+   Kafka— solo cuando las métricas demuestren que PostgreSQL ya no satisface el throughput
+   o la latencia requeridos.
+
+La introducción de un broker deberá usar un outbox transaccional: la misma transacción que
+crea el job persistirá el mensaje pendiente de publicación, un publisher independiente lo
+entregará al broker y el consumidor continuará validando de forma idempotente el estado
+del job en PostgreSQL. No se publicará directamente al broker después de insertar el job,
+porque una caída entre ambas operaciones podría dejar trabajo durable sin señal de
+entrega. Esta fase deberá definir duplicados, claves de idempotencia, redelivery,
+dead-letter queues, backpressure y reconciliación entre broker y base de datos.
+
+Pruebas previstas:
+
+- Verificar que una sola notificación llena varios slots disponibles sin crear una
+  suscripción ni una consulta simultánea por slot.
+- Comprobar el límite de concurrencia, la ejecución paralela entre threads y el orden
+  estricto dentro de un mismo thread.
+- Simular varios procesos competidores, notificaciones duplicadas o perdidas, caída del
+  listener, expiración de leases y apagado con claims activas.
+- Confirmar que procesos configurados únicamente como API no escuchan ni consultan la cola
+  A2A y que las réplicas worker pueden escalar de forma independiente.
+- Medir y acotar el número de claims vacíos por job bajo diferentes cantidades de
+  procesos, concurrencia y carga sostenida.
+- Para un futuro broker, probar publicación outbox idempotente, redelivery, duplicados,
+  caída antes y después del ack y recuperación sin perder ni ejecutar dos veces efectos no
+  idempotentes.
+
 ## Evolución de la interacción STS
 
 El flujo `speech_to_speech` ya abre una sesión Gemini Live por WebSocket, recibe PCM16
