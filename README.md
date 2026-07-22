@@ -122,6 +122,32 @@ make run
 La API queda disponible en `http://127.0.0.1:8000` y la documentación interactiva en
 [`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs).
 
+### Cliente web React
+
+El directorio `frontend/` contiene una interfaz React + TypeScript para los dos
+WebSockets. El modo **Texto** consume `/v1/agent/ws` como un chat persistente; el modo
+**Voz** usa `/v1/agent/realtime`, captura el micrófono como PCM16 mono a 16 kHz, reproduce
+la respuesta PCM16 a 24 kHz y muestra las transcripciones de ambos interlocutores.
+
+Con la API levantada en `http://127.0.0.1:8000`, inicia el cliente en otra terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Abre `http://127.0.0.1:5173`. El proxy de Vite reenvía HTTP y WebSocket a la API local.
+Para usar otro backend, copia `frontend/.env.example` a `frontend/.env` y cambia
+`TESSERAFLOW_BACKEND_URL`; también puedes indicar una URL desde la configuración de la
+interfaz. El micrófono requiere un contexto seguro (`https` o `localhost`) y el backend
+debe tener `INTERACTIVE_FLOW=speech_to_speech` para habilitar la voz realtime.
+
+El cliente crea una sesión mediante `POST /v1/sessions` al cargar y cada vez que se pulsa
+**Nueva conversación**. El `user_id` de demostración y la URL de conexión se guardan solo
+como preferencias locales; los mensajes y el audio no se escriben en el almacenamiento
+del navegador.
+
 ### Crear una sesión y enviar el primer mensaje
 
 Cada chat debe comenzar creando una sesión persistida:
@@ -817,6 +843,7 @@ src/
 ├── bootstrap.py         # Composición de dependencias
 └── main.py              # Aplicación y lifespan
 tests/                   # Tests unitarios de casos de uso y adaptadores
+frontend/                # Cliente React + TypeScript para texto y voz realtime
 ```
 
 ## Roadmap
