@@ -337,9 +337,11 @@ contexto útil para preguntas posteriores. Cada mensaje usa un envelope JSON
 turno pero antes de completar el job, el nuevo worker recupera esa respuesta del
 historial en lugar de invocar otra vez al modelo.
 
-Los jobs de un mismo thread se ejecutan en orden. Varios procesos pueden reclamar jobs
-distintos con `FOR UPDATE SKIP LOCKED`; una lease vencida permite recuperar trabajo tras
-una caída. Al terminar, el repositorio cambia el estado del job y crea un comando
+Los jobs de un mismo thread se ejecutan en orden. Un `NOTIFY` despierta los workers al
+insertar, reencolar o terminar trabajo —un estado terminal puede desbloquear el siguiente
+job del thread— y una reconciliación periódica recupera señales perdidas y leases vencidas.
+Varios procesos pueden reclamar jobs distintos con `FOR UPDATE SKIP LOCKED`. Al terminar,
+el repositorio cambia el estado del job y crea un comando
 `worker_completed` en una sola operación SQL. El worker nunca llama al modelo principal
 ni escribe directamente al WebSocket.
 
@@ -350,7 +352,7 @@ actualizado. El resultado A2A usa el envelope versionado `tesseraflow.a2a.result
 un turno nuevo del agente interactivo. Sus eventos se guardan en el outbox antes de ser
 entregados, por lo que siguen disponibles si no hay un socket conectado.
 
-Los inserts de inbox y outbox emiten señales PostgreSQL `NOTIFY` después del commit. Una
+Los inserts de jobs, inbox y outbox emiten señales PostgreSQL `NOTIFY` después del commit. Una
 única conexión `LISTEN` por proceso distribuye esos avisos a los consumidores locales por
 `command_id` o conversación. El aviso solo despierta: cada consumidor vuelve a consultar
 la fila durable y conserva una reconciliación periódica lenta para recuperarse de una
@@ -717,7 +719,7 @@ modificar los archivos versionados.
 | `POSTGRES_COMMAND_TIMEOUT_SECONDS` | `30` | Timeout de comandos SQL. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Caché de contexto reciente. |
 | `MAX_TOOL_ROUNDS` | `8` | Límite contra bucles de tools. |
-| `A2A_WORKER_POLL_SECONDS` | `0.5` | Intervalo de sondeo de la cola durable. |
+| `A2A_WORKER_RECONCILIATION_SECONDS` | `5` | Respaldo periódico para señales A2A perdidas y leases vencidas. |
 | `A2A_JOB_TIMEOUT_SECONDS` | `600` | Tiempo máximo de un turno del worker. |
 | `INTERACTION_COORDINATOR_RECONCILIATION_SECONDS` | `5` | Reconciliación de comandos si no llega una notificación. |
 | `INTERACTION_OUTPUT_RECONCILIATION_SECONDS` | `5` | Reconciliación de outputs si no llega una notificación. |

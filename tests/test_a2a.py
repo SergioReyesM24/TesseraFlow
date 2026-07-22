@@ -1,3 +1,4 @@
+import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -70,16 +71,70 @@ class InMemoryConversationRepository:
         return True
 
 
+class InMemoryA2ASubscription:
+    """Track monotonic job notifications without relying on wall-clock polling."""
+
+    def __init__(self) -> None:
+        """Initialize one local notification generation."""
+        self.generation = 0
+        self.event = asyncio.Event()
+
+    def checkpoint(self) -> int:
+        """Return the generation observed before querying durable state."""
+        return self.generation
+
+    async def wait_for_change(self, checkpoint: int, deadline_seconds: float) -> None:
+        """Wait for a newer job hint or the reconciliation deadline."""
+        if self.generation != checkpoint:
+            return
+        self.event.clear()
+        if self.generation != checkpoint:
+            return
+        await asyncio.wait_for(self.event.wait(), timeout=deadline_seconds)
+
+    def publish(self) -> None:
+        """Advance the generation and wake the worker."""
+        self.generation += 1
+        self.event.set()
+
+
+class InMemoryA2AJobNotifier:
+    """Fan durable job hints out to process-local test subscriptions."""
+
+    def __init__(self) -> None:
+        """Initialize subscribers and an observable subscription barrier."""
+        self.subscriptions: set[InMemoryA2ASubscription] = set()
+        self.subscribed = asyncio.Event()
+
+    @asynccontextmanager
+    async def subscribe_jobs(self) -> AsyncIterator[InMemoryA2ASubscription]:
+        """Register one worker subscription for its task lifetime."""
+        subscription = InMemoryA2ASubscription()
+        self.subscriptions.add(subscription)
+        self.subscribed.set()
+        try:
+            yield subscription
+        finally:
+            self.subscriptions.discard(subscription)
+
+    def publish_job(self) -> None:
+        """Wake every local worker so the repository can choose one claimant."""
+        for subscription in tuple(self.subscriptions):
+            subscription.publish()
+
+
 class InMemoryA2AJobRepository:
     """Implement ordered A2A claims without an external database."""
 
-    def __init__(self) -> None:
+    def __init__(self, notifier: InMemoryA2AJobNotifier | None = None) -> None:
         """Initialize thread, job, and claim state."""
+        self.notifier = notifier
         self.threads: dict[str, A2AThread] = {}
         self.jobs: dict[str, A2AJob] = {}
         self.order: list[str] = []
         self.claims: dict[str, str] = {}
         self.notifications: list[str] = []
+        self.completed = asyncio.Event()
 
     async def create_thread(self, thread: A2AThread, first_job: A2AJob) -> None:
         """Store a thread and its initial job."""
@@ -101,6 +156,8 @@ class InMemoryA2AJobRepository:
         """Append one queued job in deterministic order."""
         self.jobs[job.job_id] = job
         self.order.append(job.job_id)
+        if self.notifier is not None:
+            self.notifier.publish_job()
 
     async def load_job(
         self,
@@ -149,6 +206,7 @@ class InMemoryA2AJobRepository:
             response_id=response_id,
         )
         self.notifications.append(notification_message)
+        self.completed.set()
 
     async def fail(
         self,
@@ -165,11 +223,14 @@ class InMemoryA2AJobRepository:
             error_code=error_code,
         )
         self.notifications.append(notification_message)
+        self.completed.set()
 
     async def requeue(self, job_id: str, worker_id: str) -> None:
         """Release a claim back to queued state."""
         assert self.claims.pop(job_id) == worker_id
         self.jobs[job_id] = replace(self.jobs[job_id], status="queued")
+        if self.notifier is not None:
+            self.notifier.publish_job()
 
 
 class StubModelSession:
@@ -253,11 +314,12 @@ async def test_worker_keeps_its_own_history_across_a2a_followups() -> None:
     agent = AgentService(gateway, ToolRegistry([]), conversations)
     worker = A2AWorker(
         jobs,
+        InMemoryA2AJobNotifier(),
         agent,
         conversations,
         AgentDefinition(model="worker-model", instructions="Worker", tool_names=()),
         worker_id="process-1",
-        poll_seconds=0.01,
+        reconciliation_seconds=0.01,
         job_timeout_seconds=5,
     )
 
@@ -401,11 +463,12 @@ async def test_worker_recovers_a_persisted_turn_without_calling_the_model_twice(
     await jobs.requeue(claimed.job_id, "dead-process")
     recovering_worker = A2AWorker(
         jobs,
+        InMemoryA2AJobNotifier(),
         agent,
         conversations,
         AgentDefinition(model="worker-model", instructions="Worker", tool_names=()),
         worker_id="new-process",
-        poll_seconds=0.01,
+        reconciliation_seconds=0.01,
         job_timeout_seconds=5,
     )
 
@@ -415,3 +478,36 @@ async def test_worker_recovers_a_persisted_turn_without_calling_the_model_twice(
     assert report.status == "completed"
     assert report.answer == "Respuesta durable"
     assert len(gateway.histories) == 1
+
+
+async def test_job_notification_wakes_background_worker_without_reconciliation_delay() -> None:
+    """Start a newly queued A2A job from its hint instead of the slow fallback."""
+    notifier = InMemoryA2AJobNotifier()
+    conversations = InMemoryConversationRepository()
+    jobs = InMemoryA2AJobRepository(notifier)
+    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    gateway = StubModelGateway([[ModelReply(response_id="worker-1", text="Respuesta inmediata")]])
+    agent = AgentService(gateway, ToolRegistry([]), conversations)
+    worker = A2AWorker(
+        jobs,
+        notifier,
+        agent,
+        conversations,
+        AgentDefinition(model="worker-model", instructions="Worker", tool_names=()),
+        worker_id="process-1",
+        reconciliation_seconds=30,
+        job_timeout_seconds=5,
+    )
+    worker.start()
+    await notifier.subscribed.wait()
+
+    try:
+        receipt = await service.delegate(parent_key(), "Trabajo notificado")
+        async with asyncio.timeout(0.5):
+            await jobs.completed.wait()
+    finally:
+        await worker.close()
+
+    report = await service.status(parent_key(), receipt.job_id)
+    assert report.status == "completed"
+    assert report.answer == "Respuesta inmediata"

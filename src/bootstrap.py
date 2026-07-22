@@ -110,11 +110,12 @@ async def build_container(settings: Settings) -> AppContainer:
     )
     a2a_worker = A2AWorker(
         jobs,
+        interaction_notifier,
         model_runtime.worker_agent_service,
         conversations,
         model_runtime.worker_definition,
         worker_id=str(uuid4()),
-        poll_seconds=settings.a2a_worker_poll_seconds,
+        reconciliation_seconds=settings.a2a_worker_reconciliation_seconds,
         job_timeout_seconds=settings.a2a_job_timeout_seconds,
     )
     conversation_coordinator = ConversationCoordinator(

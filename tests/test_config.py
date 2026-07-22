@@ -93,6 +93,14 @@ def test_legacy_interaction_poll_names_configure_reconciliation() -> None:
     assert settings.interaction_output_reconciliation_seconds == 9
 
 
+def test_legacy_a2a_poll_name_configures_job_reconciliation() -> None:
+    """Accept the deployed A2A polling variable under notification semantics."""
+    settings = Settings(A2A_WORKER_POLL_SECONDS=7)
+
+    assert settings.a2a_worker_reconciliation_seconds == 7
+    assert settings.a2a_worker_poll_seconds == 7
+
+
 def test_blank_optional_dotenv_values_keep_provider_defaults(
     tmp_path: Path,
     monkeypatch: Any,

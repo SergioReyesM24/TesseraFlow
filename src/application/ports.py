@@ -237,8 +237,8 @@ class InteractionRepository(Protocol):
         ...
 
 
-class InteractionSubscription(Protocol):
-    """Observe durable interaction changes without carrying their persisted data."""
+class NotificationSubscription(Protocol):
+    """Observe durable work changes without carrying their persisted data."""
 
     def checkpoint(self) -> int:
         """Return the current monotonic notification generation."""
@@ -260,7 +260,7 @@ class InteractionNotifier(Protocol):
         """Release notification resources during application shutdown."""
         ...
 
-    def subscribe_commands(self) -> AbstractAsyncContextManager[InteractionSubscription]:
+    def subscribe_commands(self) -> AbstractAsyncContextManager[NotificationSubscription]:
         """Subscribe one coordinator worker to newly runnable commands."""
         ...
 
@@ -269,6 +269,14 @@ class InteractionNotifier(Protocol):
         conversation_id: str,
         *,
         command_id: str | None = None,
-    ) -> AbstractAsyncContextManager[InteractionSubscription]:
+    ) -> AbstractAsyncContextManager[NotificationSubscription]:
         """Subscribe a transport to output changes in its delivery scope."""
+        ...
+
+
+class A2AJobNotifier(Protocol):
+    """Wake A2A consumers when durable jobs may have become runnable."""
+
+    def subscribe_jobs(self) -> AbstractAsyncContextManager[NotificationSubscription]:
+        """Observe job hints while relying on reconciliation for missed signals."""
         ...

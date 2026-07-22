@@ -64,7 +64,16 @@ class Settings(BaseSettings):
     agent_instructions: str = DEFAULT_AGENT_INSTRUCTIONS
     live_audio_instructions: str = DEFAULT_LIVE_AUDIO_INSTRUCTIONS
     worker_agent_instructions: str = DEFAULT_WORKER_AGENT_INSTRUCTIONS
-    a2a_worker_poll_seconds: float = Field(default=0.5, gt=0, le=60)
+    a2a_worker_reconciliation_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        validation_alias=AliasChoices(
+            "a2a_worker_reconciliation_seconds",
+            "A2A_WORKER_RECONCILIATION_SECONDS",
+            "A2A_WORKER_POLL_SECONDS",
+        ),
+    )
     a2a_job_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
     interaction_coordinator_reconciliation_seconds: float = Field(
         default=5.0,
@@ -87,6 +96,11 @@ class Settings(BaseSettings):
     interaction_command_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
     interaction_max_pending_commands: int = Field(default=16, ge=1, le=1000)
     interaction_coordinator_workers: int = Field(default=4, ge=1, le=100)
+
+    @property
+    def a2a_worker_poll_seconds(self) -> float:
+        """Expose the legacy name for callers migrating to reconciliation semantics."""
+        return self.a2a_worker_reconciliation_seconds
 
 
 @lru_cache

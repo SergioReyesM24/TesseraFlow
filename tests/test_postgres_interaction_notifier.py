@@ -3,6 +3,7 @@ from typing import Any
 
 import infrastructure.postgres_interaction_notifier as notifier_module
 from infrastructure.postgres_interaction_notifier import (
+    A2A_JOB_CHANNEL,
     COMMAND_CHANNEL,
     OUTPUT_CHANNEL,
     PostgresInteractionNotifier,
@@ -66,7 +67,7 @@ async def test_notifier_owns_one_dedicated_listener_connection(monkeypatch: Any)
 
     await listener.start()
 
-    assert set(connection.listeners) == {COMMAND_CHANNEL, OUTPUT_CHANNEL}
+    assert set(connection.listeners) == {A2A_JOB_CHANNEL, COMMAND_CHANNEL, OUTPUT_CHANNEL}
     assert connection.termination_listener is not None
 
     await listener.close()
@@ -84,6 +85,20 @@ async def test_command_notification_advances_every_competing_subscription() -> N
         second_checkpoint = second.checkpoint()
 
         listener._handle_command(None, 1, "commands", "command-1")  # type: ignore[arg-type]
+
+        async with asyncio.timeout(0.1):
+            await first.wait_for_change(first_checkpoint, 30)
+            await second.wait_for_change(second_checkpoint, 30)
+
+
+async def test_a2a_job_notification_advances_every_competing_subscription() -> None:
+    """Wake all local A2A workers while durable claiming selects the owner."""
+    listener = notifier()
+    async with listener.subscribe_jobs() as first, listener.subscribe_jobs() as second:
+        first_checkpoint = first.checkpoint()
+        second_checkpoint = second.checkpoint()
+
+        listener._handle_a2a_job(None, 1, "a2a-jobs", "job-1")  # type: ignore[arg-type]
 
         async with asyncio.timeout(0.1):
             await first.wait_for_change(first_checkpoint, 30)

@@ -5,7 +5,7 @@ from collections.abc import Callable
 import structlog
 
 from application.agent import AgentService
-from application.ports import A2AJobRepository, ConversationRepository
+from application.ports import A2AJobNotifier, A2AJobRepository, ConversationRepository
 from domain.a2a import (
     A2ACompletionMessage,
     A2AJob,
@@ -119,21 +119,23 @@ class A2AWorker:
     def __init__(
         self,
         jobs: A2AJobRepository,
+        notifier: A2AJobNotifier,
         agent_service: AgentService,
         conversations: ConversationRepository,
         definition: AgentDefinition,
         *,
         worker_id: str,
-        poll_seconds: float,
+        reconciliation_seconds: float,
         job_timeout_seconds: float,
     ) -> None:
-        """Configure one process worker with explicit polling and execution bounds."""
+        """Configure one process worker with notification and execution bounds."""
         self._jobs = jobs
+        self._notifier = notifier
         self._agent_service = agent_service
         self._conversations = conversations
         self._definition = definition
         self._worker_id = worker_id
-        self._poll_seconds = poll_seconds
+        self._reconciliation_seconds = reconciliation_seconds
         self._job_timeout_seconds = job_timeout_seconds
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -266,18 +268,20 @@ class A2AWorker:
         return None
 
     async def _run(self) -> None:
-        """Poll durably until shutdown while keeping transient repository failures isolated."""
-        while not self._stop.is_set():
-            try:
-                worked = await self.run_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.exception("a2a_worker_poll_failed", error_type=type(exc).__name__)
-                worked = False
-            if worked:
-                continue
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self._poll_seconds)
-            except TimeoutError:
-                pass
+        """Consume job hints and periodically reconcile durable state until shutdown."""
+        async with self._notifier.subscribe_jobs() as subscription:
+            while not self._stop.is_set():
+                checkpoint = subscription.checkpoint()
+                try:
+                    worked = await self.run_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("a2a_worker_consumer_failed", error_type=type(exc).__name__)
+                    worked = False
+                if worked:
+                    continue
+                await subscription.wait_for_change(
+                    checkpoint,
+                    self._reconciliation_seconds,
+                )

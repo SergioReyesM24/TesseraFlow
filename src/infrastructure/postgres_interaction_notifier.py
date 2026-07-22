@@ -8,10 +8,11 @@ from typing import Any
 import asyncpg
 import structlog
 
-from application.ports import InteractionNotifier, InteractionSubscription
+from application.ports import A2AJobNotifier, InteractionNotifier, NotificationSubscription
 
 COMMAND_CHANNEL = "tesseraflow_interaction_commands"
 OUTPUT_CHANNEL = "tesseraflow_interaction_outputs"
+A2A_JOB_CHANNEL = "tesseraflow_a2a_jobs"
 
 logger = structlog.get_logger(__name__)
 
@@ -46,8 +47,8 @@ class _NotificationSubscription:
         self._event.set()
 
 
-class PostgresInteractionNotifier(InteractionNotifier):
-    """Fan PostgreSQL notifications out to scoped process-local subscriptions."""
+class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
+    """Fan PostgreSQL work notifications out to process-local subscriptions."""
 
     def __init__(self, dsn: str, *, command_timeout_seconds: float) -> None:
         """Configure one dedicated LISTEN connection outside the query pool."""
@@ -55,6 +56,7 @@ class PostgresInteractionNotifier(InteractionNotifier):
         self._command_timeout_seconds = command_timeout_seconds
         self._connection: asyncpg.Connection | None = None
         self._command_subscribers: set[_NotificationSubscription] = set()
+        self._a2a_job_subscribers: set[_NotificationSubscription] = set()
         self._command_output_subscribers: dict[str, set[_NotificationSubscription]] = defaultdict(
             set
         )
@@ -73,6 +75,7 @@ class PostgresInteractionNotifier(InteractionNotifier):
         try:
             await connection.add_listener(COMMAND_CHANNEL, self._handle_command)
             await connection.add_listener(OUTPUT_CHANNEL, self._handle_output)
+            await connection.add_listener(A2A_JOB_CHANNEL, self._handle_a2a_job)
             connection.add_termination_listener(self._handle_termination)
         except BaseException:
             await connection.close()
@@ -89,10 +92,11 @@ class PostgresInteractionNotifier(InteractionNotifier):
             connection.remove_termination_listener(self._handle_termination)
             await connection.remove_listener(COMMAND_CHANNEL, self._handle_command)
             await connection.remove_listener(OUTPUT_CHANNEL, self._handle_output)
+            await connection.remove_listener(A2A_JOB_CHANNEL, self._handle_a2a_job)
             await connection.close()
 
     @asynccontextmanager
-    async def subscribe_commands(self) -> AsyncIterator[InteractionSubscription]:
+    async def subscribe_commands(self) -> AsyncIterator[NotificationSubscription]:
         """Register one bounded-lifetime observer for runnable commands."""
         subscription = _NotificationSubscription()
         self._command_subscribers.add(subscription)
@@ -102,12 +106,22 @@ class PostgresInteractionNotifier(InteractionNotifier):
             self._command_subscribers.discard(subscription)
 
     @asynccontextmanager
+    async def subscribe_jobs(self) -> AsyncIterator[NotificationSubscription]:
+        """Register one observer that wakes when an A2A job may be runnable."""
+        subscription = _NotificationSubscription()
+        self._a2a_job_subscribers.add(subscription)
+        try:
+            yield subscription
+        finally:
+            self._a2a_job_subscribers.discard(subscription)
+
+    @asynccontextmanager
     async def subscribe_outputs(
         self,
         conversation_id: str,
         *,
         command_id: str | None = None,
-    ) -> AsyncIterator[InteractionSubscription]:
+    ) -> AsyncIterator[NotificationSubscription]:
         """Register one output observer and remove its routing state on disconnect."""
         subscription = _NotificationSubscription()
         subscribers = (
@@ -138,6 +152,18 @@ class PostgresInteractionNotifier(InteractionNotifier):
         """Wake all competing local workers without trusting notification payloads."""
         del connection, process_id, channel, payload
         for subscription in tuple(self._command_subscribers):
+            subscription.publish()
+
+    def _handle_a2a_job(
+        self,
+        connection: object,
+        process_id: int,
+        channel: str,
+        payload: object,
+    ) -> None:
+        """Wake every local A2A consumer so durable claiming decides the winner."""
+        del connection, process_id, channel, payload
+        for subscription in tuple(self._a2a_job_subscribers):
             subscription.publish()
 
     def _handle_output(
@@ -176,6 +202,7 @@ class PostgresInteractionNotifier(InteractionNotifier):
         logger.warning("interaction_notifier_connection_terminated")
         subscriptions = (
             *self._command_subscribers,
+            *self._a2a_job_subscribers,
             *(
                 subscription
                 for subscribers in self._command_output_subscribers.values()
