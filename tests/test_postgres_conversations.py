@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from application.conversations import (
@@ -16,6 +18,9 @@ from infrastructure.postgres_conversations import (
     INSERT_ITEM,
     SELECT_CONVERSATION,
     SELECT_CONVERSATION_FOR_UPDATE,
+    SELECT_CONVERSATION_HISTORY,
+    SELECT_CONVERSATION_SUMMARIES,
+    SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
     UPDATE_CONVERSATION,
     PostgresConversationRepository,
@@ -49,13 +54,32 @@ class FakePostgresConnection:
 
     async def fetchrow(self, query: str, conversation_id: str) -> dict[str, object] | None:
         """Return one canonical metadata row."""
-        assert query in (SELECT_CONVERSATION, SELECT_CONVERSATION_FOR_UPDATE)
+        assert query in (
+            SELECT_CONVERSATION,
+            SELECT_CONVERSATION_FOR_UPDATE,
+            SELECT_CONVERSATION_HISTORY,
+        )
         return self.conversations.get(conversation_id)
 
-    async def fetch(self, query: str, conversation_id: str, limit: int) -> list[dict[str, object]]:
-        """Return recent ordered item payloads."""
-        assert query == SELECT_RECENT_ITEMS
+    async def fetch(self, query: str, conversation_id: str, *args: int) -> list[dict[str, object]]:
+        """Return compacted context or a bounded technical history page."""
+        if query == SELECT_CONVERSATION_SUMMARIES:
+            offset, limit = args
+            rows = [
+                {"id": item_id, **row}
+                for item_id, row in self.conversations.items()
+                if row["user_id"] == conversation_id
+            ]
+            rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
+            return rows[offset : offset + limit]
         records = self.items.get(conversation_id, [])
+        if query == SELECT_HISTORY_ITEMS:
+            after_sequence, limit = args
+            return [record for record in records if int(record["sequence"]) > after_sequence][
+                :limit
+            ]
+        assert query == SELECT_RECENT_ITEMS
+        (limit,) = args
         recent = records[-limit:]
         turn_ids = {record["turn_id"] for record in recent}
         return [
@@ -70,8 +94,12 @@ class FakePostgresConnection:
             self.conversations[conversation_id] = {
                 "user_id": user_id,
                 "title": title,
+                "status": "active",
                 "version": 0,
                 "last_sequence": 0,
+                "created_at": datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
+                "updated_at": datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
+                "last_message_at": None,
             }
             self.items[conversation_id] = []
         elif query == UPDATE_CONVERSATION:
@@ -100,6 +128,7 @@ class FakePostgresConnection:
                     "turn_id": record[1],
                     "sequence": record[2],
                     "payload": record[7],
+                    "created_at": datetime(2026, 7, 22, 10, 1, tzinfo=UTC),
                 }
             )
 
@@ -132,9 +161,13 @@ class FakePostgresPool:
         return FakeAcquire(self.connection)
 
 
-def key(*, user_id: str = "user-1") -> ConversationKey:
+def key(
+    *,
+    conversation_id: str = "conv-1",
+    user_id: str = "user-1",
+) -> ConversationKey:
     """Build one stable conversation ownership key."""
-    return ConversationKey(conversation_id="conv-1", user_id=user_id)
+    return ConversationKey(conversation_id=conversation_id, user_id=user_id)
 
 
 def tool_turn(question: str = "Suma 2 y 3") -> tuple[ConversationItem, ...]:
@@ -166,6 +199,36 @@ async def test_postgres_appends_and_loads_complete_tool_turn() -> None:
     assert [record["sequence"] for record in pool.connection.items["conv-1"]] == [1, 2, 3, 4]
 
 
+async def test_postgres_loads_paginated_technical_history_with_tool_records() -> None:
+    """Expose canonical row metadata and preserve call/result correlation."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.save_turn(Conversation(key=key()), tool_turn())
+
+    first = await store.load_history(key(), after_sequence=0, limit=2)
+    second = await store.load_history(key(), after_sequence=2, limit=2)
+
+    assert first is not None
+    assert first.version == 1
+    assert first.last_sequence == 4
+    assert first.has_more is True
+    assert [record.sequence for record in first.items] == [1, 2]
+    assert isinstance(first.items[1].item, ToolCall)
+    assert second is not None
+    assert second.has_more is False
+    assert isinstance(second.items[0].item, ToolResult)
+
+
+async def test_postgres_history_enforces_conversation_ownership() -> None:
+    """Reject technical inspection through another user identifier."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.create(key())
+
+    with pytest.raises(ConversationAccessDeniedError):
+        await store.load_history(key(user_id="user-2"), after_sequence=0, limit=50)
+
+
 async def test_postgres_creates_an_empty_session_before_its_first_turn() -> None:
     """Persist a version-zero conversation that can subsequently receive messages."""
     pool = FakePostgresPool()
@@ -177,6 +240,23 @@ async def test_postgres_creates_an_empty_session_before_its_first_turn() -> None
     assert created == Conversation(key=key(), title="Nueva conversación")
     assert loaded == created
     assert pool.connection.items["conv-1"] == []
+
+
+async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
+    """Order session headers by update time and expose a bounded next page."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.create(key())
+    await store.create(key(conversation_id="conv-2"))
+    await store.create(key(conversation_id="foreign", user_id="user-2"))
+
+    first = await store.list_sessions("user-1", offset=0, limit=1)
+    second = await store.list_sessions("user-1", offset=1, limit=1)
+
+    assert [item.key.conversation_id for item in first.sessions] == ["conv-2"]
+    assert first.has_more is True
+    assert [item.key.conversation_id for item in second.sessions] == ["conv-1"]
+    assert second.has_more is False
 
 
 async def test_postgres_rejects_stale_versions_and_other_owners() -> None:

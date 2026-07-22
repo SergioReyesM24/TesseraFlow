@@ -1,9 +1,21 @@
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
-from application.conversations import ConversationNotFoundError, ConversationService
-from domain.conversations import Conversation, ConversationItem, ConversationKey
+from application.conversations import (
+    ConversationHistoryService,
+    ConversationNotFoundError,
+    ConversationService,
+)
+from domain.conversations import (
+    Conversation,
+    ConversationHistoryPage,
+    ConversationItem,
+    ConversationKey,
+    ConversationListPage,
+    ConversationSummary,
+)
 
 
 class StubConversationRepository:
@@ -36,6 +48,63 @@ class StubConversationRepository:
         return self.values.pop(key.conversation_id, None) is not None
 
 
+class StubConversationHistoryRepository:
+    """Return one owner-scoped technical page for history service tests."""
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """Return one deterministic summary page for the requested owner."""
+        assert offset == 0
+        assert limit == 50
+        timestamp = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+        return ConversationListPage(
+            sessions=(
+                ConversationSummary(
+                    key=ConversationKey(conversation_id="known", user_id=user_id),
+                    title="Historial",
+                    status="active",
+                    version=0,
+                    last_sequence=0,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    last_message_at=None,
+                ),
+            ),
+            has_more=False,
+        )
+
+    async def load_history(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage | None:
+        """Return deterministic metadata only for the known conversation."""
+        assert after_sequence == 0
+        assert limit == 50
+        if key.conversation_id != "known":
+            return None
+        timestamp = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+        return ConversationHistoryPage(
+            key=key,
+            title="Historial",
+            status="active",
+            version=0,
+            last_sequence=0,
+            created_at=timestamp,
+            updated_at=timestamp,
+            last_message_at=None,
+            items=(),
+            has_more=False,
+        )
+
+
 async def test_conversation_service_owns_session_uid_creation_and_validation() -> None:
     """Keep session lifecycle outside model orchestration."""
     repository = StubConversationRepository()
@@ -49,3 +118,19 @@ async def test_conversation_service_owns_session_uid_creation_and_validation() -
     assert await service.delete(created.key) is True
     with pytest.raises(ConversationNotFoundError):
         await service.require(created.key)
+
+
+async def test_history_service_rejects_unknown_sessions() -> None:
+    """Keep not-found semantics in the application boundary."""
+    service = ConversationHistoryService(StubConversationHistoryRepository())
+    known = ConversationKey(conversation_id="known", user_id="user-1")
+
+    listed = await service.list_sessions("user-1", offset=0, limit=50)
+    assert listed.sessions[0].key == known
+    assert (await service.load(known, after_sequence=0, limit=50)).title == "Historial"
+    with pytest.raises(ConversationNotFoundError):
+        await service.load(
+            ConversationKey(conversation_id="missing", user_id="user-1"),
+            after_sequence=0,
+            limit=50,
+        )

@@ -2,11 +2,13 @@ import json
 import uuid
 from collections.abc import Callable
 
-from application.ports import ConversationRepository
+from application.ports import ConversationHistoryRepository, ConversationRepository
 from domain.conversations import (
     Conversation,
+    ConversationHistoryPage,
     ConversationItem,
     ConversationKey,
+    ConversationListPage,
     ConversationMessage,
 )
 from domain.tools import ToolCall
@@ -59,6 +61,45 @@ class ConversationService:
     async def delete(self, key: ConversationKey) -> bool:
         """Delete an owned conversation and all retained history."""
         return await self._conversations.delete(key)
+
+
+class ConversationHistoryService:
+    """Expose bounded canonical history without coupling API code to PostgreSQL."""
+
+    def __init__(self, histories: ConversationHistoryRepository) -> None:
+        """Bind the owner-aware source of canonical conversation records."""
+        self._histories = histories
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """Return one bounded page of sessions owned by a user."""
+        return await self._histories.list_sessions(
+            user_id,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def load(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage:
+        """Return a technical history page or reject an unknown session."""
+        history = await self._histories.load_history(
+            key,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        if history is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return history
 
 
 class RecentConversationCompactor:

@@ -1,4 +1,8 @@
-import type { SessionResponse } from '../types'
+import type {
+  ConversationHistoryResponse,
+  ConversationListResponse,
+  SessionResponse,
+} from '../types'
 
 /** Remove trailing slashes so endpoint composition stays stable. */
 export function normalizeBaseUrl(baseUrl: string): string {
@@ -33,4 +37,54 @@ export async function createSession(baseUrl: string, userId: string): Promise<st
 
   const payload = (await response.json()) as SessionResponse
   return payload.session_uid
+}
+
+/** Load one bounded page of canonical database history for an owned session. */
+export async function loadConversationHistory(
+  baseUrl: string,
+  userId: string,
+  sessionUid: string,
+  afterSequence = 0,
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<ConversationHistoryResponse> {
+  const query = new URLSearchParams({
+    user_id: userId,
+    after_sequence: String(afterSequence),
+    limit: String(limit),
+  })
+  const response = await fetch(
+    httpUrl(`/v1/sessions/${encodeURIComponent(sessionUid)}/history?${query}`, baseUrl),
+    { signal },
+  )
+
+  if (!response.ok) {
+    if (response.status === 404) throw new Error('No existe una sesión con ese identificador.')
+    if (response.status === 403) throw new Error('La sesión pertenece a otro usuario.')
+    throw new Error(`No se pudo cargar el historial técnico (${response.status}).`)
+  }
+
+  return (await response.json()) as ConversationHistoryResponse
+}
+
+/** List a bounded page of persisted sessions owned by the configured user. */
+export async function listConversationSessions(
+  baseUrl: string,
+  userId: string,
+  offset = 0,
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<ConversationListResponse> {
+  const query = new URLSearchParams({
+    user_id: userId,
+    offset: String(offset),
+    limit: String(limit),
+  })
+  const response = await fetch(httpUrl(`/v1/sessions?${query}`, baseUrl), { signal })
+
+  if (!response.ok) {
+    throw new Error(`No se pudo cargar la lista de sesiones (${response.status}).`)
+  }
+
+  return (await response.json()) as ConversationListResponse
 }

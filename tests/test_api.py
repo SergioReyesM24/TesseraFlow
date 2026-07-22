@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -15,7 +16,15 @@ from api.routes import router
 from application.conversations import ConversationNotFoundError
 from application.realtime import RealtimeBackpressureError
 from domain.agent import AgentDefinition, AgentResult
-from domain.conversations import Conversation, ConversationKey
+from domain.conversations import (
+    Conversation,
+    ConversationHistoryItem,
+    ConversationHistoryPage,
+    ConversationKey,
+    ConversationListPage,
+    ConversationMessage,
+    ConversationSummary,
+)
 from domain.interactions import InteractionCommand, InteractionOutput
 from domain.realtime import (
     RealtimeAgentEvent,
@@ -25,6 +34,7 @@ from domain.realtime import (
     RealtimeSessionOptions,
     RealtimeTurnCompleted,
 )
+from domain.tools import ToolCall, ToolResult
 from domain.turn_events import AgentStreamCompleted, AgentTextDelta
 
 SESSION_UID = "12345678-1234-4678-9234-567812345678"
@@ -141,6 +151,95 @@ class StubConversationService:
         return True
 
 
+class StubConversationHistoryService:
+    """Return a technical turn containing a matched tool call and result."""
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """Return the known session in a deterministic owner-scoped page."""
+        assert user_id == "user-1"
+        assert offset == 0
+        assert limit == 50
+        timestamp = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+        return ConversationListPage(
+            sessions=(
+                ConversationSummary(
+                    key=ConversationKey(conversation_id=SESSION_UID, user_id=user_id),
+                    title="Suma dos números",
+                    status="active",
+                    version=1,
+                    last_sequence=4,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    last_message_at=timestamp,
+                ),
+            ),
+            has_more=False,
+        )
+
+    async def load(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage:
+        """Validate pagination and expose deterministic canonical records."""
+        assert key == ConversationKey(conversation_id=SESSION_UID, user_id="user-1")
+        assert after_sequence == 0
+        assert limit == 4
+        timestamp = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+        return ConversationHistoryPage(
+            key=key,
+            title="Suma dos números",
+            status="active",
+            version=1,
+            last_sequence=4,
+            created_at=timestamp,
+            updated_at=timestamp,
+            last_message_at=timestamp,
+            items=(
+                ConversationHistoryItem(
+                    sequence=1,
+                    turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    created_at=timestamp,
+                    item=ConversationMessage(role="user", content="Suma 2 y 3"),
+                ),
+                ConversationHistoryItem(
+                    sequence=2,
+                    turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    created_at=timestamp,
+                    item=ToolCall(
+                        call_id="call-1",
+                        tool_name="calculator",
+                        arguments={"a": 2, "b": 3},
+                    ),
+                ),
+                ConversationHistoryItem(
+                    sequence=3,
+                    turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    created_at=timestamp,
+                    item=ToolResult(call_id="call-1", output={"result": 5}),
+                ),
+                ConversationHistoryItem(
+                    sequence=4,
+                    turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    created_at=timestamp,
+                    item=ConversationMessage(
+                        role="assistant",
+                        content="El resultado es 5",
+                    ),
+                ),
+            ),
+            has_more=False,
+        )
+
+
 class StubRealtimeSession:
     """Capture realtime WebSocket input and emit deterministic binary output."""
 
@@ -251,6 +350,7 @@ def build_test_app(
     app.state.container = SimpleNamespace(
         conversation_coordinator=coordinator or StubConversationCoordinator(),
         conversation_service=StubConversationService(),
+        conversation_history_service=StubConversationHistoryService(),
         realtime_agent_service=realtime_service or StubRealtimeService(),
         realtime_definition=AgentDefinition(
             model="realtime-model",
@@ -287,6 +387,73 @@ async def test_session_creation_and_agent_stream() -> None:
     assert delete_response.json() == {"deleted": True}
     assert removed_run.status_code == 404
     assert removed_chat.status_code == 404
+
+
+async def test_session_history_exposes_canonical_database_items() -> None:
+    """Return ordered row metadata and typed tool payloads with a cursor."""
+    async with AsyncClient(
+        transport=ASGITransport(app=build_test_app()), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            f"/v1/sessions/{SESSION_UID}/history",
+            params={"user_id": "user-1", "limit": 4},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_uid"] == SESSION_UID
+    assert payload["version"] == 1
+    assert payload["last_sequence"] == 4
+    assert payload["has_more"] is False
+    assert payload["next_after_sequence"] is None
+    assert payload["items"][0]["payload"] == {
+        "type": "message",
+        "role": "user",
+        "content": "Suma 2 y 3",
+        "source": "text_user",
+    }
+    assert payload["items"][1]["payload"] == {
+        "type": "tool_call",
+        "call_id": "call-1",
+        "tool_name": "calculator",
+        "arguments": {"a": 2, "b": 3},
+    }
+    assert payload["items"][2]["payload"] == {
+        "type": "tool_result",
+        "call_id": "call-1",
+        "output": {"result": 5},
+        "error": None,
+    }
+
+
+async def test_session_list_exposes_clickable_conversation_summaries() -> None:
+    """List owned sessions separately from loading any individual history."""
+    async with AsyncClient(
+        transport=ASGITransport(app=build_test_app()), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/v1/sessions",
+            params={"user_id": "user-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user-1",
+        "sessions": [
+            {
+                "session_uid": SESSION_UID,
+                "title": "Suma dos números",
+                "status": "active",
+                "version": 1,
+                "last_sequence": 4,
+                "created_at": "2026-07-22T10:00:00Z",
+                "updated_at": "2026-07-22T10:00:00Z",
+                "last_message_at": "2026-07-22T10:00:00Z",
+            }
+        ],
+        "has_more": False,
+        "next_offset": None,
+    }
 
 
 def test_agent_websocket_streams_correlated_json_events() -> None:

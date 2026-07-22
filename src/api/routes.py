@@ -17,6 +17,8 @@ from starlette.requests import HTTPConnection
 
 from api.realtime_websocket import serve_realtime_websocket
 from api.schemas import (
+    ConversationHistoryResponse,
+    ConversationListResponse,
     CreateSessionRequest,
     CreateSessionResponse,
     StreamAgentRequest,
@@ -26,6 +28,7 @@ from api.websocket import serve_agent_websocket
 from application.conversations import (
     ConversationAccessDeniedError,
     ConversationConflictError,
+    ConversationHistoryService,
     ConversationNotFoundError,
     ConversationService,
 )
@@ -58,6 +61,13 @@ def get_conversation_service(
     return container.conversation_service
 
 
+def get_conversation_history_service(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> ConversationHistoryService:
+    """Resolve canonical conversation inspection operations."""
+    return container.conversation_history_service
+
+
 def get_realtime_agent_service(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> RealtimeAgentService:
@@ -84,6 +94,55 @@ async def create_session(
     """Create an empty persisted chat session and return its generated UID."""
     conversation = await service.create_session(payload.user_id)
     return CreateSessionResponse(session_uid=conversation.key.conversation_id)
+
+
+@router.get(
+    "/v1/sessions",
+    response_model=ConversationListResponse,
+    tags=["agent"],
+)
+async def list_sessions(
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    service: Annotated[
+        ConversationHistoryService,
+        Depends(get_conversation_history_service),
+    ],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> ConversationListResponse:
+    """List persisted sessions so technical clients can select one for inspection."""
+    page = await service.list_sessions(user_id, offset=offset, limit=limit)
+    return ConversationListResponse.from_page(page, user_id=user_id, offset=offset)
+
+
+@router.get(
+    "/v1/sessions/{session_uid}/history",
+    response_model=ConversationHistoryResponse,
+    tags=["agent"],
+)
+async def get_session_history(
+    session_uid: Annotated[UUID, Path()],
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    service: Annotated[
+        ConversationHistoryService,
+        Depends(get_conversation_history_service),
+    ],
+    after_sequence: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> ConversationHistoryResponse:
+    """Return canonical database records, including matched tool calls and results."""
+    key = ConversationKey(conversation_id=str(session_uid), user_id=user_id)
+    try:
+        history = await service.load(
+            key,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
+    except ConversationAccessDeniedError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Conversation access denied") from exc
+    return ConversationHistoryResponse.from_history(history)
 
 
 @router.post("/v1/agent/stream", response_class=StreamingResponse, tags=["agent"])

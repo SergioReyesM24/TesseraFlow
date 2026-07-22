@@ -6,7 +6,11 @@ from redis.asyncio import Redis
 
 from application.a2a import A2AService, A2AWorker
 from application.agent import AgentService
-from application.conversations import ConversationService, RecentConversationCompactor
+from application.conversations import (
+    ConversationHistoryService,
+    ConversationService,
+    RecentConversationCompactor,
+)
 from application.interactions import ConversationCoordinator
 from application.ports import InteractionNotifier
 from application.realtime import RealtimeAgentService
@@ -34,6 +38,7 @@ class AppContainer:
     postgres_pool: asyncpg.Pool
     text_agent_service: AgentService
     conversation_service: ConversationService
+    conversation_history_service: ConversationHistoryService
     text_definition: AgentDefinition
     realtime_definition: AgentDefinition
     realtime_agent_service: RealtimeAgentService
@@ -76,11 +81,12 @@ async def build_container(settings: Settings) -> AppContainer:
         await postgres_pool.close()
         raise
     redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
+    canonical_conversations = PostgresConversationRepository(
+        postgres_pool,
+        context_item_limit=settings.conversation_max_messages,
+    )
     conversations = CachedConversationRepository(
-        canonical=PostgresConversationRepository(
-            postgres_pool,
-            context_item_limit=settings.conversation_max_messages,
-        ),
+        canonical=canonical_conversations,
         cache=RedisConversationCache(
             redis_client,
             ttl_seconds=settings.conversation_ttl_seconds,
@@ -137,6 +143,7 @@ async def build_container(settings: Settings) -> AppContainer:
         postgres_pool=postgres_pool,
         text_agent_service=model_runtime.text_agent_service,
         conversation_service=ConversationService(conversations),
+        conversation_history_service=ConversationHistoryService(canonical_conversations),
         text_definition=model_runtime.text_definition,
         realtime_definition=model_runtime.realtime_definition,
         realtime_agent_service=model_runtime.realtime_agent_service,

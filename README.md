@@ -130,7 +130,10 @@ La API queda disponible en `http://127.0.0.1:8000` y la documentación interacti
 El directorio `frontend/` contiene una interfaz React + TypeScript para los dos
 WebSockets. El modo **Texto** consume `/v1/agent/ws` como un chat persistente; el modo
 **Voz** usa `/v1/agent/realtime`, captura el micrófono como PCM16 mono a 16 kHz, reproduce
-la respuesta PCM16 a 24 kHz y muestra las transcripciones de ambos interlocutores.
+la respuesta PCM16 a 24 kHz y muestra las transcripciones de ambos interlocutores. El
+modo **Historial técnico** consulta por `session_uid` los registros canónicos, agrupados
+por `turn_id`, y muestra los argumentos y resultados de cada tool call. Primero enumera
+las sesiones del usuario y permite cargar su detalle al seleccionarlas.
 
 Con la API levantada en `http://127.0.0.1:8000`, inicia el cliente en otra terminal:
 
@@ -622,6 +625,8 @@ Los adaptadores con recuperación transparente reenvían solo comandos no confir
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check sin consultar dependencias externas. |
 | `POST` | `/v1/sessions` | Crea una sesión vacía y devuelve su `session_uid`. |
+| `GET` | `/v1/sessions` | Lista de forma paginada las sesiones pertenecientes al `user_id`. |
+| `GET` | `/v1/sessions/{session_uid}/history` | Lee el historial técnico canónico con mensajes, tool calls, resultados y metadatos de orden. |
 | `WS` | `/v1/agent/ws` | Acceso durable por turnos a la doble capa mediante frames JSON. |
 | `WS` | `/v1/agent/realtime` | Primera capa STS full-duplex y el mismo worker de trabajo pesado. |
 | `POST` | `/v1/agent/stream` | Acceso SSE por turnos al mismo núcleo de dos agentes. |
@@ -632,6 +637,18 @@ El endpoint de borrado recibe `user_id` como query param:
 ```bash
 curl -X DELETE \
   'http://127.0.0.1:8000/v1/conversations/conv-123?user_id=user-456'
+```
+
+El historial técnico también valida `user_id` y pagina por la secuencia canónica. Cada
+elemento incluye `turn_id`, `sequence`, `created_at` y un `payload` discriminado como
+`message`, `tool_call` o `tool_result`:
+
+```bash
+curl \
+  'http://127.0.0.1:8000/v1/sessions?user_id=user-456&offset=0&limit=50'
+
+curl \
+  'http://127.0.0.1:8000/v1/sessions/0fda5792-2577-4f26-a56d-71f8dd89ac90/history?user_id=user-456&after_sequence=0&limit=50'
 ```
 
 ## Tools incluidas

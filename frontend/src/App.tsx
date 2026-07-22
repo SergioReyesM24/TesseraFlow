@@ -1,6 +1,7 @@
 import {
   AudioLines,
   ChevronDown,
+  Database,
   MessageCircle,
   Mic,
   Plus,
@@ -12,6 +13,7 @@ import {
 } from 'lucide-react'
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
 import { Composer } from './components/Composer'
+import { ConversationHistory } from './components/ConversationHistory'
 import { MessageList } from './components/MessageList'
 import { StatusPill } from './components/StatusPill'
 import { useAgentSocket } from './hooks/useAgentSocket'
@@ -139,8 +141,9 @@ function Workspace({
     userId,
     enabled: mode === 'voice',
   })
-  const activeConnection = mode === 'text' ? text.connection : voice.connection
-  const activeError = mode === 'text' ? text.error : voice.error
+  const activeConnection =
+    mode === 'history' ? 'connected' : mode === 'text' ? text.connection : voice.connection
+  const activeError = mode === 'history' ? null : mode === 'text' ? text.error : voice.error
 
   /** Enter voice mode while the click still grants browser audio permission. */
   const selectVoiceMode = () => {
@@ -193,6 +196,17 @@ function Workspace({
               <small>Audio bidireccional</small>
             </span>
           </button>
+          <button
+            className={mode === 'history' ? 'active' : ''}
+            type="button"
+            onClick={() => onModeChange('history')}
+          >
+            <Database size={18} />
+            <span>
+              Historial técnico
+              <small>Registros PostgreSQL</small>
+            </span>
+          </button>
         </nav>
 
         <div className="sidebar-spacer" />
@@ -212,12 +226,21 @@ function Workspace({
             <div className="brand-mark" aria-hidden="true">T</div>
           </div>
           <button className="model-selector" type="button" aria-label="Agente seleccionado">
-            TesseraFlow <span>{mode === 'text' ? 'Texto' : 'Realtime'}</span>
+            TesseraFlow{' '}
+            <span>
+              {mode === 'text' ? 'Texto' : mode === 'voice' ? 'Realtime' : 'Historial'}
+            </span>
             <ChevronDown size={15} />
           </button>
           <StatusPill
             state={activeConnection}
-            label={mode === 'voice' && voice.ready ? 'Audio listo' : undefined}
+            label={
+              mode === 'history'
+                ? 'Persistido'
+                : mode === 'voice' && voice.ready
+                  ? 'Audio listo'
+                  : undefined
+            }
           />
         </header>
 
@@ -229,7 +252,13 @@ function Workspace({
             </div>
           )}
 
-          {mode === 'text' ? (
+          {mode === 'history' ? (
+            <ConversationHistory
+              apiBaseUrl={apiBaseUrl}
+              userId={userId}
+              activeSessionUid={sessionUid}
+            />
+          ) : mode === 'text' ? (
             <>
               <MessageList
                 messages={text.messages}
@@ -316,6 +345,13 @@ function Workspace({
           onClick={selectVoiceMode}
         >
           <Mic size={18} /> Voz
+        </button>
+        <button
+          className={mode === 'history' ? 'active' : ''}
+          type="button"
+          onClick={() => onModeChange('history')}
+        >
+          <Database size={18} /> Historial
         </button>
       </div>
     </div>

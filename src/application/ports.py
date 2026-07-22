@@ -4,7 +4,13 @@ from typing import Protocol
 
 from domain.a2a import A2AJob, A2AThread
 from domain.agent import AgentDefinition
-from domain.conversations import Conversation, ConversationItem, ConversationKey
+from domain.conversations import (
+    Conversation,
+    ConversationHistoryPage,
+    ConversationItem,
+    ConversationKey,
+    ConversationListPage,
+)
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
 from domain.realtime import (
@@ -149,6 +155,30 @@ class ConversationCache(Protocol):
 
     async def invalidate(self, key: ConversationKey) -> None:
         """Remove cached context for one conversation."""
+        ...
+
+
+class ConversationHistoryRepository(Protocol):
+    """Read canonical conversation records for owner-scoped technical inspection."""
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """List a bounded page of the user's persisted conversation headers."""
+        ...
+
+    async def load_history(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage | None:
+        """Load one bounded page without consulting compacted model context."""
         ...
 
 

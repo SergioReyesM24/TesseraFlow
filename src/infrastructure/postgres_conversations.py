@@ -1,8 +1,9 @@
 import json
 import uuid
 from collections import Counter
+from datetime import datetime
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal, cast
 
 import asyncpg
 
@@ -13,9 +14,13 @@ from application.conversations import (
 from application.ports import ConversationRepository
 from domain.conversations import (
     Conversation,
+    ConversationHistoryItem,
+    ConversationHistoryPage,
     ConversationItem,
     ConversationKey,
+    ConversationListPage,
     ConversationMessage,
+    ConversationSummary,
 )
 from domain.tools import ToolCall, ToolResult
 from infrastructure.conversation_codec import (
@@ -30,6 +35,23 @@ WHERE id = $1
 """
 
 SELECT_CONVERSATION_FOR_UPDATE = SELECT_CONVERSATION + " FOR UPDATE"
+
+SELECT_CONVERSATION_HISTORY = """
+SELECT user_id, title, status, version, last_sequence,
+       created_at, updated_at, last_message_at
+FROM conversations
+WHERE id = $1
+"""
+
+SELECT_CONVERSATION_SUMMARIES = """
+SELECT id, user_id, title, status, version, last_sequence,
+       created_at, updated_at, last_message_at
+FROM conversations
+WHERE user_id = $1
+ORDER BY updated_at DESC, id DESC
+OFFSET $2
+LIMIT $3
+"""
 
 SELECT_RECENT_ITEMS = """
 WITH recent_turns AS (
@@ -47,6 +69,15 @@ FROM conversation_items AS item
 JOIN recent_turns USING (turn_id)
 WHERE item.conversation_id = $1
 ORDER BY item.sequence
+"""
+
+SELECT_HISTORY_ITEMS = """
+SELECT turn_id, sequence, payload, created_at
+FROM conversation_items
+WHERE conversation_id = $1
+  AND sequence > $2
+ORDER BY sequence
+LIMIT $3
 """
 
 INSERT_CONVERSATION = """
@@ -125,6 +156,96 @@ class PostgresConversationRepository(ConversationRepository):
         if version < 0 or title is not None and not isinstance(title, str):
             raise InvalidPostgresConversationDataError("Canonical conversation fields are invalid")
         return Conversation(key=key, messages=messages, version=version, title=title)
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """List owner-scoped conversation headers in latest-update order."""
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                SELECT_CONVERSATION_SUMMARIES,
+                user_id,
+                offset,
+                limit + 1,
+            )
+        visible_rows = rows[:limit]
+        try:
+            sessions = tuple(
+                self._summary_from_row(row, expected_user_id=user_id) for row in visible_rows
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidPostgresConversationDataError(
+                "Canonical conversation summary data is invalid"
+            ) from exc
+        return ConversationListPage(
+            sessions=sessions,
+            has_more=len(rows) > limit,
+        )
+
+    async def load_history(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage | None:
+        """Load canonical items and database metadata without context compaction."""
+        if after_sequence < 0:
+            raise ValueError("after_sequence cannot be negative")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                SELECT_CONVERSATION_HISTORY,
+                key.conversation_id,
+            )
+            if row is None:
+                return None
+            self._validate_owner(key, row)
+            item_rows = await connection.fetch(
+                SELECT_HISTORY_ITEMS,
+                key.conversation_id,
+                after_sequence,
+                limit + 1,
+            )
+        visible_rows = item_rows[:limit]
+        try:
+            items = tuple(
+                ConversationHistoryItem(
+                    sequence=int(item_row["sequence"]),
+                    turn_id=str(item_row["turn_id"]),
+                    created_at=cast(datetime, item_row["created_at"]),
+                    item=self._decode_payload(item_row["payload"]),
+                )
+                for item_row in visible_rows
+            )
+            status = cast(Literal["active", "archived"], str(row["status"]))
+            if status not in ("active", "archived"):
+                raise ValueError("conversation status is invalid")
+            return ConversationHistoryPage(
+                key=key,
+                title=str(row["title"]),
+                status=status,
+                version=int(row["version"]),
+                last_sequence=int(row["last_sequence"]),
+                created_at=cast(datetime, row["created_at"]),
+                updated_at=cast(datetime, row["updated_at"]),
+                last_message_at=cast(datetime | None, row["last_message_at"]),
+                items=items,
+                has_more=len(item_rows) > limit,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise InvalidPostgresConversationDataError(
+                "Canonical conversation history data is invalid"
+            ) from exc
 
     async def save_turn(
         self,
@@ -208,6 +329,39 @@ class PostgresConversationRepository(ConversationRepository):
         """Reject reads and writes performed by a different user."""
         if row["user_id"] != key.user_id:
             raise ConversationAccessDeniedError("Conversation ownership does not match")
+
+    @staticmethod
+    def _summary_from_row(row: Any, *, expected_user_id: str) -> ConversationSummary:
+        """Decode and validate one conversation header returned by PostgreSQL."""
+        user_id = row["user_id"]
+        title = row["title"]
+        raw_status = row["status"]
+        created_at = row["created_at"]
+        updated_at = row["updated_at"]
+        last_message_at = row["last_message_at"]
+        if (
+            user_id != expected_user_id
+            or not isinstance(title, str)
+            or raw_status not in ("active", "archived")
+            or not isinstance(created_at, datetime)
+            or not isinstance(updated_at, datetime)
+            or last_message_at is not None
+            and not isinstance(last_message_at, datetime)
+        ):
+            raise ValueError("conversation summary fields are invalid")
+        return ConversationSummary(
+            key=ConversationKey(
+                conversation_id=str(row["id"]),
+                user_id=user_id,
+            ),
+            title=title,
+            status=cast(Literal["active", "archived"], raw_status),
+            version=int(row["version"]),
+            last_sequence=int(row["last_sequence"]),
+            created_at=created_at,
+            updated_at=updated_at,
+            last_message_at=last_message_at,
+        )
 
     @staticmethod
     def _validate_turn(turn: tuple[ConversationItem, ...]) -> None:

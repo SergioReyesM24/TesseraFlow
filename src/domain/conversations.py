@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, TypeAlias
 
 from domain.tools import ToolCall, ToolResult
@@ -31,6 +32,54 @@ class ConversationMessage:
 
 
 ConversationItem: TypeAlias = ConversationMessage | ToolCall | ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryItem:
+    """One canonical persisted item with its database ordering metadata."""
+
+    sequence: int
+    turn_id: str
+    created_at: datetime
+    item: ConversationItem
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSummary:
+    """Technical metadata used to browse one user's persisted conversations."""
+
+    key: ConversationKey
+    title: str
+    status: Literal["active", "archived"]
+    version: int
+    last_sequence: int
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationListPage:
+    """Bounded page of persisted conversation summaries."""
+
+    sessions: tuple[ConversationSummary, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryPage:
+    """Bounded technical view of one owned conversation and its canonical items."""
+
+    key: ConversationKey
+    title: str
+    status: Literal["active", "archived"]
+    version: int
+    last_sequence: int
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: datetime | None
+    items: tuple[ConversationHistoryItem, ...]
+    has_more: bool
 
 
 @dataclass(frozen=True, slots=True)
