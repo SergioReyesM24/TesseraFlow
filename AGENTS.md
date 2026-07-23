@@ -7,8 +7,8 @@ modelos intercambiables. La prioridad arquitectónica es mantener un núcleo sen
 independiente de frameworks y proveedores, con interfaces pequeñas que permitan
 incorporar nuevas capacidades sin propagar cambios por todo el sistema.
 
-La fase actual es stateless entre requests. Consulta `ROADMAP.md` antes de implementar
-historial, componentes visuales, STS, políticas de batch, reintentos o alertas.
+Consulta `ROADMAP.md` antes de implementar componentes visuales, nuevas extensiones STS,
+reintentos o alertas.
 
 ## Principios de diseño
 
@@ -106,8 +106,8 @@ una traducción.
   compartidos.
 - Las variables específicas de una request deben ser locales o pertenecer a su sesión.
 - Recuerda que varios workers implican varios procesos, contenedores y pools.
-- No asumas que una tool es segura para ejecución paralela. Cuando se implemente la
-  política de batch, respeta metadatos de idempotencia, lectura y concurrencia.
+- Las tools solicitadas en una misma respuesta se ejecutan concurrentemente y sus
+  resultados deben conservar la correspondencia con cada llamada.
 - Propaga cancelaciones; no conviertas una desconexión del cliente en un error
   recuperable o un reintento.
 

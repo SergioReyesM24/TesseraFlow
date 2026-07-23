@@ -22,9 +22,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Create shared resources on startup and close them during shutdown."""
         container = await build_container(settings)
         app.state.container = container
-        container.start()
-        logger.info("application_started", app_name=settings.app_name, model=settings.openai_model)
         try:
+            await container.start()
+            logger.info(
+                "application_started",
+                app_name=settings.app_name,
+                text_agent_provider=container.model_runtime.text_agent_provider,
+                text_agent_model=container.text_definition.model,
+                realtime_agent_provider=container.model_runtime.realtime_agent_provider,
+                realtime_agent_model=container.realtime_definition.model,
+                worker_provider=container.model_runtime.worker_provider,
+                worker_model=container.model_runtime.worker_definition.model,
+            )
             yield
         finally:
             await container.close()

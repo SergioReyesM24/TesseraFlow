@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
@@ -9,13 +10,13 @@ from openai.types.responses import Response
 from application.ports import ModelGateway, ModelSession
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationItem, ConversationMessage
-from domain.events import (
+from domain.model import ModelReply
+from domain.tools import ToolCall, ToolResult, ToolSpec
+from domain.turn_events import (
     ModelStreamCompleted,
     ModelStreamEvent,
     ModelTextDelta,
 )
-from domain.model import ModelReply
-from domain.tools import ToolCall, ToolResult, ToolSpec
 from domain.types import JsonObject
 
 logger = structlog.get_logger(__name__)
@@ -36,14 +37,15 @@ class OpenAIResponsesGateway(ModelGateway):
         """Store the shared asynchronous client without conversation state."""
         self._client = client
 
-    def create_session(
+    @asynccontextmanager
+    async def open_session(
         self,
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> ModelSession:
-        """Create a request-scoped session that translates neutral contracts."""
-        return OpenAIModelSession(self._client, definition, tools, history)
+    ) -> AsyncIterator[ModelSession]:
+        """Yield a request-scoped session that translates neutral contracts."""
+        yield OpenAIModelSession(self._client, definition, tools, history)
 
 
 class OpenAIModelSession(ModelSession):

@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -13,20 +14,24 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
-from domain.events import (
-    AgentStreamCompleted,
-    AgentTextDelta,
-    AgentToolCompleted,
-    AgentToolStarted,
-    ModelStreamCompleted,
-    ModelStreamEvent,
-    ModelTextDelta,
-)
 from domain.model import ModelReply
 from domain.tools import (
     ToolCall,
     ToolResult,
     ToolSpec,
+)
+from domain.turn_events import (
+    AgentAudioDelta,
+    AgentAudioInterrupted,
+    AgentStreamCompleted,
+    AgentTextDelta,
+    AgentToolCompleted,
+    AgentToolStarted,
+    ModelAudioDelta,
+    ModelAudioInterrupted,
+    ModelStreamCompleted,
+    ModelStreamEvent,
+    ModelTextDelta,
 )
 from tools.registry import build_tool_registry
 
@@ -71,18 +76,69 @@ class StubModelGateway:
         self.tool_specs: list[tuple[ToolSpec, ...]] = []
         self.histories: list[tuple[ConversationItem, ...]] = []
 
-    def create_session(
+    @asynccontextmanager
+    async def open_session(
         self,
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> StubModelSession:
+    ) -> AsyncIterator[StubModelSession]:
         session = StubModelSession(self.session_replies.popleft())
         self.sessions.append(session)
         self.definitions.append(definition)
         self.tool_specs.append(tools)
         self.histories.append(history)
-        return session
+        yield session
+
+
+class AudioStubModelSession:
+    """Emit native audio through the common model-session contract."""
+
+    async def send_message(self, message: str) -> ModelReply:
+        """Provide the non-streaming method unused by this test."""
+        del message
+        return ModelReply(response_id="audio-1", text="Respuesta hablada")
+
+    async def send_tool_results(self, results: tuple[ToolResult, ...]) -> ModelReply:
+        """Provide the continuation method unused by this test."""
+        del results
+        return ModelReply(response_id="audio-1", text="Respuesta hablada")
+
+    def stream_message(self, message: str) -> AsyncIterator[ModelStreamEvent]:
+        """Stream PCM, interruption, transcription, and common completion."""
+        del message
+        return self._stream()
+
+    def stream_tool_results(
+        self,
+        results: tuple[ToolResult, ...],
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Provide the continuation stream unused by this test."""
+        del results
+        return self._stream()
+
+    async def _stream(self) -> AsyncIterator[ModelStreamEvent]:
+        """Emit one complete native-audio response."""
+        reply = ModelReply(response_id="audio-1", text="Respuesta hablada")
+        yield ModelAudioDelta(data=b"pcm", mime_type="audio/pcm;rate=24000")
+        yield ModelAudioInterrupted()
+        yield ModelTextDelta(text=reply.text)
+        yield ModelStreamCompleted(reply=reply)
+
+
+class AudioStubModelGateway:
+    """Open one deterministic native-audio model session."""
+
+    @asynccontextmanager
+    async def open_session(
+        self,
+        definition: AgentDefinition,
+        tools: tuple[ToolSpec, ...],
+        history: tuple[ConversationItem, ...],
+    ) -> AsyncIterator[AudioStubModelSession]:
+        """Yield an isolated session without provider resources."""
+        del definition, tools, history
+        yield AudioStubModelSession()
 
 
 class InMemoryConversationRepository:
@@ -104,7 +160,10 @@ class InMemoryConversationRepository:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
+        del turn_id
         current = self.conversations.get(conversation.key.conversation_id)
         current_version = current.version if current is not None else 0
         if current_version != conversation.version:
@@ -189,7 +248,11 @@ async def test_runs_and_captures_a_tool_call() -> None:
             arguments={"operation": "add", "a": "2.5", "b": "3"},
         ),
         ToolResult(call_id="call_1", output={"result": "5.5"}),
-        ConversationMessage(role="assistant", content="El resultado es 5.5."),
+        ConversationMessage(
+            role="assistant",
+            content="El resultado es 5.5.",
+            source="assistant",
+        ),
     )
 
 
@@ -322,7 +385,7 @@ async def test_continues_a_persisted_conversation_with_neutral_history() -> None
     assert gateway.histories[0] == ()
     assert gateway.histories[1] == (
         ConversationMessage(role="user", content="Primer mensaje"),
-        ConversationMessage(role="assistant", content="Primera respuesta"),
+        ConversationMessage(role="assistant", content="Primera respuesta", source="assistant"),
     )
     assert repository.conversations[key.conversation_id].version == 2
 
@@ -350,3 +413,30 @@ async def test_rejects_a_chat_for_an_unknown_session_before_calling_the_model() 
         await service.run("Mensaje", agent_definition(), conversation_key("missing"))
 
     assert gateway.sessions == []
+
+
+async def test_common_agent_service_streams_native_audio_events() -> None:
+    """Keep tool orchestration and persistence shared across text and audio gateways."""
+    repository = InMemoryConversationRepository()
+    await repository.create(conversation_key())
+    service = AgentService(
+        AudioStubModelGateway(),
+        build_tool_registry(),
+        repository,
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "Háblame",
+            agent_definition(),
+            conversation_key(),
+        )
+    ]
+
+    assert isinstance(events[0], AgentAudioDelta)
+    assert events[0].data == b"pcm"
+    assert isinstance(events[1], AgentAudioInterrupted)
+    assert isinstance(events[2], AgentTextDelta)
+    assert isinstance(events[-1], AgentStreamCompleted)
+    assert repository.conversations["conversation-1"].messages[-1].content == ("Respuesta hablada")

@@ -7,6 +7,7 @@ from infrastructure.postgres_a2a import (
     COMPLETE_JOB,
     INSERT_JOB,
     INSERT_THREAD,
+    INSERT_WORKER_CONVERSATION,
     SELECT_JOB,
     SELECT_THREAD,
     SELECT_THREAD_FOR_JOB,
@@ -38,7 +39,6 @@ class FakeConnection:
             "parent_conversation_id": "parent-1",
             "worker_conversation_id": "worker-conversation-1",
             "user_id": "user-1",
-            "tenant_id": "tenant-1",
         }
         self.job_row = {
             "id": "job-1",
@@ -84,6 +84,8 @@ class FakeConnection:
             } | {"status": "running"}
         if query == SELECT_THREAD_FOR_JOB:
             return {key: value for key, value in self.thread_row.items() if key != "id"}
+        if query == COMPLETE_JOB:
+            return {"id": "a2a-result:job-1"} if self.update_status == "UPDATE 1" else None
         raise AssertionError(f"Unexpected query: {query}")
 
 
@@ -117,11 +119,7 @@ class FakePool:
 
 def parent_key() -> ConversationKey:
     """Build the parent conversation used by repository ownership checks."""
-    return ConversationKey(
-        conversation_id="parent-1",
-        user_id="user-1",
-        tenant_id="tenant-1",
-    )
+    return ConversationKey(conversation_id="parent-1", user_id="user-1")
 
 
 def repository(pool: FakePool) -> PostgresA2AJobRepository:
@@ -154,9 +152,16 @@ async def test_postgres_a2a_creates_and_loads_owned_protocol_state() -> None:
     assert loaded_job == job
     assert (
         INSERT_THREAD,
-        ("thread-1", "parent-1", "worker-conversation-1", "user-1", "tenant-1"),
+        ("thread-1", "parent-1", "worker-conversation-1", "user-1"),
     ) in pool.connection.executed
-    assert (INSERT_JOB, ("job-1", "thread-1", "Investiga")) in pool.connection.executed
+    assert (
+        INSERT_WORKER_CONVERSATION,
+        ("worker-conversation-1", "user-1"),
+    ) in pool.connection.executed
+    assert (
+        INSERT_JOB,
+        ("job-1", "thread-1", "Investiga", "turn_based"),
+    ) in pool.connection.executed
 
 
 async def test_postgres_a2a_claim_combines_job_and_thread_without_losing_ids() -> None:
@@ -173,15 +178,61 @@ async def test_postgres_a2a_claim_combines_job_and_thread_without_losing_ids() -
     assert (CLAIM_NEXT_JOB, ("process-1", 630)) in pool.connection.executed
 
 
+async def test_postgres_a2a_persists_realtime_delivery_per_job() -> None:
+    """Keep the originating endpoint mode durable through worker execution."""
+    pool = FakePool()
+    job = A2AJob(
+        job_id="job-2",
+        thread_id="thread-1",
+        parent_conversation=parent_key(),
+        worker_conversation_id="worker-conversation-1",
+        message="Investiga por voz",
+        delivery_mode="realtime",
+    )
+
+    await repository(pool).enqueue(job)
+
+    assert (
+        INSERT_JOB,
+        ("job-2", "thread-1", "Investiga por voz", "realtime"),
+    ) in pool.connection.executed
+
+
 async def test_postgres_a2a_rejects_completion_after_a_claim_is_lost() -> None:
     """Prevent a stale worker from overwriting a job reclaimed by another process."""
     pool = FakePool()
     pool.connection.update_status = "UPDATE 0"
 
     with pytest.raises(RuntimeError, match="claim was lost"):
-        await repository(pool).complete("job-1", "old-process", "Respuesta", "resp-1")
+        await repository(pool).complete(
+            "job-1",
+            "old-process",
+            "Respuesta",
+            "resp-1",
+            "notification",
+        )
 
     assert (
         COMPLETE_JOB,
-        ("job-1", "old-process", "Respuesta", "resp-1"),
+        ("job-1", "old-process", "Respuesta", "resp-1", "notification"),
     ) in pool.connection.executed
+
+
+async def test_postgres_a2a_publishes_completion_with_the_job_update() -> None:
+    """Use one SQL statement for terminal state and parent-conversation wake-up."""
+    pool = FakePool()
+
+    await repository(pool).complete(
+        "job-1",
+        "process-1",
+        "Respuesta",
+        "resp-1",
+        "notification",
+    )
+
+    assert (
+        COMPLETE_JOB,
+        ("job-1", "process-1", "Respuesta", "resp-1", "notification"),
+    ) in pool.connection.executed
+    assert "RETURNING id, thread_id, delivery_mode" in COMPLETE_JOB
+    assert "completed.delivery_mode" in COMPLETE_JOB

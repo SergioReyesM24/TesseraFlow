@@ -42,11 +42,17 @@ class DelegateToWorkerTool(AgentTool[DelegateToWorkerArguments]):
         context: ToolExecutionContext,
     ) -> object:
         """Create the worker conversation using the current chat as its owner."""
-        receipt = await self._service.delegate(context.conversation_key(), arguments.message)
+        receipt = await self._service.delegate(
+            context.conversation_key(),
+            arguments.message,
+            delivery_mode=context.delivery_mode,
+        )
         return {
             "thread_id": receipt.thread_id,
             "job_id": receipt.job_id,
             "status": receipt.status,
+            "parent_conversation_id": receipt.parent_conversation_id,
+            "worker_conversation_id": receipt.worker_conversation_id,
         }
 
 
@@ -89,6 +95,8 @@ class WorkerAgentStatusTool(AgentTool[WorkerAgentStatusArguments]):
             "thread_id": report.thread_id,
             "job_id": report.job_id,
             "status": report.status,
+            "parent_conversation_id": report.parent_conversation_id,
+            "worker_conversation_id": report.worker_conversation_id,
             "answer": report.answer,
             "error_code": report.error_code,
         }
@@ -137,6 +145,7 @@ class ContinueWorkerTool(AgentTool[ContinueWorkerArguments]):
                 context.conversation_key(),
                 arguments.thread_id,
                 arguments.message,
+                delivery_mode=context.delivery_mode,
             )
         except A2AThreadNotFoundError:
             return {"found": False, "thread_id": arguments.thread_id}
@@ -145,4 +154,6 @@ class ContinueWorkerTool(AgentTool[ContinueWorkerArguments]):
             "thread_id": receipt.thread_id,
             "job_id": receipt.job_id,
             "status": receipt.status,
+            "parent_conversation_id": receipt.parent_conversation_id,
+            "worker_conversation_id": receipt.worker_conversation_id,
         }

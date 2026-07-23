@@ -5,25 +5,32 @@ import asyncpg
 from application.ports import A2AJobRepository
 from domain.a2a import A2AJob, A2AJobStatus, A2AThread
 from domain.conversations import ConversationKey
+from domain.interactions import InteractionDeliveryMode
+
+INSERT_WORKER_CONVERSATION = """
+INSERT INTO conversations (id, user_id, title, version, last_sequence)
+VALUES ($1, $2, 'Conversación interna', 0, 0)
+"""
 
 INSERT_THREAD = """
 INSERT INTO a2a_threads (
-    id, parent_conversation_id, worker_conversation_id, user_id, tenant_id
-) VALUES ($1, $2, $3, $4, $5)
+    id, parent_conversation_id, worker_conversation_id, user_id
+) VALUES ($1, $2, $3, $4)
 """
 
 INSERT_JOB = """
-INSERT INTO a2a_jobs (id, thread_id, message)
-VALUES ($1, $2, $3)
+INSERT INTO a2a_jobs (id, thread_id, message, delivery_mode)
+VALUES ($1, $2, $3, $4)
 """
 
 SELECT_THREAD = """
-SELECT id, parent_conversation_id, worker_conversation_id, user_id, tenant_id
-FROM a2a_threads
-WHERE id = $1
-  AND parent_conversation_id = $2
-  AND user_id = $3
-  AND tenant_id IS NOT DISTINCT FROM $4
+SELECT thread.id, thread.parent_conversation_id, thread.worker_conversation_id,
+       parent.user_id
+FROM a2a_threads AS thread
+JOIN conversations AS parent ON parent.id = thread.parent_conversation_id
+WHERE thread.id = $1
+  AND thread.parent_conversation_id = $2
+  AND parent.user_id = $3
 """
 
 SELECT_JOB = """
@@ -35,16 +42,16 @@ SELECT
     j.answer,
     j.response_id,
     j.error_code,
+    j.delivery_mode,
     t.parent_conversation_id,
     t.worker_conversation_id,
-    t.user_id,
-    t.tenant_id
+    parent.user_id
 FROM a2a_jobs AS j
 JOIN a2a_threads AS t ON t.id = j.thread_id
+JOIN conversations AS parent ON parent.id = t.parent_conversation_id
 WHERE j.id = $1
   AND t.parent_conversation_id = $2
-  AND t.user_id = $3
-  AND t.tenant_id IS NOT DISTINCT FROM $4
+  AND parent.user_id = $3
 """
 
 CLAIM_NEXT_JOB = """
@@ -77,31 +84,67 @@ SET status = 'running',
 FROM candidate
 WHERE job.id = candidate.id
 RETURNING job.id, job.thread_id, job.message, job.status, job.answer,
-          job.response_id, job.error_code
+          job.response_id, job.error_code, job.delivery_mode
 """
 
 COMPLETE_JOB = """
-UPDATE a2a_jobs
-SET status = 'completed',
-    answer = $3,
-    response_id = $4,
-    error_code = NULL,
-    worker_id = NULL,
-    lease_expires_at = NULL,
-    completed_at = NOW()
-WHERE id = $1 AND worker_id = $2 AND status = 'running'
+WITH completed AS (
+    UPDATE a2a_jobs
+    SET status = 'completed',
+        answer = $3,
+        response_id = $4,
+        error_code = NULL,
+        worker_id = NULL,
+        lease_expires_at = NULL,
+        completed_at = NOW()
+    WHERE id = $1 AND worker_id = $2 AND status = 'running'
+    RETURNING id, thread_id, delivery_mode
+)
+INSERT INTO interaction_commands (
+    id, request_id, conversation_id, kind, source, message, delivery_mode, causation_id
+)
+SELECT 'a2a-result:' || completed.id,
+       completed.id,
+       thread.parent_conversation_id,
+       'worker_completed',
+       'worker_agent',
+       $5,
+       completed.delivery_mode,
+       completed.id
+FROM completed
+JOIN a2a_threads AS thread ON thread.id = completed.thread_id
+ON CONFLICT (id) DO NOTHING
+RETURNING id
 """
 
 FAIL_JOB = """
-UPDATE a2a_jobs
-SET status = 'failed',
-    answer = NULL,
-    response_id = NULL,
-    error_code = $3,
-    worker_id = NULL,
-    lease_expires_at = NULL,
-    completed_at = NOW()
-WHERE id = $1 AND worker_id = $2 AND status = 'running'
+WITH failed AS (
+    UPDATE a2a_jobs
+    SET status = 'failed',
+        answer = NULL,
+        response_id = NULL,
+        error_code = $3,
+        worker_id = NULL,
+        lease_expires_at = NULL,
+        completed_at = NOW()
+    WHERE id = $1 AND worker_id = $2 AND status = 'running'
+    RETURNING id, thread_id, delivery_mode
+)
+INSERT INTO interaction_commands (
+    id, request_id, conversation_id, kind, source, message, delivery_mode, causation_id
+)
+SELECT 'a2a-result:' || failed.id,
+       failed.id,
+       thread.parent_conversation_id,
+       'worker_completed',
+       'worker_agent',
+       $4,
+       failed.delivery_mode,
+       failed.id
+FROM failed
+JOIN a2a_threads AS thread ON thread.id = failed.thread_id
+ON CONFLICT (id) DO NOTHING
+RETURNING id
 """
 
 REQUEUE_JOB = """
@@ -114,9 +157,10 @@ WHERE id = $1 AND worker_id = $2 AND status = 'running'
 """
 
 SELECT_THREAD_FOR_JOB = """
-SELECT parent_conversation_id, worker_conversation_id, user_id, tenant_id
-FROM a2a_threads
-WHERE id = $1
+SELECT thread.parent_conversation_id, thread.worker_conversation_id, parent.user_id
+FROM a2a_threads AS thread
+JOIN conversations AS parent ON parent.id = thread.parent_conversation_id
+WHERE thread.id = $1
 """
 
 
@@ -128,21 +172,26 @@ class PostgresA2AJobRepository(A2AJobRepository):
         self._pool = pool
 
     async def create_thread(self, thread: A2AThread, first_job: A2AJob) -> None:
-        """Insert the thread and first message in one transaction."""
+        """Insert the worker session, relation, and first message atomically."""
         async with self._pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                INSERT_WORKER_CONVERSATION,
+                thread.worker_conversation_id,
+                thread.parent_conversation.user_id,
+            )
             await connection.execute(
                 INSERT_THREAD,
                 thread.thread_id,
                 thread.parent_conversation.conversation_id,
                 thread.worker_conversation_id,
                 thread.parent_conversation.user_id,
-                thread.parent_conversation.tenant_id,
             )
             await connection.execute(
                 INSERT_JOB,
                 first_job.job_id,
                 first_job.thread_id,
                 first_job.message,
+                first_job.delivery_mode,
             )
 
     async def load_thread(
@@ -157,14 +206,19 @@ class PostgresA2AJobRepository(A2AJobRepository):
                 thread_id,
                 parent_conversation.conversation_id,
                 parent_conversation.user_id,
-                parent_conversation.tenant_id,
             )
         return self._thread_from_row(row) if row is not None else None
 
     async def enqueue(self, job: A2AJob) -> None:
         """Append one durable message to the worker thread."""
         async with self._pool.acquire() as connection:
-            await connection.execute(INSERT_JOB, job.job_id, job.thread_id, job.message)
+            await connection.execute(
+                INSERT_JOB,
+                job.job_id,
+                job.thread_id,
+                job.message,
+                job.delivery_mode,
+            )
 
     async def load_job(
         self,
@@ -178,7 +232,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
                 job_id,
                 parent_conversation.conversation_id,
                 parent_conversation.user_id,
-                parent_conversation.tenant_id,
             )
         return self._job_from_row(row) if row is not None else None
 
@@ -199,23 +252,37 @@ class PostgresA2AJobRepository(A2AJobRepository):
         worker_id: str,
         answer: str,
         response_id: str,
+        notification_message: str,
     ) -> None:
-        """Commit the answer only if this process still owns the running job."""
-        async with self._pool.acquire() as connection:
-            status = await connection.execute(
+        """Commit success and its parent notification in one SQL statement."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
                 COMPLETE_JOB,
                 job_id,
                 worker_id,
                 answer,
                 response_id,
+                notification_message,
             )
-        self._require_updated(status, job_id)
+        self._require_published(row, job_id)
 
-    async def fail(self, job_id: str, worker_id: str, error_code: str) -> None:
-        """Commit a safe failure only for the active lease owner."""
-        async with self._pool.acquire() as connection:
-            status = await connection.execute(FAIL_JOB, job_id, worker_id, error_code)
-        self._require_updated(status, job_id)
+    async def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        error_code: str,
+        notification_message: str,
+    ) -> None:
+        """Commit failure and its parent notification in one SQL statement."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
+                FAIL_JOB,
+                job_id,
+                worker_id,
+                error_code,
+                notification_message,
+            )
+        self._require_published(row, job_id)
 
     async def requeue(self, job_id: str, worker_id: str) -> None:
         """Make an interrupted job immediately claimable by another worker."""
@@ -230,7 +297,6 @@ class PostgresA2AJobRepository(A2AJobRepository):
             parent_conversation=ConversationKey(
                 conversation_id=str(row["parent_conversation_id"]),
                 user_id=str(row["user_id"]),
-                tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
             ),
             worker_conversation_id=str(row["worker_conversation_id"]),
         )
@@ -244,10 +310,13 @@ class PostgresA2AJobRepository(A2AJobRepository):
             parent_conversation=ConversationKey(
                 conversation_id=str(row["parent_conversation_id"]),
                 user_id=str(row["user_id"]),
-                tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
             ),
             worker_conversation_id=str(row["worker_conversation_id"]),
             message=str(row["message"]),
+            delivery_mode=cast(
+                InteractionDeliveryMode,
+                str(row.get("delivery_mode", "turn_based")),
+            ),
             status=cast(A2AJobStatus, str(row["status"])),
             answer=str(row["answer"]) if row["answer"] is not None else None,
             response_id=str(row["response_id"]) if row["response_id"] is not None else None,
@@ -258,4 +327,10 @@ class PostgresA2AJobRepository(A2AJobRepository):
     def _require_updated(status: str, job_id: str) -> None:
         """Reject stale workers whose lease was already reclaimed."""
         if status != "UPDATE 1":
+            raise RuntimeError(f"A2A job claim was lost: {job_id}")
+
+    @staticmethod
+    def _require_published(row: Any, job_id: str) -> None:
+        """Reject stale workers when no terminal command could be published."""
+        if row is None:
             raise RuntimeError(f"A2A job claim was lost: {job_id}")

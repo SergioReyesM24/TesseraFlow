@@ -5,12 +5,11 @@ CREATE TABLE IF NOT EXISTS a2a_threads (
     worker_conversation_id TEXT NOT NULL UNIQUE
         REFERENCES conversations(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL,
-    tenant_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS a2a_threads_parent_idx
-    ON a2a_threads (parent_conversation_id, user_id, tenant_id);
+    ON a2a_threads (parent_conversation_id, user_id);
 
 CREATE TABLE IF NOT EXISTS a2a_jobs (
     sequence BIGSERIAL PRIMARY KEY,

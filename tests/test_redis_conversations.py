@@ -29,7 +29,7 @@ class FakeRedis:
         """Apply the version-aware cache replacement represented by the Lua script."""
         assert key_count == 1
         assert "current_version" in script
-        key, version, user_id, tenant_id, title, messages, ttl = args
+        key, version, user_id, title, messages, ttl = args
         assert isinstance(key, str)
         current = self.values.get(key)
         if current is not None and int(current["version"]) > int(str(version)):
@@ -37,7 +37,6 @@ class FakeRedis:
         self.values[key] = {
             "version": str(version),
             "user_id": str(user_id),
-            "tenant_id": str(tenant_id),
             "title": str(title),
             "messages": str(messages),
         }

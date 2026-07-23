@@ -2,11 +2,14 @@ import json
 import uuid
 from collections.abc import Callable
 
-from application.ports import ConversationRepository
+from application.ports import ConversationHistoryRepository, ConversationRepository
 from domain.conversations import (
     Conversation,
+    ConversationGroup,
+    ConversationHistoryPage,
     ConversationItem,
     ConversationKey,
+    ConversationListPage,
     ConversationMessage,
 )
 from domain.tools import ToolCall
@@ -41,12 +44,11 @@ class ConversationService:
         self._conversations = conversations
         self._uid_factory = uid_factory
 
-    async def create_session(self, user_id: str, tenant_id: str | None = None) -> Conversation:
+    async def create_session(self, user_id: str) -> Conversation:
         """Create an empty owned conversation with a server-generated session UID."""
         key = ConversationKey(
             conversation_id=str(self._uid_factory()),
             user_id=user_id,
-            tenant_id=tenant_id,
         )
         return await self._conversations.create(key)
 
@@ -60,6 +62,52 @@ class ConversationService:
     async def delete(self, key: ConversationKey) -> bool:
         """Delete an owned conversation and all retained history."""
         return await self._conversations.delete(key)
+
+
+class ConversationHistoryService:
+    """Expose bounded canonical history without coupling API code to PostgreSQL."""
+
+    def __init__(self, histories: ConversationHistoryRepository) -> None:
+        """Bind the owner-aware source of canonical conversation records."""
+        self._histories = histories
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """Return one bounded page of sessions owned by a user."""
+        return await self._histories.list_sessions(
+            user_id,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def load(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage:
+        """Return a technical history page or reject an unknown session."""
+        history = await self._histories.load_history(
+            key,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        if history is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return history
+
+    async def load_group(self, key: ConversationKey) -> ConversationGroup:
+        """Return the root projection containing the requested owned conversation."""
+        group = await self._histories.load_group(key)
+        if group is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return group
 
 
 class RecentConversationCompactor:

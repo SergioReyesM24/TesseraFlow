@@ -2,22 +2,29 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import asyncpg
-import httpx
-from openai import AsyncOpenAI
 from redis.asyncio import Redis
 
 from application.a2a import A2AService, A2AWorker
 from application.agent import AgentService
-from application.conversations import ConversationService, RecentConversationCompactor
+from application.conversations import (
+    ConversationHistoryService,
+    ConversationService,
+    RecentConversationCompactor,
+)
+from application.interactions import ConversationCoordinator
+from application.ports import InteractionNotifier
+from application.realtime import RealtimeAgentService
 from config import Settings
 from domain.agent import AgentDefinition
 from infrastructure.cached_conversations import CachedConversationRepository
-from infrastructure.openai_gateway import OpenAIResponsesGateway
+from infrastructure.model_runtime import ModelRuntime, build_model_runtime
 from infrastructure.postgres_a2a import PostgresA2AJobRepository
 from infrastructure.postgres_conversations import (
     PostgresConversationRepository,
     apply_postgres_migrations,
 )
+from infrastructure.postgres_interaction_notifier import PostgresInteractionNotifier
+from infrastructure.postgres_interactions import PostgresInteractionRepository
 from infrastructure.redis_conversations import RedisConversationCache
 from tools.registry import build_interactive_tool_registry, build_tool_registry
 
@@ -26,23 +33,32 @@ from tools.registry import build_interactive_tool_registry, build_tool_registry
 class AppContainer:
     """Application-wide resources and default immutable configuration."""
 
-    openai_client: AsyncOpenAI
+    model_runtime: ModelRuntime
     redis_client: Redis
     postgres_pool: asyncpg.Pool
-    agent_service: AgentService
+    text_agent_service: AgentService
     conversation_service: ConversationService
-    default_agent: AgentDefinition
+    conversation_history_service: ConversationHistoryService
+    text_definition: AgentDefinition
+    realtime_definition: AgentDefinition
+    realtime_agent_service: RealtimeAgentService
     a2a_service: A2AService
     a2a_worker: A2AWorker
+    interaction_notifier: InteractionNotifier
+    conversation_coordinator: ConversationCoordinator
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Start process-local background consumers after lifespan composition."""
+        await self.interaction_notifier.start()
+        self.conversation_coordinator.start()
         self.a2a_worker.start()
 
     async def close(self) -> None:
         """Release application-wide clients during graceful shutdown."""
         await self.a2a_worker.close()
-        await self.openai_client.close()
+        await self.conversation_coordinator.close()
+        await self.interaction_notifier.close()
+        await self.model_runtime.close()
         await self.redis_client.aclose()
         await self.postgres_pool.close()
 
@@ -64,22 +80,13 @@ async def build_container(settings: Settings) -> AppContainer:
     except BaseException:
         await postgres_pool.close()
         raise
-    client = AsyncOpenAI(
-        api_key=settings.openai_api_key or "missing-api-key",
-        base_url=settings.openai_base_url,
-        timeout=httpx.Timeout(
-            connect=settings.openai_connect_timeout_seconds,
-            read=600.0,
-            write=600.0,
-            pool=600.0,
-        ),
-    )
     redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
+    canonical_conversations = PostgresConversationRepository(
+        postgres_pool,
+        context_item_limit=settings.conversation_max_messages,
+    )
     conversations = CachedConversationRepository(
-        canonical=PostgresConversationRepository(
-            postgres_pool,
-            context_item_limit=settings.conversation_max_messages,
-        ),
+        canonical=canonical_conversations,
         cache=RedisConversationCache(
             redis_client,
             ttl_seconds=settings.conversation_ttl_seconds,
@@ -90,49 +97,58 @@ async def build_container(settings: Settings) -> AppContainer:
             max_characters=settings.conversation_max_characters,
         ),
     )
-    model_gateway = OpenAIResponsesGateway(client)
     jobs = PostgresA2AJobRepository(postgres_pool)
-    a2a_service = A2AService(jobs, conversations)
+    interactions = PostgresInteractionRepository(
+        postgres_pool,
+        max_pending_commands=settings.interaction_max_pending_commands,
+    )
+    interaction_notifier = PostgresInteractionNotifier(
+        settings.postgres_url,
+        command_timeout_seconds=settings.postgres_command_timeout_seconds,
+    )
+    a2a_service = A2AService(jobs)
     worker_tools = build_tool_registry()
     interactive_tools = build_interactive_tool_registry(a2a_service)
-    definition = AgentDefinition(
-        model=settings.openai_model,
-        instructions=settings.agent_instructions,
-        tool_names=interactive_tools.names,
-    )
-    worker_definition = AgentDefinition(
-        model=settings.worker_agent_model or settings.openai_model,
-        instructions=settings.worker_agent_instructions,
-        tool_names=worker_tools.names,
-    )
-    agent_service = AgentService(
-        model_gateway=model_gateway,
-        tools=interactive_tools,
+    model_runtime = build_model_runtime(
+        settings,
         conversations=conversations,
-        max_tool_rounds=settings.max_tool_rounds,
-    )
-    worker_agent_service = AgentService(
-        model_gateway=model_gateway,
-        tools=worker_tools,
-        conversations=conversations,
-        max_tool_rounds=settings.max_tool_rounds,
+        interactions=interactions,
+        interaction_notifier=interaction_notifier,
+        interactive_tools=interactive_tools,
+        worker_tools=worker_tools,
     )
     a2a_worker = A2AWorker(
         jobs,
-        worker_agent_service,
+        interaction_notifier,
+        model_runtime.worker_agent_service,
         conversations,
-        worker_definition,
+        model_runtime.worker_definition,
         worker_id=str(uuid4()),
-        poll_seconds=settings.a2a_worker_poll_seconds,
+        reconciliation_seconds=settings.a2a_worker_reconciliation_seconds,
         job_timeout_seconds=settings.a2a_job_timeout_seconds,
     )
+    conversation_coordinator = ConversationCoordinator(
+        interactions,
+        interaction_notifier,
+        model_runtime.text_agent,
+        worker_id=str(uuid4()),
+        reconciliation_seconds=settings.interaction_coordinator_reconciliation_seconds,
+        output_reconciliation_seconds=settings.interaction_output_reconciliation_seconds,
+        command_timeout_seconds=settings.interaction_command_timeout_seconds,
+        worker_count=settings.interaction_coordinator_workers,
+    )
     return AppContainer(
-        openai_client=client,
+        model_runtime=model_runtime,
         redis_client=redis_client,
         postgres_pool=postgres_pool,
-        agent_service=agent_service,
+        text_agent_service=model_runtime.text_agent_service,
         conversation_service=ConversationService(conversations),
-        default_agent=definition,
+        conversation_history_service=ConversationHistoryService(canonical_conversations),
+        text_definition=model_runtime.text_definition,
+        realtime_definition=model_runtime.realtime_definition,
+        realtime_agent_service=model_runtime.realtime_agent_service,
         a2a_service=a2a_service,
         a2a_worker=a2a_worker,
+        interaction_notifier=interaction_notifier,
+        conversation_coordinator=conversation_coordinator,
     )

@@ -1,12 +1,11 @@
-import asyncio
-import time
 from collections.abc import AsyncGenerator
+from uuid import uuid4
 
 import structlog
 
 from application.conversations import ConversationNotFoundError
 from application.ports import ConversationRepository, ModelGateway
-from application.tools import ToolExecutionContext, ToolRegistry
+from application.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import (
     Conversation,
@@ -14,19 +13,20 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
-from domain.events import (
+from domain.interactions import InteractionSource
+from domain.tools import ToolCallRecord
+from domain.turn_events import (
+    AgentAudioDelta,
+    AgentAudioInterrupted,
     AgentStreamCompleted,
     AgentStreamEvent,
     AgentTextDelta,
     AgentToolCompleted,
     AgentToolStarted,
+    ModelAudioDelta,
+    ModelAudioInterrupted,
     ModelStreamCompleted,
     ModelTextDelta,
-)
-from domain.tools import (
-    ToolCall,
-    ToolCallRecord,
-    ToolResult,
 )
 
 logger = structlog.get_logger(__name__)
@@ -60,21 +60,24 @@ class AgentService:
         self._tools = tools
         self._conversations = conversations
         self._max_tool_rounds = max_tool_rounds
+        self._tool_executor = ToolExecutor()
 
     async def run(
         self,
         message: str,
         definition: AgentDefinition,
         conversation_key: ConversationKey,
+        *,
+        source: InteractionSource = "text_user",
+        turn_id: str | None = None,
     ) -> AgentResult:
         """Continue and persist one owned conversation after a complete model run."""
         conversation = await self._load_conversation(conversation_key)
         selected_tools = self._tools.select(definition.tool_names)
-        session = self._model_gateway.create_session(
-            definition, selected_tools.specs, conversation.messages
-        )
         records: list[ToolCallRecord] = []
-        turn_items: list[ConversationItem] = [ConversationMessage(role="user", content=message)]
+        turn_items: list[ConversationItem] = [
+            ConversationMessage(role="user", content=message, source=source)
+        ]
 
         logger.info(
             "agent_run_started",
@@ -82,30 +85,37 @@ class AgentService:
             message_length=len(message),
             tool_count=len(selected_tools.specs),
         )
-        reply = await session.send_message(message)
+        async with self._model_gateway.open_session(
+            definition,
+            selected_tools.specs,
+            conversation.messages,
+        ) as session:
+            reply = await session.send_message(message)
 
-        for round_number in range(self._max_tool_rounds):
-            logger.info(
-                "model_reply_received",
-                response_id=reply.response_id,
-                tool_call_count=len(reply.tool_calls),
-                round=round_number,
-            )
-            if not reply.tool_calls:
-                break
+            for round_number in range(self._max_tool_rounds):
+                logger.info(
+                    "model_reply_received",
+                    response_id=reply.response_id,
+                    tool_call_count=len(reply.tool_calls),
+                    round=round_number,
+                )
+                if not reply.tool_calls:
+                    break
 
-            round_records, results = await self._execute_tools(
-                reply.tool_calls,
-                selected_tools,
-                ToolExecutionContext.from_conversation(conversation_key),
-            )
-            records.extend(round_records)
-            turn_items.extend(reply.tool_calls)
-            turn_items.extend(results)
-            reply = await session.send_tool_results(results)
-        else:
-            if reply.tool_calls:
-                raise ToolRoundsExceededError(f"Agent exceeded {self._max_tool_rounds} tool rounds")
+                round_records, results = await self._tool_executor.execute(
+                    reply.tool_calls,
+                    selected_tools,
+                    ToolExecutionContext.from_conversation(conversation_key),
+                )
+                records.extend(round_records)
+                turn_items.extend(reply.tool_calls)
+                turn_items.extend(results)
+                reply = await session.send_tool_results(results)
+            else:
+                if reply.tool_calls:
+                    raise ToolRoundsExceededError(
+                        f"Agent exceeded {self._max_tool_rounds} tool rounds"
+                    )
 
         logger.info(
             "agent_run_completed",
@@ -118,8 +128,14 @@ class AgentService:
             conversation_id=conversation_key.conversation_id,
             tool_calls=tuple(records),
         )
-        turn_items.append(ConversationMessage(role="assistant", content=result.answer))
-        await self._persist_turn(conversation, tuple(turn_items))
+        turn_items.append(
+            ConversationMessage(role="assistant", content=result.answer, source="assistant")
+        )
+        await self._persist_turn(
+            conversation,
+            tuple(turn_items),
+            turn_id=turn_id or str(uuid4()),
+        )
         return result
 
     async def stream(
@@ -127,16 +143,17 @@ class AgentService:
         message: str,
         definition: AgentDefinition,
         conversation_key: ConversationKey,
+        *,
+        source: InteractionSource = "text_user",
+        turn_id: str | None = None,
     ) -> AsyncGenerator[AgentStreamEvent, None]:
         """Stream one conversation turn and persist it before terminal success."""
         conversation = await self._load_conversation(conversation_key)
         selected_tools = self._tools.select(definition.tool_names)
-        session = self._model_gateway.create_session(
-            definition, selected_tools.specs, conversation.messages
-        )
-        model_events = session.stream_message(message)
         records: list[ToolCallRecord] = []
-        turn_items: list[ConversationItem] = [ConversationMessage(role="user", content=message)]
+        turn_items: list[ConversationItem] = [
+            ConversationMessage(role="user", content=message, source=source)
+        ]
 
         logger.info(
             "agent_stream_started",
@@ -145,60 +162,84 @@ class AgentService:
             tool_count=len(selected_tools.specs),
         )
 
-        for round_number in range(self._max_tool_rounds + 1):
-            completed_reply = None
-            async for event in model_events:
-                if isinstance(event, ModelTextDelta):
-                    yield AgentTextDelta(text=event.text)
-                elif isinstance(event, ModelStreamCompleted):
-                    if completed_reply is not None:
-                        raise IncompleteModelStreamError(
-                            "Model stream emitted more than one terminal event"
-                        )
-                    completed_reply = event.reply
+        async with self._model_gateway.open_session(
+            definition,
+            selected_tools.specs,
+            conversation.messages,
+        ) as session:
+            model_events = session.stream_message(message)
+            for round_number in range(self._max_tool_rounds + 1):
+                completed_reply = None
+                async for event in model_events:
+                    if isinstance(event, ModelTextDelta):
+                        yield AgentTextDelta(text=event.text)
+                    elif isinstance(event, ModelAudioDelta):
+                        yield AgentAudioDelta(data=event.data, mime_type=event.mime_type)
+                    elif isinstance(event, ModelAudioInterrupted):
+                        yield AgentAudioInterrupted()
+                    elif isinstance(event, ModelStreamCompleted):
+                        if completed_reply is not None:
+                            raise IncompleteModelStreamError(
+                                "Model stream emitted more than one terminal event"
+                            )
+                        completed_reply = event.reply
 
-            if completed_reply is None:
-                raise IncompleteModelStreamError("Model stream ended without a terminal response")
+                if completed_reply is None:
+                    raise IncompleteModelStreamError(
+                        "Model stream ended without a terminal response"
+                    )
 
-            logger.info(
-                "model_stream_completed",
-                response_id=completed_reply.response_id,
-                tool_call_count=len(completed_reply.tool_calls),
-                round=round_number,
-            )
-            if not completed_reply.tool_calls:
-                result = AgentResult(
-                    answer=completed_reply.text,
-                    response_id=completed_reply.response_id,
-                    conversation_id=conversation_key.conversation_id,
-                    tool_calls=tuple(records),
-                )
-                turn_items.append(ConversationMessage(role="assistant", content=result.answer))
-                await self._persist_turn(conversation, tuple(turn_items))
                 logger.info(
-                    "agent_stream_completed",
-                    response_id=result.response_id,
-                    tool_call_count=len(records),
+                    "model_stream_completed",
+                    response_id=completed_reply.response_id,
+                    tool_call_count=len(completed_reply.tool_calls),
+                    round=round_number,
                 )
-                yield AgentStreamCompleted(result=result)
-                return
+                if not completed_reply.tool_calls:
+                    result = AgentResult(
+                        answer=completed_reply.text,
+                        response_id=completed_reply.response_id,
+                        conversation_id=conversation_key.conversation_id,
+                        tool_calls=tuple(records),
+                    )
+                    turn_items.append(
+                        ConversationMessage(
+                            role="assistant",
+                            content=result.answer,
+                            source="assistant",
+                        )
+                    )
+                    await self._persist_turn(
+                        conversation,
+                        tuple(turn_items),
+                        turn_id=turn_id or str(uuid4()),
+                    )
+                    logger.info(
+                        "agent_stream_completed",
+                        response_id=result.response_id,
+                        tool_call_count=len(records),
+                    )
+                    yield AgentStreamCompleted(result=result)
+                    return
 
-            if round_number == self._max_tool_rounds:
-                raise ToolRoundsExceededError(f"Agent exceeded {self._max_tool_rounds} tool rounds")
+                if round_number == self._max_tool_rounds:
+                    raise ToolRoundsExceededError(
+                        f"Agent exceeded {self._max_tool_rounds} tool rounds"
+                    )
 
-            for call in completed_reply.tool_calls:
-                yield AgentToolStarted(call_id=call.call_id, tool_name=call.tool_name)
-            round_records, results = await self._execute_tools(
-                completed_reply.tool_calls,
-                selected_tools,
-                ToolExecutionContext.from_conversation(conversation_key),
-            )
-            records.extend(round_records)
-            turn_items.extend(completed_reply.tool_calls)
-            turn_items.extend(results)
-            for record in round_records:
-                yield AgentToolCompleted(record=record)
-            model_events = session.stream_tool_results(results)
+                for call in completed_reply.tool_calls:
+                    yield AgentToolStarted(call_id=call.call_id, tool_name=call.tool_name)
+                round_records, results = await self._tool_executor.execute(
+                    completed_reply.tool_calls,
+                    selected_tools,
+                    ToolExecutionContext.from_conversation(conversation_key),
+                )
+                records.extend(round_records)
+                turn_items.extend(completed_reply.tool_calls)
+                turn_items.extend(results)
+                for record in round_records:
+                    yield AgentToolCompleted(record=record)
+                model_events = session.stream_tool_results(results)
 
         raise AssertionError("Unreachable")
 
@@ -213,73 +254,8 @@ class AgentService:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> None:
         """Append one complete model/tool turn and save it with optimistic concurrency."""
-        await self._conversations.save_turn(conversation, turn)
-
-    async def _execute_tools(
-        self,
-        calls: tuple[ToolCall, ...],
-        tools: ToolRegistry,
-        context: ToolExecutionContext,
-    ) -> tuple[tuple[ToolCallRecord, ...], tuple[ToolResult, ...]]:
-        """Execute a batch of independent tool calls concurrently."""
-        executions = await asyncio.gather(
-            *(self._execute_tool_call(call, tools, context) for call in calls)
-        )
-        records, results = zip(*executions, strict=True)
-        return tuple(records), tuple(results)
-
-    async def _execute_tool_call(
-        self,
-        call: ToolCall,
-        tools: ToolRegistry,
-        context: ToolExecutionContext,
-    ) -> tuple[ToolCallRecord, ToolResult]:
-        """Execute and measure one tool call, converting failures into results."""
-        started = time.perf_counter()
-        logger.info("tool_call_started", call_id=call.call_id, tool_name=call.tool_name)
-
-        try:
-            output = await tools.execute(call.tool_name, call.arguments, context)
-            duration_ms = (time.perf_counter() - started) * 1000
-            logger.info(
-                "tool_call_completed",
-                call_id=call.call_id,
-                tool_name=call.tool_name,
-                duration_ms=round(duration_ms, 2),
-            )
-            return (
-                ToolCallRecord(
-                    call_id=call.call_id,
-                    tool_name=call.tool_name,
-                    arguments=call.arguments,
-                    status="success",
-                    output=output,
-                    error=None,
-                    duration_ms=duration_ms,
-                ),
-                ToolResult(call_id=call.call_id, output=output),
-            )
-        except Exception as exc:
-            duration_ms = (time.perf_counter() - started) * 1000
-            error_message = str(exc) or type(exc).__name__
-            logger.warning(
-                "tool_call_failed",
-                call_id=call.call_id,
-                tool_name=call.tool_name,
-                error_type=type(exc).__name__,
-                duration_ms=round(duration_ms, 2),
-            )
-            return (
-                ToolCallRecord(
-                    call_id=call.call_id,
-                    tool_name=call.tool_name,
-                    arguments=call.arguments,
-                    status="error",
-                    output=None,
-                    error=error_message,
-                    duration_ms=duration_ms,
-                ),
-                ToolResult(call_id=call.call_id, error=error_message),
-            )
+        await self._conversations.save_turn(conversation, turn, turn_id=turn_id)

@@ -21,46 +21,16 @@ Aspectos que deberá cubrir:
 - Añadir compatibilidad con el WebSocket actual y permitir que clientes sin soporte
   visual degraden el contenido a texto.
 
-## Entrega proactiva de resultados A2A
+## Evolución de la entrega proactiva
 
-La primera versión de la doble capa ya separa el agente interactivo del worker, conserva
-un historial por thread A2A y ejecuta mensajes mediante jobs durables reclamados con
-lease en PostgreSQL. El agente interactivo puede delegar, consultar y continuar esos
-threads. Queda fuera de la fase actual despertar proactivamente al agente interactivo
-cuando termina un job sin esperar un nuevo mensaje del usuario.
-
-La evolución de la entrega se apoyará en los siguientes límites:
-
-```text
-tool interactiva -> JobScheduler -> cola durable -> worker
-                                             |
-                                             v
-                                      resultado durable
-                                             |
-                                             v
-ConversationCoordinator -> ModelGateway -> Outbox -> WebSocket(s) / reconexión
-```
-
-- El worker publicará un evento neutral con `job_id`, conversación, turno de origen,
-  versión observada, estado y resultado; nunca llamará directamente al WebSocket.
-- Un coordinador por conversación serializará mensajes de usuario y finalizaciones para
-  cargar el historial más reciente antes de decidir si responder, agrupar, posponer o
-  descartar un resultado obsoleto.
-- La respuesta proactiva será un nuevo turno del modelo con el resultado tipado del job y
-  el contexto vigente, no una continuación de la sesión efímera que inició la tarea.
-- Un outbox durable separará completar el trabajo de entregarlo. Si no hay socket activo,
-  la notificación quedará disponible para reconexión o consulta, con deduplicación por
-  `job_id` y versión.
-- El registro de conexiones será un adaptador de entrega efímero. En despliegues con
-  varios procesos necesitará pub/sub para enrutar eventos al proceso que mantiene cada
-  socket.
-
-Aspectos que deberá cubrir:
+La inbox serializada por conversación, los comandos de finalización A2A y el outbox
+durable ya forman parte de la arquitectura actual. Las siguientes extensiones continúan
+fuera de alcance:
 
 - Añadir prioridades, resultados parciales, cancelación pública y límites de consumo por
-  usuario o tenant a los contratos de jobs existentes.
-- Separar opcionalmente el consumidor en un proceso worker desplegable de forma
-  independiente; PostgreSQL ya actúa como frontera durable compartida.
+  usuario a los contratos de jobs existentes.
+- Separar opcionalmente el coordinador en un proceso desplegable de forma independiente;
+  PostgreSQL ya actúa como frontera durable compartida.
 - Permitir que ambas capas trabajen a la vez y publiquen resultados parciales mediante
   eventos neutrales, conservando la trazabilidad con `request_id`, `conversation_id` y
   `job_id`.
@@ -68,13 +38,12 @@ Aspectos que deberá cubrir:
   respuesta previa sin producir actualizaciones incoherentes ni duplicadas.
 - Versionar los resultados y aplicar control de concurrencia para descartar entregas
   tardías u obsoletas.
-- Exponer mecanismos para consultar el estado y recibir la finalización de un trabajo;
-  usar el WebSocket para entrega online y polling o webhooks cuando el consumidor lo
-  requiera, sin convertir el socket en fuente de verdad.
+- Añadir fan-out a varios sockets de la misma conversación y consumidores durables
+  independientes; la entrega actual confirma cada evento una sola vez.
+- Añadir webhooks o polling de outputs para consumidores sin WebSocket, sin convertir
+  ningún transporte en fuente de verdad.
 - Propagar cancelaciones cuando sea posible y definir políticas explícitas para tareas
   que deban continuar tras la desconexión del cliente.
-- Aplicar autenticación, autorización y aislamiento multiusuario tanto al envío del
-  trabajo como a la consulta, cancelación y entrega de sus resultados.
 - Añadir observabilidad de tiempos en cola, latencia de la primera respuesta, duración
   del razonamiento, uso de recursos, errores y resultados descartados, sin registrar
   datos personales ni contenido sensible.
@@ -82,46 +51,124 @@ Aspectos que deberá cubrir:
   la cancelación, los timeouts, los resultados fuera de orden y los fallos parciales de
   cada capa.
 
-## Política de ejecución de tools en batch
+## Escalado independiente de la cola A2A
 
-Introducir una política explícita para decidir cuándo varias tools pueden ejecutarse en
-paralelo, secuencialmente o como una operación coordinada.
+La cola A2A actual ya usa PostgreSQL como fuente de verdad, `LISTEN/NOTIFY` como señal de
+baja latencia y reconciliación periódica para recuperar notificaciones perdidas y leases
+vencidas. Existe un `A2AWorker` por proceso FastAPI, por lo que el número de consumidores
+A2A crece actualmente con las réplicas web y cada `NOTIFY` despierta a todos esos
+consumidores. No se crea un listener por usuario o conversación, pero a gran escala el
+broadcast entre procesos podría producir demasiados intentos fallidos de `claim_next()`.
+
+La siguiente evolución deberá desacoplar la capacidad web de la capacidad de trabajo A2A:
+
+- Crear puntos de entrada o roles de despliegue explícitos para API y worker, de modo que
+  los procesos FastAPI puedan limitarse a aceptar tráfico y persistir jobs, mientras uno o
+  varios procesos A2A independientes los consumen.
+- Mantener PostgreSQL y `A2AJobRepository.claim_next()` como autoridad de orden, leases y
+  ownership. El payload de `NOTIFY` seguirá siendo únicamente una señal para reconciliar
+  estado durable, nunca una orden de ejecución confiable.
+- Crear un `A2AWorkerPool` con una sola suscripción `LISTEN` por proceso, una capacidad
+  concurrente explícita y acotada, y un bucle que reclame jobs hasta llenar sus slots
+  disponibles. No crear una suscripción independiente por coroutine ejecutora.
+- Permitir configurar por separado el número de réplicas worker y la concurrencia local,
+  por ejemplo mediante `A2A_WORKER_CONCURRENCY`, sin vincularlos al número de workers de
+  Uvicorn ni al número de usuarios conectados.
+- Ejecutar simultáneamente jobs de threads distintos, conservando la serialización actual
+  dentro de cada thread mediante la consulta durable. La concurrencia local no deberá
+  introducir un segundo mecanismo de orden en memoria.
+- Coordinar notificaciones, slots liberados, reconciliación y apagado mediante primitivas
+  acotadas. El cierre deberá dejar de reclamar trabajo, propagar cancelaciones y reencolar
+  de forma segura las claims interrumpidas sin cerrar clientes compartidos prematuramente.
+- Separar el listener A2A del listener usado por los procesos API cuando se desplieguen
+  roles distintos, evitando que una réplica web consulte `a2a_jobs` si no ejecutará jobs.
+- Añadir reconexión con backoff y jitter a la conexión PostgreSQL `LISTEN`. Mientras se
+  recupera la conexión, la reconciliación periódica deberá preservar la corrección aunque
+  aumente temporalmente la latencia.
+
+Observabilidad necesaria antes de aumentar consumidores:
+
+- Medir profundidad de la cola y tiempo `created_at` a `started_at` por job y thread.
+- Contabilizar intentos de `claim_next()` exitosos y vacíos, distinguiendo despertares por
+  `NOTIFY`, capacidad liberada y reconciliación periódica.
+- Medir jobs activos, utilización del pool, duración, timeouts, leases vencidas y valores
+  de `attempt_count` superiores a uno.
+- Registrar conexiones y reconexiones del listener, señales recibidas y tiempo hasta el
+  primer claim, sin incluir mensajes, argumentos de tools ni resultados.
+- Definir umbrales operativos para escalar réplicas o concurrencia sin saturar PostgreSQL,
+  proveedores de modelos ni sistemas externos invocados por las tools.
+
+Si el broadcast entre réplicas worker se convierte en un cuello de botella, evaluar en
+este orden:
+
+1. Reducir y controlar el número de procesos que escuchan A2A mediante el despliegue
+   independiente y el pool local.
+2. Particionar opcionalmente por un hash estable de `thread_id`, asignando todos los jobs
+   del mismo thread al mismo shard y canales de notificación. Deberán diseñarse
+   explícitamente el rebalanceo, la recuperación de workers caídos, los shards calientes
+   y el aprovechamiento de capacidad libre.
+3. Adoptar un broker con competing consumers —por ejemplo Redis Streams, RabbitMQ, SQS o
+   Kafka— solo cuando las métricas demuestren que PostgreSQL ya no satisface el throughput
+   o la latencia requeridos.
+
+La introducción de un broker deberá usar un outbox transaccional: la misma transacción que
+crea el job persistirá el mensaje pendiente de publicación, un publisher independiente lo
+entregará al broker y el consumidor continuará validando de forma idempotente el estado
+del job en PostgreSQL. No se publicará directamente al broker después de insertar el job,
+porque una caída entre ambas operaciones podría dejar trabajo durable sin señal de
+entrega. Esta fase deberá definir duplicados, claves de idempotencia, redelivery,
+dead-letter queues, backpressure y reconciliación entre broker y base de datos.
+
+Pruebas previstas:
+
+- Verificar que una sola notificación llena varios slots disponibles sin crear una
+  suscripción ni una consulta simultánea por slot.
+- Comprobar el límite de concurrencia, la ejecución paralela entre threads y el orden
+  estricto dentro de un mismo thread.
+- Simular varios procesos competidores, notificaciones duplicadas o perdidas, caída del
+  listener, expiración de leases y apagado con claims activas.
+- Confirmar que procesos configurados únicamente como API no escuchan ni consultan la cola
+  A2A y que las réplicas worker pueden escalar de forma independiente.
+- Medir y acotar el número de claims vacíos por job bajo diferentes cantidades de
+  procesos, concurrencia y carga sostenida.
+- Para un futuro broker, probar publicación outbox idempotente, redelivery, duplicados,
+  caída antes y después del ack y recuperación sin perder ni ejecutar dos veces efectos no
+  idempotentes.
+
+## Evolución de la interacción STS
+
+El canal STS actual ya dispone de contratos independientes del proveedor, cola acotada,
+escritor único, backpressure, actividad automática o explícita, recuperación transparente
+cuando el adaptador la soporta y entrega proactiva durable de resultados A2A. Las
+extensiones que continúan fuera de alcance son:
+
+- Añadir WebRTC cuando se necesiten jitter buffers, negociación de codecs, cancelación de
+  eco y transporte adaptativo frente a WebSocket PCM.
+- Definir políticas desplegables de consentimiento, retención de transcripciones y borrado
+  de datos de voz, aunque el audio crudo actual no se almacene.
+- Añadir métricas de latencia hasta el primer audio, interrupciones, duración de sesión,
+  bytes descartados y conflictos de persistencia.
+- Probar navegadores y dispositivos reales con cancelación de eco, pérdida de red,
+  reconexión y cambios de dispositivo de entrada.
+
+## Contabilidad de uso y costes de modelos
+
+Persistir el consumo y el coste estimado de los modelos por turno, tanto para ejecuciones
+de texto como para sesiones STS, sin depender de los formatos de facturación de un
+proveedor concreto.
 
 Aspectos que deberá cubrir:
 
-- Añadir metadatos como `concurrency_safe`, `read_only`, `idempotent` y grupo de
-  exclusión mutua a cada tool.
-- Ejecutar en paralelo únicamente tools declaradas como seguras para concurrencia.
-- Mantener orden secuencial para operaciones con dependencias o efectos laterales.
-- Definir límites de concurrencia globales, por usuario, tenant y proveedor externo.
-- Preservar la correspondencia entre cada `call_id` y su resultado.
-- Definir comportamiento ante éxito parcial y cancelación de un batch.
-- Evitar paralelizar operaciones con efectos laterales que compitan sobre el mismo recurso.
-
-## Soporte para modelos STS
-
-Añadir soporte para modelos *speech-to-speech* (STS), capaces de recibir y generar
-audio en tiempo real sin convertir la experiencia pública en una integración acoplada
-a un proveedor concreto.
-
-Aspectos que deberá cubrir:
-
-- Definir eventos neutrales para audio de entrada, audio de salida, transcripciones,
-  turnos de conversación y errores.
-- Evaluar WebSocket o WebRTC para la comunicación bidireccional de baja latencia.
-- Mantener clientes y sesiones específicos de OpenAI, Gemini u otros proveedores
-  dentro de sus respectivos adaptadores.
-- Gestionar detección de voz, inicio y final de turno, interrupciones y cancelación de
-  una respuesta en curso.
-- Permitir tool calls durante una sesión de voz y comunicar su estado sin bloquear la
-  reproducción de audio innecesariamente.
-- Definir codecs, frecuencia de muestreo, tamaño de fragmentos y límites de duración.
-- Aplicar backpressure y límites de memoria para clientes o redes lentas.
-- Establecer políticas explícitas para grabación, retención, transcripción y borrado de
-  audio potencialmente sensible.
-- Proporcionar degradación a texto cuando el cliente o el modelo no soporte STS.
-- Añadir métricas de latencia hasta el primer audio, interrupciones, errores y duración
-  de sesión.
+- Definir un registro neutral asociado al turno con proveedor, modelo, rol del agente,
+  modalidad, `conversation_id`, `response_id`, unidades consumidas y coste estimado.
+- Traducir en cada adaptador las unidades que exponga el proveedor, como tokens de entrada
+  y salida, tokens en caché, audio o duración de una sesión STS.
+- Guardar los registros en una base de datos durable y permitir agregaciones por turno,
+  conversación, modelo, proveedor y periodo temporal.
+- Mantener las tarifas fuera del núcleo, versionadas y con fechas de vigencia, para poder
+  recalcular costes y distinguir estimaciones de importes facturados por el proveedor.
+- No persistir prompts, respuestas, audio ni argumentos de tools como parte de la
+  contabilidad de costes.
 
 ## Reintentos
 
@@ -154,7 +201,7 @@ Aspectos que deberá cubrir:
   de la API concreta de email.
 - Crear un catálogo explícito de excepciones y severidades que generan alertas; no
   enviar notificaciones por cualquier error indiscriminadamente.
-- Recopilar `request_id`, `conversation_id`, `session_id`, usuario o tenant cuando sea
+- Recopilar `request_id`, `conversation_id`, `session_id` y usuario cuando sea
   seguro, nombre de la excepción, mensaje sanitizado, stack trace, endpoint, proveedor,
   modelo y timestamps.
 - Propagar el contexto mediante `structlog.contextvars` para que logger y publisher
@@ -190,4 +237,4 @@ Antes de considerar terminada cualquiera de estas líneas:
 - Debe funcionar tanto en respuestas completas como en streaming.
 - No debe introducir formatos específicos de proveedor en dominio o aplicación.
 - Debe documentar límites, configuración, observabilidad y tratamiento de errores.
-- Debe contemplar autenticación, autorización y aislamiento multiusuario.
+- Debe preservar el aislamiento entre usuarios.

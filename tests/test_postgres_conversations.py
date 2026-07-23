@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from application.conversations import (
@@ -16,8 +18,13 @@ from infrastructure.postgres_conversations import (
     INSERT_ITEM,
     SELECT_CONVERSATION,
     SELECT_CONVERSATION_FOR_UPDATE,
+    SELECT_CONVERSATION_GROUP,
+    SELECT_CONVERSATION_HISTORY,
+    SELECT_CONVERSATION_SUMMARIES,
+    SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
     UPDATE_CONVERSATION,
+    InvalidPostgresConversationDataError,
     PostgresConversationRepository,
     apply_postgres_migrations,
 )
@@ -42,6 +49,7 @@ class FakePostgresConnection:
         """Initialize canonical rows and ordered item records."""
         self.conversations: dict[str, dict[str, object]] = {}
         self.items: dict[str, list[dict[str, object]]] = {}
+        self.group_rows: dict[str, list[dict[str, object]]] = {}
 
     def transaction(self) -> FakeTransaction:
         """Create a no-op transaction boundary."""
@@ -49,13 +57,34 @@ class FakePostgresConnection:
 
     async def fetchrow(self, query: str, conversation_id: str) -> dict[str, object] | None:
         """Return one canonical metadata row."""
-        assert query in (SELECT_CONVERSATION, SELECT_CONVERSATION_FOR_UPDATE)
+        assert query in (
+            SELECT_CONVERSATION,
+            SELECT_CONVERSATION_FOR_UPDATE,
+            SELECT_CONVERSATION_HISTORY,
+        )
         return self.conversations.get(conversation_id)
 
-    async def fetch(self, query: str, conversation_id: str, limit: int) -> list[dict[str, object]]:
-        """Return recent ordered item payloads."""
-        assert query == SELECT_RECENT_ITEMS
+    async def fetch(self, query: str, conversation_id: str, *args: int) -> list[dict[str, object]]:
+        """Return compacted context or a bounded technical history page."""
+        if query == SELECT_CONVERSATION_GROUP:
+            return self.group_rows.get(conversation_id, [])
+        if query == SELECT_CONVERSATION_SUMMARIES:
+            offset, limit = args
+            rows = [
+                {"id": item_id, **row}
+                for item_id, row in self.conversations.items()
+                if row["user_id"] == conversation_id
+            ]
+            rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
+            return rows[offset : offset + limit]
         records = self.items.get(conversation_id, [])
+        if query == SELECT_HISTORY_ITEMS:
+            after_sequence, limit = args
+            return [record for record in records if int(record["sequence"]) > after_sequence][
+                :limit
+            ]
+        assert query == SELECT_RECENT_ITEMS
+        (limit,) = args
         recent = records[-limit:]
         turn_ids = {record["turn_id"] for record in recent}
         return [
@@ -65,14 +94,20 @@ class FakePostgresConnection:
     async def execute(self, query: str, *args: object) -> str:
         """Apply conversation metadata mutations."""
         if query == INSERT_CONVERSATION:
-            conversation_id, user_id, tenant_id, title = args
+            conversation_id, user_id, title = args
             assert isinstance(conversation_id, str)
             self.conversations[conversation_id] = {
                 "user_id": user_id,
-                "tenant_id": tenant_id,
                 "title": title,
+                "status": "active",
                 "version": 0,
                 "last_sequence": 0,
+                "created_at": datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
+                "updated_at": datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
+                "last_message_at": None,
+                "parent_conversation_id": None,
+                "worker_conversation_id": None,
+                "thread_id": None,
             }
             self.items[conversation_id] = []
         elif query == UPDATE_CONVERSATION:
@@ -101,6 +136,7 @@ class FakePostgresConnection:
                     "turn_id": record[1],
                     "sequence": record[2],
                     "payload": record[7],
+                    "created_at": datetime(2026, 7, 22, 10, 1, tzinfo=UTC),
                 }
             )
 
@@ -133,9 +169,13 @@ class FakePostgresPool:
         return FakeAcquire(self.connection)
 
 
-def key(*, user_id: str = "user-1") -> ConversationKey:
+def key(
+    *,
+    conversation_id: str = "conv-1",
+    user_id: str = "user-1",
+) -> ConversationKey:
     """Build one stable conversation ownership key."""
-    return ConversationKey(conversation_id="conv-1", user_id=user_id)
+    return ConversationKey(conversation_id=conversation_id, user_id=user_id)
 
 
 def tool_turn(question: str = "Suma 2 y 3") -> tuple[ConversationItem, ...]:
@@ -158,13 +198,51 @@ async def test_postgres_appends_and_loads_complete_tool_turn() -> None:
     pool = FakePostgresPool()
     value = Conversation(key=key())
 
-    saved = await repository(pool).save_turn(value, tool_turn())
+    saved = await repository(pool).save_turn(
+        value,
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
     loaded = await repository(pool).load(key())
 
     assert saved.version == 1
     assert saved.title == "Suma 2 y 3"
     assert loaded == saved
     assert [record["sequence"] for record in pool.connection.items["conv-1"]] == [1, 2, 3, 4]
+
+
+async def test_postgres_loads_paginated_technical_history_with_tool_records() -> None:
+    """Expose canonical row metadata and preserve call/result correlation."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.save_turn(
+        Conversation(key=key()),
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+
+    first = await store.load_history(key(), after_sequence=0, limit=2)
+    second = await store.load_history(key(), after_sequence=2, limit=2)
+
+    assert first is not None
+    assert first.version == 1
+    assert first.last_sequence == 4
+    assert first.has_more is True
+    assert [record.sequence for record in first.items] == [1, 2]
+    assert isinstance(first.items[1].item, ToolCall)
+    assert second is not None
+    assert second.has_more is False
+    assert isinstance(second.items[0].item, ToolResult)
+
+
+async def test_postgres_history_enforces_conversation_ownership() -> None:
+    """Reject technical inspection through another user identifier."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.create(key())
+
+    with pytest.raises(ConversationAccessDeniedError):
+        await store.load_history(key(user_id="user-2"), after_sequence=0, limit=50)
 
 
 async def test_postgres_creates_an_empty_session_before_its_first_turn() -> None:
@@ -180,14 +258,150 @@ async def test_postgres_creates_an_empty_session_before_its_first_turn() -> None
     assert pool.connection.items["conv-1"] == []
 
 
+async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
+    """Order session headers by update time and expose a bounded next page."""
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.create(key())
+    await store.create(key(conversation_id="conv-2"))
+    await store.create(key(conversation_id="foreign", user_id="user-2"))
+
+    first = await store.list_sessions("user-1", offset=0, limit=1)
+    second = await store.list_sessions("user-1", offset=1, limit=1)
+
+    assert [item.key.conversation_id for item in first.sessions] == ["conv-2"]
+    assert first.has_more is True
+    assert [item.key.conversation_id for item in second.sessions] == ["conv-1"]
+    assert second.has_more is False
+    assert "NOT EXISTS" in SELECT_CONVERSATION_SUMMARIES
+
+
+async def test_postgres_groups_multiple_worker_threads_without_merging_histories() -> None:
+    """Project several worker sessions from either member through one root relation."""
+    pool = FakePostgresPool()
+    rows = [
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "root-1",
+            "parent_conversation_id": None,
+            "worker_conversation_id": None,
+            "thread_id": None,
+            "job_id": None,
+            "job_status": None,
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-1",
+            "job_id": "job-1",
+            "job_status": "completed",
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-1",
+            "job_id": "job-2",
+            "job_status": "queued",
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-2",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-2",
+            "thread_id": "thread-2",
+            "job_id": "job-3",
+            "job_status": "running",
+        },
+    ]
+    pool.connection.group_rows["worker-2"] = rows
+    store = repository(pool)
+
+    group = await store.load_group(ConversationKey(conversation_id="worker-2", user_id="user-1"))
+
+    assert group is not None
+    assert group.root_conversation.conversation_id == "root-1"
+    assert [member.correlation.conversation_id for member in group.members] == [
+        "root-1",
+        "worker-1",
+        "worker-2",
+    ]
+    assert [job.job_id for job in group.members[1].jobs] == ["job-1", "job-2"]
+    assert group.members[1].jobs[0].request_id == "job-1"
+    assert group.members[1].jobs[0].turn_id == "job-1"
+
+    with pytest.raises(ConversationAccessDeniedError):
+        await store.load_group(ConversationKey(conversation_id="worker-2", user_id="user-2"))
+
+
+async def test_postgres_rejects_an_ambiguous_worker_projection() -> None:
+    """Fail closed if storage ever associates one worker session with two threads."""
+    pool = FakePostgresPool()
+    pool.connection.group_rows["worker-1"] = [
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "root-1",
+            "parent_conversation_id": None,
+            "worker_conversation_id": None,
+            "thread_id": None,
+            "job_id": None,
+            "job_status": None,
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-1",
+            "job_id": None,
+            "job_status": None,
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-2",
+            "job_id": None,
+            "job_status": None,
+        },
+    ]
+
+    with pytest.raises(
+        InvalidPostgresConversationDataError,
+        match="correlation data is invalid",
+    ):
+        await repository(pool).load_group(
+            ConversationKey(conversation_id="worker-1", user_id="user-1")
+        )
+
+
 async def test_postgres_rejects_stale_versions_and_other_owners() -> None:
     """Enforce optimistic concurrency and canonical ownership checks."""
     pool = FakePostgresPool()
     store = repository(pool)
-    await store.save_turn(Conversation(key=key()), tool_turn())
+    await store.save_turn(
+        Conversation(key=key()),
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
 
     with pytest.raises(ConversationConflictError):
-        await store.save_turn(Conversation(key=key()), tool_turn("Otra"))
+        await store.save_turn(
+            Conversation(key=key()),
+            tool_turn("Otra"),
+            turn_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        )
     with pytest.raises(ConversationAccessDeniedError):
         await store.load(key(user_id="user-2"))
 
@@ -196,7 +410,11 @@ async def test_postgres_delete_cascades_owned_history() -> None:
     """Delete conversation metadata and all associated item rows."""
     pool = FakePostgresPool()
     store = repository(pool)
-    await store.save_turn(Conversation(key=key()), tool_turn())
+    await store.save_turn(
+        Conversation(key=key()),
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
 
     assert await store.delete(key()) is True
     assert await store.load(key()) is None
@@ -263,5 +481,32 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "REFERENCES conversations(id) ON DELETE CASCADE" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS a2a_threads" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS a2a_jobs" in combined_sql
+    assert "CREATE TRIGGER interaction_command_notify_trigger" in combined_sql
+    assert "CREATE TRIGGER interaction_output_notify_trigger" in combined_sql
+    assert "CREATE TRIGGER a2a_job_notify_trigger" in combined_sql
+    assert "'queued', 'completed', 'failed', 'cancelled'" in combined_sql
+    assert "'audio_delta'" in combined_sql
+    assert "'audio_interrupted'" in combined_sql
+    assert "a2a_jobs_delivery_mode_check" in combined_sql
+    assert "interaction_commands_delivery_mode_check" in combined_sql
+    assert "interaction_commands_realtime_claim_idx" in combined_sql
+    assert "ADD COLUMN IF NOT EXISTS user_id TEXT" in combined_sql
+    assert "SET user_id = parent.user_id" in combined_sql
+    assert "DROP CONSTRAINT IF EXISTS a2a_threads_distinct_conversations_check" in combined_sql
+    assert "validate_a2a_conversation_correlation" in combined_sql
+    assert "NEW.user_id <> parent_user_id" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
     assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)
+    assert any(
+        args == ("008_a2a_conversation_correlation.sql",) for _, args in pool.connection.statements
+    )
+    assert any(
+        args == ("004_interaction_notifications.sql",) for _, args in pool.connection.statements
+    )
+    assert any(
+        args == ("005_interaction_audio_events.sql",) for _, args in pool.connection.statements
+    )
+    assert any(args == ("006_a2a_job_notifications.sql",) for _, args in pool.connection.statements)
+    assert any(
+        args == ("007_interaction_delivery_modes.sql",) for _, args in pool.connection.statements
+    )

@@ -1,8 +1,9 @@
 import json
 import uuid
 from collections import Counter
+from datetime import datetime
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal, cast
 
 import asyncpg
 
@@ -11,11 +12,20 @@ from application.conversations import (
     ConversationConflictError,
 )
 from application.ports import ConversationRepository
+from domain.a2a import A2AJobStatus
 from domain.conversations import (
     Conversation,
+    ConversationCorrelation,
+    ConversationGroup,
+    ConversationGroupMember,
+    ConversationHistoryItem,
+    ConversationHistoryPage,
     ConversationItem,
+    ConversationJobCorrelation,
     ConversationKey,
+    ConversationListPage,
     ConversationMessage,
+    ConversationSummary,
 )
 from domain.tools import ToolCall, ToolResult
 from infrastructure.conversation_codec import (
@@ -24,12 +34,75 @@ from infrastructure.conversation_codec import (
 )
 
 SELECT_CONVERSATION = """
-SELECT user_id, tenant_id, title, version, last_sequence
+SELECT user_id, title, version, last_sequence
 FROM conversations
 WHERE id = $1
 """
 
 SELECT_CONVERSATION_FOR_UPDATE = SELECT_CONVERSATION + " FOR UPDATE"
+
+SELECT_CONVERSATION_HISTORY = """
+SELECT conversation.user_id, conversation.title, conversation.status,
+       conversation.version, conversation.last_sequence, conversation.created_at,
+       conversation.updated_at, conversation.last_message_at,
+       relation.parent_conversation_id, relation.worker_conversation_id,
+       relation.id AS thread_id
+FROM conversations AS conversation
+LEFT JOIN a2a_threads AS relation
+    ON relation.worker_conversation_id = conversation.id
+WHERE conversation.id = $1
+"""
+
+SELECT_CONVERSATION_SUMMARIES = """
+SELECT conversation.id, conversation.user_id, conversation.title, conversation.status,
+       conversation.version, conversation.last_sequence, conversation.created_at,
+       conversation.updated_at, conversation.last_message_at,
+       NULL::TEXT AS parent_conversation_id,
+       NULL::TEXT AS worker_conversation_id,
+       NULL::TEXT AS thread_id
+FROM conversations AS conversation
+WHERE conversation.user_id = $1
+  AND NOT EXISTS (
+      SELECT 1
+      FROM a2a_threads AS relation
+      WHERE relation.worker_conversation_id = conversation.id
+  )
+ORDER BY conversation.updated_at DESC, conversation.id DESC
+OFFSET $2
+LIMIT $3
+"""
+
+SELECT_CONVERSATION_GROUP = """
+WITH requested AS (
+    SELECT conversation.id, conversation.user_id,
+           COALESCE(relation.parent_conversation_id, conversation.id) AS root_id
+    FROM conversations AS conversation
+    LEFT JOIN a2a_threads AS relation
+        ON relation.worker_conversation_id = conversation.id
+    WHERE conversation.id = $1
+)
+SELECT requested.user_id AS requested_user_id,
+       requested.root_id,
+       member.id AS conversation_id,
+       relation.parent_conversation_id,
+       relation.worker_conversation_id,
+       relation.id AS thread_id,
+       job.id AS job_id,
+       job.status AS job_status
+FROM requested
+JOIN conversations AS member
+  ON member.id = requested.root_id
+  OR EXISTS (
+      SELECT 1
+      FROM a2a_threads AS child
+      WHERE child.parent_conversation_id = requested.root_id
+        AND child.worker_conversation_id = member.id
+  )
+LEFT JOIN a2a_threads AS relation
+    ON relation.worker_conversation_id = member.id
+LEFT JOIN a2a_jobs AS job ON job.thread_id = relation.id
+ORDER BY relation.id NULLS FIRST, job.sequence NULLS FIRST
+"""
 
 SELECT_RECENT_ITEMS = """
 WITH recent_turns AS (
@@ -49,11 +122,20 @@ WHERE item.conversation_id = $1
 ORDER BY item.sequence
 """
 
+SELECT_HISTORY_ITEMS = """
+SELECT turn_id, sequence, payload, created_at
+FROM conversation_items
+WHERE conversation_id = $1
+  AND sequence > $2
+ORDER BY sequence
+LIMIT $3
+"""
+
 INSERT_CONVERSATION = """
 INSERT INTO conversations (
-    id, user_id, tenant_id, title, version, last_sequence
+    id, user_id, title, version, last_sequence
 )
-VALUES ($1, $2, $3, $4, 0, 0)
+VALUES ($1, $2, $3, 0, 0)
 """
 
 INSERT_ITEM = """
@@ -96,7 +178,6 @@ class PostgresConversationRepository(ConversationRepository):
                     INSERT_CONVERSATION,
                     key.conversation_id,
                     key.user_id,
-                    key.tenant_id,
                     "Nueva conversación",
                 )
         except asyncpg.UniqueViolationError as exc:
@@ -127,10 +208,171 @@ class PostgresConversationRepository(ConversationRepository):
             raise InvalidPostgresConversationDataError("Canonical conversation fields are invalid")
         return Conversation(key=key, messages=messages, version=version, title=title)
 
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ConversationListPage:
+        """List owner-scoped conversation headers in latest-update order."""
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                SELECT_CONVERSATION_SUMMARIES,
+                user_id,
+                offset,
+                limit + 1,
+            )
+        visible_rows = rows[:limit]
+        try:
+            sessions = tuple(
+                self._summary_from_row(row, expected_user_id=user_id) for row in visible_rows
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidPostgresConversationDataError(
+                "Canonical conversation summary data is invalid"
+            ) from exc
+        return ConversationListPage(
+            sessions=sessions,
+            has_more=len(rows) > limit,
+        )
+
+    async def load_history(
+        self,
+        key: ConversationKey,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> ConversationHistoryPage | None:
+        """Load canonical items and database metadata without context compaction."""
+        if after_sequence < 0:
+            raise ValueError("after_sequence cannot be negative")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                SELECT_CONVERSATION_HISTORY,
+                key.conversation_id,
+            )
+            if row is None:
+                return None
+            self._validate_owner(key, row)
+            item_rows = await connection.fetch(
+                SELECT_HISTORY_ITEMS,
+                key.conversation_id,
+                after_sequence,
+                limit + 1,
+            )
+        visible_rows = item_rows[:limit]
+        try:
+            items = tuple(
+                ConversationHistoryItem(
+                    sequence=int(item_row["sequence"]),
+                    turn_id=str(item_row["turn_id"]),
+                    created_at=cast(datetime, item_row["created_at"]),
+                    item=self._decode_payload(item_row["payload"]),
+                )
+                for item_row in visible_rows
+            )
+            status = cast(Literal["active", "archived"], str(row["status"]))
+            if status not in ("active", "archived"):
+                raise ValueError("conversation status is invalid")
+            return ConversationHistoryPage(
+                key=key,
+                title=str(row["title"]),
+                status=status,
+                version=int(row["version"]),
+                last_sequence=int(row["last_sequence"]),
+                created_at=cast(datetime, row["created_at"]),
+                updated_at=cast(datetime, row["updated_at"]),
+                last_message_at=cast(datetime | None, row["last_message_at"]),
+                items=items,
+                has_more=len(item_rows) > limit,
+                correlation=self._correlation_from_row(
+                    row,
+                    conversation_id=key.conversation_id,
+                ),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise InvalidPostgresConversationDataError(
+                "Canonical conversation history data is invalid"
+            ) from exc
+
+    async def load_group(self, key: ConversationKey) -> ConversationGroup | None:
+        """Project a root chat and workers without making the projection authoritative."""
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(SELECT_CONVERSATION_GROUP, key.conversation_id)
+        if not rows:
+            return None
+        try:
+            requested_user_id = str(rows[0]["requested_user_id"])
+            if requested_user_id != key.user_id:
+                raise ConversationAccessDeniedError("Conversation ownership does not match")
+            root_id = str(rows[0]["root_id"])
+            grouped: dict[
+                str, tuple[ConversationCorrelation, list[ConversationJobCorrelation]]
+            ] = {}
+            for row in rows:
+                if str(row["requested_user_id"]) != requested_user_id:
+                    raise ValueError("conversation group has inconsistent ownership")
+                conversation_id = str(row["conversation_id"])
+                correlation = self._correlation_from_row(
+                    row,
+                    conversation_id=conversation_id,
+                    root_conversation_id=root_id,
+                )
+                current = grouped.setdefault(conversation_id, (correlation, []))
+                if current[0] != correlation:
+                    raise ValueError("conversation has ambiguous A2A correlations")
+                if row["job_id"] is not None:
+                    job_id = str(row["job_id"])
+                    raw_job_status = str(row["job_status"])
+                    if raw_job_status not in (
+                        "queued",
+                        "running",
+                        "completed",
+                        "failed",
+                        "cancelled",
+                    ):
+                        raise ValueError("A2A job status is invalid")
+                    current[1].append(
+                        ConversationJobCorrelation(
+                            job_id=job_id,
+                            request_id=job_id,
+                            turn_id=job_id,
+                            status=cast(A2AJobStatus, raw_job_status),
+                        )
+                    )
+            members = tuple(
+                ConversationGroupMember(correlation=value[0], jobs=tuple(value[1]))
+                for value in grouped.values()
+            )
+            if not members or members[0].correlation.conversation_id != root_id:
+                raise ValueError("conversation group has no root member")
+            return ConversationGroup(
+                root_conversation=ConversationKey(
+                    conversation_id=root_id,
+                    user_id=requested_user_id,
+                ),
+                members=members,
+            )
+        except ConversationAccessDeniedError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidPostgresConversationDataError(
+                "Conversation correlation data is invalid"
+            ) from exc
+
     async def save_turn(
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Append one complete turn under a row lock and optimistic version check."""
         self._validate_turn(turn)
@@ -150,7 +392,6 @@ class PostgresConversationRepository(ConversationRepository):
                         INSERT_CONVERSATION,
                         conversation.key.conversation_id,
                         conversation.key.user_id,
-                        conversation.key.tenant_id,
                         title,
                     )
                     last_sequence = 0
@@ -166,11 +407,11 @@ class PostgresConversationRepository(ConversationRepository):
                 if conversation.version == 0:
                     title = self._default_title(turn)
 
-                turn_id = uuid.uuid4()
+                parsed_turn_id = uuid.UUID(turn_id)
                 records = [
                     self._item_record(
                         conversation.key.conversation_id,
-                        turn_id,
+                        parsed_turn_id,
                         last_sequence + offset,
                         item,
                     )
@@ -207,9 +448,73 @@ class PostgresConversationRepository(ConversationRepository):
 
     @staticmethod
     def _validate_owner(key: ConversationKey, row: asyncpg.Record) -> None:
-        """Reject reads and writes performed by a different user or tenant."""
-        if row["user_id"] != key.user_id or row["tenant_id"] != key.tenant_id:
+        """Reject reads and writes performed by a different user."""
+        if row["user_id"] != key.user_id:
             raise ConversationAccessDeniedError("Conversation ownership does not match")
+
+    @staticmethod
+    def _summary_from_row(row: Any, *, expected_user_id: str) -> ConversationSummary:
+        """Decode and validate one conversation header returned by PostgreSQL."""
+        user_id = row["user_id"]
+        title = row["title"]
+        raw_status = row["status"]
+        created_at = row["created_at"]
+        updated_at = row["updated_at"]
+        last_message_at = row["last_message_at"]
+        if (
+            user_id != expected_user_id
+            or not isinstance(title, str)
+            or raw_status not in ("active", "archived")
+            or not isinstance(created_at, datetime)
+            or not isinstance(updated_at, datetime)
+            or last_message_at is not None
+            and not isinstance(last_message_at, datetime)
+        ):
+            raise ValueError("conversation summary fields are invalid")
+        return ConversationSummary(
+            key=ConversationKey(
+                conversation_id=str(row["id"]),
+                user_id=user_id,
+            ),
+            title=title,
+            status=cast(Literal["active", "archived"], raw_status),
+            version=int(row["version"]),
+            last_sequence=int(row["last_sequence"]),
+            created_at=created_at,
+            updated_at=updated_at,
+            last_message_at=last_message_at,
+            correlation=PostgresConversationRepository._correlation_from_row(
+                row,
+                conversation_id=str(row["id"]),
+            ),
+        )
+
+    @staticmethod
+    def _correlation_from_row(
+        row: Any,
+        *,
+        conversation_id: str,
+        root_conversation_id: str | None = None,
+    ) -> ConversationCorrelation:
+        """Decode a primary or worker projection derived only from A2A threads."""
+        parent_id = (
+            str(row["parent_conversation_id"])
+            if row["parent_conversation_id"] is not None
+            else None
+        )
+        worker_id = (
+            str(row["worker_conversation_id"])
+            if row["worker_conversation_id"] is not None
+            else None
+        )
+        thread_id = str(row["thread_id"]) if row["thread_id"] is not None else None
+        return ConversationCorrelation(
+            conversation_id=conversation_id,
+            root_conversation_id=root_conversation_id or parent_id or conversation_id,
+            parent_conversation_id=parent_id,
+            worker_conversation_id=worker_id,
+            thread_id=thread_id,
+        )
 
     @staticmethod
     def _validate_turn(turn: tuple[ConversationItem, ...]) -> None:
