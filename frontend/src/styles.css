@@ -859,12 +859,117 @@ button:disabled {
 }
 
 .history-summary,
+.history-conversation-group,
 .history-turns,
 .history-empty,
 .history-load-more {
   width: min(100%, 980px);
   margin-right: auto;
   margin-left: auto;
+}
+
+.history-conversation-group {
+  overflow: hidden;
+  margin-bottom: 14px;
+  border: 1px solid #dfe3dd;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 5px 20px rgba(30, 40, 33, 0.04);
+}
+
+.history-conversation-group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #e9ebe7;
+}
+
+.history-conversation-group > header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.history-conversation-group > header strong {
+  color: #353b35;
+  font-size: 12px;
+}
+
+.history-conversation-group > header > span {
+  color: #858b83;
+  font-size: 9px;
+}
+
+.history-conversation-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 7px;
+  padding: 8px;
+}
+
+.history-conversation-tabs > button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: #626861;
+  background: #f8f9f6;
+  text-align: left;
+}
+
+.history-conversation-tabs > button:hover {
+  border-color: #dce5df;
+  background: #f3f7f4;
+}
+
+.history-conversation-tabs > button.active {
+  border-color: #bcd5c8;
+  background: #eaf3ee;
+  box-shadow: inset 0 0 0 1px #e2eee7;
+}
+
+.history-conversation-icon {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #dae6df;
+  border-radius: 9px;
+  color: #39765e;
+  background: #ffffff;
+}
+
+.history-conversation-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.history-conversation-copy strong {
+  color: #3d433d;
+  font-size: 10px;
+}
+
+.history-conversation-copy code {
+  overflow: hidden;
+  color: #8b9189;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-conversation-copy small {
+  color: #65806f;
+  font-size: 8px;
 }
 
 .history-summary {
@@ -899,6 +1004,14 @@ button:disabled {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.history-session-kind {
+  color: #6f8c7b;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .history-session-heading code,
@@ -1627,6 +1740,10 @@ button:disabled {
 
   .history-summary {
     padding: 15px;
+  }
+
+  .history-conversation-tabs {
+    grid-template-columns: 1fr;
   }
 
   .history-summary dl {

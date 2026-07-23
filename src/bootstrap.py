@@ -106,7 +106,7 @@ async def build_container(settings: Settings) -> AppContainer:
         settings.postgres_url,
         command_timeout_seconds=settings.postgres_command_timeout_seconds,
     )
-    a2a_service = A2AService(jobs, conversations)
+    a2a_service = A2AService(jobs)
     worker_tools = build_tool_registry()
     interactive_tools = build_interactive_tool_registry(a2a_service)
     model_runtime = build_model_runtime(

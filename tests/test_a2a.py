@@ -31,6 +31,7 @@ class InMemoryConversationRepository:
     def __init__(self) -> None:
         """Initialize an empty versioned conversation map."""
         self.conversations: dict[str, Conversation] = {}
+        self.turn_ids: dict[str, list[str]] = {}
 
     async def create(self, key: ConversationKey) -> Conversation:
         """Create one empty conversation."""
@@ -49,8 +50,11 @@ class InMemoryConversationRepository:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Append a complete turn using optimistic version checks."""
+        self.turn_ids.setdefault(conversation.key.conversation_id, []).append(turn_id)
         current = self.conversations[conversation.key.conversation_id]
         if current.version != conversation.version:
             raise ConversationConflictError
@@ -126,9 +130,14 @@ class InMemoryA2AJobNotifier:
 class InMemoryA2AJobRepository:
     """Implement ordered A2A claims without an external database."""
 
-    def __init__(self, notifier: InMemoryA2AJobNotifier | None = None) -> None:
+    def __init__(
+        self,
+        conversations: InMemoryConversationRepository,
+        notifier: InMemoryA2AJobNotifier | None = None,
+    ) -> None:
         """Initialize thread, job, and claim state."""
         self.notifier = notifier
+        self.conversations = conversations
         self.threads: dict[str, A2AThread] = {}
         self.jobs: dict[str, A2AJob] = {}
         self.order: list[str] = []
@@ -137,7 +146,13 @@ class InMemoryA2AJobRepository:
         self.completed = asyncio.Event()
 
     async def create_thread(self, thread: A2AThread, first_job: A2AJob) -> None:
-        """Store a thread and its initial job."""
+        """Atomically model creation of the worker session, thread, and first job."""
+        await self.conversations.create(
+            ConversationKey(
+                conversation_id=thread.worker_conversation_id,
+                user_id=thread.parent_conversation.user_id,
+            )
+        )
         self.threads[thread.thread_id] = thread
         await self.enqueue(first_job)
 
@@ -303,8 +318,8 @@ def parent_key(user_id: str = "user-1") -> ConversationKey:
 async def test_worker_keeps_its_own_history_across_a2a_followups() -> None:
     """Treat primary-agent follow-ups as human messages in one worker conversation."""
     conversations = InMemoryConversationRepository()
-    jobs = InMemoryA2AJobRepository()
-    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
     gateway = StubModelGateway(
         [
             [ModelReply(response_id="worker-1", text="Informe inicial con contexto adicional")],
@@ -335,6 +350,11 @@ async def test_worker_keeps_its_own_history_across_a2a_followups() -> None:
     assert first_report.status == "completed"
     assert first_report.answer == "Informe inicial con contexto adicional"
     assert followup_report.answer == "Ampliación basada en el informe"
+    worker_conversation_id = jobs.threads[first.thread_id].worker_conversation_id
+    assert conversations.turn_ids[worker_conversation_id] == [
+        first.job_id,
+        followup.job_id,
+    ]
     assert gateway.histories[0] == ()
     assert gateway.histories[1] == (
         ConversationMessage(
@@ -366,8 +386,8 @@ async def test_interactive_agent_delegates_without_receiving_worker_tools() -> N
     """Expose only A2A protocol tools and persist their receipt in the user chat."""
     conversations = InMemoryConversationRepository()
     await conversations.create(parent_key())
-    jobs = InMemoryA2AJobRepository()
-    protocol = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations)
+    protocol = A2AService(jobs, uid_factory=deterministic_uids())
     interactive_tools = build_interactive_tool_registry(protocol)
     gateway = StubModelGateway(
         [
@@ -413,8 +433,8 @@ async def test_interactive_agent_delegates_without_receiving_worker_tools() -> N
 async def test_a2a_status_is_scoped_to_the_parent_conversation() -> None:
     """Prevent another user or chat from discovering a delegated job."""
     conversations = InMemoryConversationRepository()
-    jobs = InMemoryA2AJobRepository()
-    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
     receipt = await service.delegate(parent_key(), "Trabajo privado")
 
     with pytest.raises(A2AJobNotFoundError):
@@ -424,8 +444,8 @@ async def test_a2a_status_is_scoped_to_the_parent_conversation() -> None:
 async def test_a2a_jobs_preserve_the_delivery_mode_of_each_originating_turn() -> None:
     """Route realtime completions back to STS without changing the thread contract."""
     conversations = InMemoryConversationRepository()
-    jobs = InMemoryA2AJobRepository()
-    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
 
     first = await service.delegate(
         parent_key(),
@@ -446,8 +466,8 @@ async def test_a2a_jobs_preserve_the_delivery_mode_of_each_originating_turn() ->
 async def test_a2a_queue_serializes_messages_within_one_thread() -> None:
     """Keep a follow-up blocked while an earlier message in its thread is running."""
     conversations = InMemoryConversationRepository()
-    jobs = InMemoryA2AJobRepository()
-    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
     first = await service.delegate(parent_key(), "Primero")
     second = await service.continue_thread(parent_key(), first.thread_id, "Después")
 
@@ -463,11 +483,34 @@ async def test_a2a_queue_serializes_messages_within_one_thread() -> None:
     assert next_job.job_id == second.job_id
 
 
+async def test_a2a_allows_parallel_claims_for_isolated_worker_threads() -> None:
+    """Keep two worker histories distinct while independent processes claim both."""
+    conversations = InMemoryConversationRepository()
+    jobs = InMemoryA2AJobRepository(conversations)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
+
+    first = await service.delegate(parent_key(), "Primer análisis")
+    second = await service.delegate(parent_key(), "Segundo análisis")
+    first_claim = await jobs.claim_next("worker-process-1", 30)
+    second_claim = await jobs.claim_next("worker-process-2", 30)
+
+    assert first_claim is not None
+    assert second_claim is not None
+    assert first_claim.thread_id == first.thread_id
+    assert second_claim.thread_id == second.thread_id
+    assert first_claim.worker_conversation_id != second_claim.worker_conversation_id
+    assert first_claim.parent_conversation == second_claim.parent_conversation
+    assert set(conversations.conversations) == {
+        first_claim.worker_conversation_id,
+        second_claim.worker_conversation_id,
+    }
+
+
 async def test_worker_recovers_a_persisted_turn_without_calling_the_model_twice() -> None:
     """Complete a reclaimed job from history after a crash in the commit window."""
     conversations = InMemoryConversationRepository()
-    jobs = InMemoryA2AJobRepository()
-    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
     receipt = await service.delegate(parent_key(), "Mensaje con identidad estable")
     claimed = await jobs.claim_next("dead-process", 30)
     assert claimed is not None
@@ -506,8 +549,8 @@ async def test_job_notification_wakes_background_worker_without_reconciliation_d
     """Start a newly queued A2A job from its hint instead of the slow fallback."""
     notifier = InMemoryA2AJobNotifier()
     conversations = InMemoryConversationRepository()
-    jobs = InMemoryA2AJobRepository(notifier)
-    service = A2AService(jobs, conversations, uid_factory=deterministic_uids())
+    jobs = InMemoryA2AJobRepository(conversations, notifier)
+    service = A2AService(jobs, uid_factory=deterministic_uids())
     gateway = StubModelGateway([[ModelReply(response_id="worker-1", text="Respuesta inmediata")]])
     agent = AgentService(gateway, ToolRegistry([]), conversations)
     worker = A2AWorker(

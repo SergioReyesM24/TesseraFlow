@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from domain.agent import AgentResult
 from domain.conversations import (
+    ConversationCorrelation,
+    ConversationGroup,
     ConversationHistoryPage,
     ConversationListPage,
     ConversationMessage,
@@ -181,6 +183,86 @@ class ConversationSummaryResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_message_at: datetime | None
+    correlation: "ConversationCorrelationResponse"
+
+
+class ConversationCorrelationResponse(BaseModel):
+    """Public identifiers locating one isolated history inside a root chat."""
+
+    conversation_id: UUID
+    root_conversation_id: UUID
+    parent_conversation_id: UUID | None
+    worker_conversation_id: UUID | None
+    thread_id: UUID | None
+
+    @classmethod
+    def from_domain(
+        cls,
+        correlation: ConversationCorrelation,
+    ) -> "ConversationCorrelationResponse":
+        """Translate a validated neutral projection to public UUIDs."""
+        return cls(
+            conversation_id=UUID(correlation.conversation_id),
+            root_conversation_id=UUID(correlation.root_conversation_id),
+            parent_conversation_id=(
+                UUID(correlation.parent_conversation_id)
+                if correlation.parent_conversation_id is not None
+                else None
+            ),
+            worker_conversation_id=(
+                UUID(correlation.worker_conversation_id)
+                if correlation.worker_conversation_id is not None
+                else None
+            ),
+            thread_id=UUID(correlation.thread_id) if correlation.thread_id is not None else None,
+        )
+
+
+class ConversationJobCorrelationResponse(BaseModel):
+    """A2A job identifiers shared by worker execution and parent delivery."""
+
+    job_id: UUID
+    request_id: UUID
+    turn_id: UUID
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+
+
+class ConversationGroupMemberResponse(BaseModel):
+    """One isolated history and the A2A jobs that execute within it."""
+
+    correlation: ConversationCorrelationResponse
+    jobs: list[ConversationJobCorrelationResponse]
+
+
+class ConversationGroupResponse(BaseModel):
+    """Consultable projection of one root conversation and all worker histories."""
+
+    user_id: str
+    root_conversation_id: UUID
+    conversations: list[ConversationGroupMemberResponse]
+
+    @classmethod
+    def from_group(cls, group: ConversationGroup) -> "ConversationGroupResponse":
+        """Translate a neutral group without merging any member's message history."""
+        return cls(
+            user_id=group.root_conversation.user_id,
+            root_conversation_id=UUID(group.root_conversation.conversation_id),
+            conversations=[
+                ConversationGroupMemberResponse(
+                    correlation=ConversationCorrelationResponse.from_domain(member.correlation),
+                    jobs=[
+                        ConversationJobCorrelationResponse(
+                            job_id=UUID(job.job_id),
+                            request_id=UUID(job.request_id),
+                            turn_id=UUID(job.turn_id),
+                            status=job.status,
+                        )
+                        for job in member.jobs
+                    ],
+                )
+                for member in group.members
+            ],
+        )
 
 
 class ConversationListResponse(BaseModel):
@@ -210,6 +292,7 @@ class ConversationListResponse(BaseModel):
                 created_at=session.created_at,
                 updated_at=session.updated_at,
                 last_message_at=session.last_message_at,
+                correlation=ConversationCorrelationResponse.from_domain(session.correlation),
             )
             for session in page.sessions
         ]
@@ -236,6 +319,7 @@ class ConversationHistoryResponse(BaseModel):
     items: list[ConversationHistoryItemResponse]
     has_more: bool
     next_after_sequence: int | None
+    correlation: ConversationCorrelationResponse
 
     @classmethod
     def from_history(cls, history: ConversationHistoryPage) -> "ConversationHistoryResponse":
@@ -286,4 +370,5 @@ class ConversationHistoryResponse(BaseModel):
             items=items,
             has_more=history.has_more,
             next_after_sequence=next_sequence,
+            correlation=ConversationCorrelationResponse.from_domain(history.correlation),
         )

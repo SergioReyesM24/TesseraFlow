@@ -34,8 +34,11 @@ class StubCanonicalRepository:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Append one turn and increment the canonical version."""
+        del turn_id
         self.saved_turns.append(turn)
         self.value = Conversation(
             key=conversation.key,
@@ -162,7 +165,11 @@ async def test_save_commits_canonical_turn_before_refreshing_cache() -> None:
     cache = StubConversationCache(previous)
     turn = turns()[-2:]
 
-    saved = await coordinator(canonical, cache).save_turn(previous, turn)
+    saved = await coordinator(canonical, cache).save_turn(
+        previous,
+        turn,
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
 
     assert canonical.saved_turns == [turn]
     assert canonical.value is not None
@@ -186,7 +193,11 @@ async def test_oversized_turn_is_rejected_before_canonical_write() -> None:
     )
 
     with pytest.raises(ConversationTooLargeError):
-        await repository.save_turn(Conversation(key=key()), turn)
+        await repository.save_turn(
+            Conversation(key=key()),
+            turn,
+            turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        )
 
     assert canonical.saved_turns == []
     assert cache.stores == []
@@ -212,7 +223,11 @@ async def test_redis_outage_does_not_block_canonical_load_save_or_delete() -> No
     repository = coordinator(canonical, FailingConversationCache())
 
     loaded = await repository.load(key())
-    saved = await repository.save_turn(loaded or previous, turns()[-2:])
+    saved = await repository.save_turn(
+        loaded or previous,
+        turns()[-2:],
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
     deleted = await repository.delete(key())
 
     assert loaded == previous

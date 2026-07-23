@@ -5,6 +5,7 @@ from collections.abc import Callable
 from application.ports import ConversationHistoryRepository, ConversationRepository
 from domain.conversations import (
     Conversation,
+    ConversationGroup,
     ConversationHistoryPage,
     ConversationItem,
     ConversationKey,
@@ -100,6 +101,13 @@ class ConversationHistoryService:
         if history is None:
             raise ConversationNotFoundError("Conversation session does not exist")
         return history
+
+    async def load_group(self, key: ConversationKey) -> ConversationGroup:
+        """Return the root projection containing the requested owned conversation."""
+        group = await self._histories.load_group(key)
+        if group is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return group
 
 
 class RecentConversationCompactor:

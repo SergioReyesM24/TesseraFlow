@@ -60,6 +60,32 @@ export interface ConversationHistoryItem {
   payload: ConversationHistoryPayload
 }
 
+export interface ConversationCorrelation {
+  conversation_id: string
+  root_conversation_id: string
+  parent_conversation_id: string | null
+  worker_conversation_id: string | null
+  thread_id: string | null
+}
+
+export interface ConversationJobCorrelation {
+  job_id: string
+  request_id: string
+  turn_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+}
+
+export interface ConversationGroupMember {
+  correlation: ConversationCorrelation
+  jobs: ConversationJobCorrelation[]
+}
+
+export interface ConversationGroupResponse {
+  user_id: string
+  root_conversation_id: string
+  conversations: ConversationGroupMember[]
+}
+
 export interface ConversationHistoryResponse {
   session_uid: string
   user_id: string
@@ -73,6 +99,7 @@ export interface ConversationHistoryResponse {
   items: ConversationHistoryItem[]
   has_more: boolean
   next_after_sequence: number | null
+  correlation: ConversationCorrelation
 }
 
 export interface ConversationSummary {
@@ -84,6 +111,7 @@ export interface ConversationSummary {
   created_at: string
   updated_at: string
   last_message_at: string | null
+  correlation: ConversationCorrelation
 }
 
 export interface ConversationListResponse {

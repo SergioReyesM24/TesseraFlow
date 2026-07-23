@@ -40,18 +40,24 @@ class TurnInteractionAgent:
 
     async def stream(self, command: InteractionCommand) -> AsyncIterator[InteractionEmission]:
         """Tag audio and non-audio events while preserving input provenance."""
-        events = self._service.stream(
-            command.message,
-            self._definition,
-            command.conversation,
-            source=command.source,
-        )
-        async with aclosing(events):
-            async for event in events:
-                if isinstance(event, AgentAudioDelta | AgentAudioInterrupted):
-                    yield InteractionEmission(modality="audio", event=event)
-                else:
-                    yield InteractionEmission(modality="text", event=event)
+        with structlog.contextvars.bound_contextvars(
+            conversation_id=command.conversation.conversation_id,
+            request_id=command.request_id,
+            turn_id=command.request_id,
+        ):
+            events = self._service.stream(
+                command.message,
+                self._definition,
+                command.conversation,
+                source=command.source,
+                turn_id=command.request_id,
+            )
+            async with aclosing(events):
+                async for event in events:
+                    if isinstance(event, AgentAudioDelta | AgentAudioInterrupted):
+                        yield InteractionEmission(modality="audio", event=event)
+                    else:
+                        yield InteractionEmission(modality="text", event=event)
 
 
 class TextInteractionAgent(TurnInteractionAgent):
@@ -135,6 +141,8 @@ class ConversationCoordinator:
             "interaction_command_enqueued",
             command_id=command.command_id,
             request_id=request_id,
+            turn_id=request_id,
+            conversation_id=conversation.conversation_id,
             source=source,
         )
         return command
@@ -207,6 +215,8 @@ class ConversationCoordinator:
             "interaction_command_started",
             command_id=command.command_id,
             request_id=command.request_id,
+            turn_id=command.request_id,
+            conversation_id=command.conversation.conversation_id,
             source=command.source,
             attempt=command.attempt_count,
         )
@@ -262,6 +272,8 @@ class ConversationCoordinator:
             "interaction_command_completed",
             command_id=command.command_id,
             request_id=command.request_id,
+            turn_id=command.request_id,
+            conversation_id=command.conversation.conversation_id,
         )
 
     async def _fail(

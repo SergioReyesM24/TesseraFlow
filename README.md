@@ -133,7 +133,9 @@ WebSockets. El modo **Texto** consume `/v1/agent/ws` como un chat persistente; e
 la respuesta PCM16 a 24 kHz y muestra las transcripciones de ambos interlocutores. El
 modo **Historial técnico** consulta por `session_uid` los registros canónicos, agrupados
 por `turn_id`, y muestra los argumentos y resultados de cada tool call. Primero enumera
-las sesiones del usuario y permite cargar su detalle al seleccionarlas.
+únicamente las conversaciones principales del usuario. Al seleccionar una, consulta su
+grupo y permite alternar entre el historial principal y los historiales internos de cada
+worker, cada uno con sus propios mensajes, orden y paginación.
 
 Con la API levantada en `http://127.0.0.1:8000`, inicia el cliente en otra terminal:
 
@@ -338,7 +340,11 @@ Cada thread A2A apunta a una conversación interna independiente. El mensaje gen
 el agente interactivo entra en esa conversación con rol `user`; por tanto, el worker lo
 trata como un interlocutor humano. Sus respuestas y tool calls quedan persistidas y una
 llamada posterior a `continue_worker_agent` crea una nueva sesión de modelo cargando ese
-historial. El prompt del worker le exige producir un informe autocontenido y añadir
+historial interno, sin cargar el historial de la conversación principal. La cabecera de
+la conversación interna, el thread y su primer job se crean en una única transacción para
+que no puedan quedar sesiones internas huérfanas.
+
+El prompt del worker le exige producir un informe autocontenido y añadir
 contexto útil para preguntas posteriores. Cada mensaje usa un envelope JSON
 `tesseraflow.a2a` versionado con `message_id`; si el proceso cae después de guardar el
 turno pero antes de completar el job, el nuevo worker recupera esa respuesta del
@@ -471,7 +477,11 @@ notificaciones en fuente de verdad. `005_interaction_audio_events.sql` amplía e
 para persistir los eventos neutrales `audio_delta` y `audio_interrupted`;
 `006_a2a_job_notifications.sql` despierta workers A2A y
 `007_interaction_delivery_modes.sql` separa los claims `turn_based` y `realtime`, con
-`turn_based` como valor para filas existentes. Su estructura principal es la siguiente:
+`turn_based` como valor para filas existentes. `008_a2a_conversation_correlation.sql`
+convierte `a2a_threads` en la única autoridad de la relación y rechaza propietarios
+distintos, ciclos y conversaciones con roles ambiguos. El `user_id` redundante se conserva
+por compatibilidad de despliegue, pero se valida contra `conversations` y las consultas no
+lo tratan como autoridad. Su estructura principal es la siguiente:
 
 ```text
 conversations
@@ -487,7 +497,7 @@ conversation_items
 
 a2a_threads
 ├── parent_conversation_id, worker_conversation_id
-└── user_id
+└── user_id (proyección validada para compatibilidad)
 
 a2a_jobs
 ├── thread_id, sequence, message, delivery_mode, status
@@ -509,6 +519,28 @@ La identidad persistente interna es `conversation_id`, expuesta por la API como
 `session_uid`. No es una sesión del proveedor: cada `ModelSession` pertenece a una sola
 ejecución y una conversación atraviesa muchas de esas sesiones. Un UID desconocido
 produce `404` y un UID de otro propietario produce `403`.
+
+La API deriva la agrupación desde `a2a_threads`; no almacena otro identificador raíz. El
+listado de sesiones devuelve solo conversaciones principales. Tanto sus elementos como el
+historial incluyen una proyección `correlation`, y
+`GET /v1/sessions/{session_uid}/group` acepta el ID principal o uno interno y devuelve el
+grupo completo sin mezclar historiales. Los identificadores tienen esta semántica:
+
+| Identificador | Semántica |
+| --- | --- |
+| `conversation_id` | Historial físico aislado; cada worker usa uno distinto del principal. |
+| `root_conversation_id` | Proyección consultable del ID principal; se deriva, no se persiste. |
+| `parent_conversation_id` | Conversación principal a la que pertenece un worker; es nulo para la principal. |
+| `worker_conversation_id` | ID del historial interno; coincide con su `conversation_id`. |
+| `thread_id` | Relación estable principal-worker que admite varios jobs ordenados. |
+| `job_id` | Mensaje durable concreto dentro de un thread A2A. |
+| `request_id` | Ejecución lógica de un comando; en una finalización A2A coincide con `job_id`. |
+| `turn_id` | Agrupa los elementos persistidos de un turno dentro de un `conversation_id`; para A2A coincide con `job_id` en el worker y en la posterior entrega al principal. |
+
+El `X-Request-ID` HTTP se registra como `http_request_id`, por lo que no se confunde con
+el `request_id` lógico de una interacción. Los logs del worker incluyen además
+`conversation_id`, `parent_conversation_id`, `worker_conversation_id`, `thread_id`,
+`job_id` y `turn_id`, sin contenido de mensajes.
 
 - Cada interacción añade filas; compactar Redis no elimina historial canónico.
 - `turn_id` mantiene juntas las llamadas, resultados y respuesta de un turno.
@@ -618,6 +650,10 @@ Los bytes de micrófono y reproducción son efímeros y pasan por una cola acota
 backpressure y un único escritor: no se guardan en PostgreSQL, Redis ni el outbox. Al
 completar un turno se persisten únicamente las transcripciones, tool calls y resultados.
 Los adaptadores con recuperación transparente reenvían solo comandos no confirmados.
+Si el socket se cierra después de haber expuesto salida de un turno proactivo, el servidor
+intenta consumir su terminal dentro del presupuesto original del turno para persistirlo
+antes de confirmar el comando. Si el proveedor no lo completa a tiempo, el comando se
+reencola sin guardar una respuesta parcial.
 
 ## Endpoints
 
@@ -627,6 +663,7 @@ Los adaptadores con recuperación transparente reenvían solo comandos no confir
 | `POST` | `/v1/sessions` | Crea una sesión vacía y devuelve su `session_uid`. |
 | `GET` | `/v1/sessions` | Lista de forma paginada las sesiones pertenecientes al `user_id`. |
 | `GET` | `/v1/sessions/{session_uid}/history` | Lee el historial técnico canónico con mensajes, tool calls, resultados y metadatos de orden. |
+| `GET` | `/v1/sessions/{session_uid}/group` | Agrupa la conversación principal y sus sesiones internas, threads y jobs sin unir historiales. |
 | `WS` | `/v1/agent/ws` | Acceso durable por turnos a la doble capa mediante frames JSON. |
 | `WS` | `/v1/agent/realtime` | Primera capa STS full-duplex y el mismo worker de trabajo pesado. |
 | `POST` | `/v1/agent/stream` | Acceso SSE por turnos al mismo núcleo de dos agentes. |
@@ -649,6 +686,9 @@ curl \
 
 curl \
   'http://127.0.0.1:8000/v1/sessions/0fda5792-2577-4f26-a56d-71f8dd89ac90/history?user_id=user-456&after_sequence=0&limit=50'
+
+curl \
+  'http://127.0.0.1:8000/v1/sessions/0fda5792-2577-4f26-a56d-71f8dd89ac90/group?user_id=user-456'
 ```
 
 ## Tools incluidas

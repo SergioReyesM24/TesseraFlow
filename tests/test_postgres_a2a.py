@@ -7,6 +7,7 @@ from infrastructure.postgres_a2a import (
     COMPLETE_JOB,
     INSERT_JOB,
     INSERT_THREAD,
+    INSERT_WORKER_CONVERSATION,
     SELECT_JOB,
     SELECT_THREAD,
     SELECT_THREAD_FOR_JOB,
@@ -152,6 +153,10 @@ async def test_postgres_a2a_creates_and_loads_owned_protocol_state() -> None:
     assert (
         INSERT_THREAD,
         ("thread-1", "parent-1", "worker-conversation-1", "user-1"),
+    ) in pool.connection.executed
+    assert (
+        INSERT_WORKER_CONVERSATION,
+        ("worker-conversation-1", "user-1"),
     ) in pool.connection.executed
     assert (
         INSERT_JOB,

@@ -18,11 +18,13 @@ from infrastructure.postgres_conversations import (
     INSERT_ITEM,
     SELECT_CONVERSATION,
     SELECT_CONVERSATION_FOR_UPDATE,
+    SELECT_CONVERSATION_GROUP,
     SELECT_CONVERSATION_HISTORY,
     SELECT_CONVERSATION_SUMMARIES,
     SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
     UPDATE_CONVERSATION,
+    InvalidPostgresConversationDataError,
     PostgresConversationRepository,
     apply_postgres_migrations,
 )
@@ -47,6 +49,7 @@ class FakePostgresConnection:
         """Initialize canonical rows and ordered item records."""
         self.conversations: dict[str, dict[str, object]] = {}
         self.items: dict[str, list[dict[str, object]]] = {}
+        self.group_rows: dict[str, list[dict[str, object]]] = {}
 
     def transaction(self) -> FakeTransaction:
         """Create a no-op transaction boundary."""
@@ -63,6 +66,8 @@ class FakePostgresConnection:
 
     async def fetch(self, query: str, conversation_id: str, *args: int) -> list[dict[str, object]]:
         """Return compacted context or a bounded technical history page."""
+        if query == SELECT_CONVERSATION_GROUP:
+            return self.group_rows.get(conversation_id, [])
         if query == SELECT_CONVERSATION_SUMMARIES:
             offset, limit = args
             rows = [
@@ -100,6 +105,9 @@ class FakePostgresConnection:
                 "created_at": datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
                 "updated_at": datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
                 "last_message_at": None,
+                "parent_conversation_id": None,
+                "worker_conversation_id": None,
+                "thread_id": None,
             }
             self.items[conversation_id] = []
         elif query == UPDATE_CONVERSATION:
@@ -190,7 +198,11 @@ async def test_postgres_appends_and_loads_complete_tool_turn() -> None:
     pool = FakePostgresPool()
     value = Conversation(key=key())
 
-    saved = await repository(pool).save_turn(value, tool_turn())
+    saved = await repository(pool).save_turn(
+        value,
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
     loaded = await repository(pool).load(key())
 
     assert saved.version == 1
@@ -203,7 +215,11 @@ async def test_postgres_loads_paginated_technical_history_with_tool_records() ->
     """Expose canonical row metadata and preserve call/result correlation."""
     pool = FakePostgresPool()
     store = repository(pool)
-    await store.save_turn(Conversation(key=key()), tool_turn())
+    await store.save_turn(
+        Conversation(key=key()),
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
 
     first = await store.load_history(key(), after_sequence=0, limit=2)
     second = await store.load_history(key(), after_sequence=2, limit=2)
@@ -257,16 +273,135 @@ async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
     assert first.has_more is True
     assert [item.key.conversation_id for item in second.sessions] == ["conv-1"]
     assert second.has_more is False
+    assert "NOT EXISTS" in SELECT_CONVERSATION_SUMMARIES
+
+
+async def test_postgres_groups_multiple_worker_threads_without_merging_histories() -> None:
+    """Project several worker sessions from either member through one root relation."""
+    pool = FakePostgresPool()
+    rows = [
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "root-1",
+            "parent_conversation_id": None,
+            "worker_conversation_id": None,
+            "thread_id": None,
+            "job_id": None,
+            "job_status": None,
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-1",
+            "job_id": "job-1",
+            "job_status": "completed",
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-1",
+            "job_id": "job-2",
+            "job_status": "queued",
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-2",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-2",
+            "thread_id": "thread-2",
+            "job_id": "job-3",
+            "job_status": "running",
+        },
+    ]
+    pool.connection.group_rows["worker-2"] = rows
+    store = repository(pool)
+
+    group = await store.load_group(ConversationKey(conversation_id="worker-2", user_id="user-1"))
+
+    assert group is not None
+    assert group.root_conversation.conversation_id == "root-1"
+    assert [member.correlation.conversation_id for member in group.members] == [
+        "root-1",
+        "worker-1",
+        "worker-2",
+    ]
+    assert [job.job_id for job in group.members[1].jobs] == ["job-1", "job-2"]
+    assert group.members[1].jobs[0].request_id == "job-1"
+    assert group.members[1].jobs[0].turn_id == "job-1"
+
+    with pytest.raises(ConversationAccessDeniedError):
+        await store.load_group(ConversationKey(conversation_id="worker-2", user_id="user-2"))
+
+
+async def test_postgres_rejects_an_ambiguous_worker_projection() -> None:
+    """Fail closed if storage ever associates one worker session with two threads."""
+    pool = FakePostgresPool()
+    pool.connection.group_rows["worker-1"] = [
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "root-1",
+            "parent_conversation_id": None,
+            "worker_conversation_id": None,
+            "thread_id": None,
+            "job_id": None,
+            "job_status": None,
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-1",
+            "job_id": None,
+            "job_status": None,
+        },
+        {
+            "requested_user_id": "user-1",
+            "root_id": "root-1",
+            "conversation_id": "worker-1",
+            "parent_conversation_id": "root-1",
+            "worker_conversation_id": "worker-1",
+            "thread_id": "thread-2",
+            "job_id": None,
+            "job_status": None,
+        },
+    ]
+
+    with pytest.raises(
+        InvalidPostgresConversationDataError,
+        match="correlation data is invalid",
+    ):
+        await repository(pool).load_group(
+            ConversationKey(conversation_id="worker-1", user_id="user-1")
+        )
 
 
 async def test_postgres_rejects_stale_versions_and_other_owners() -> None:
     """Enforce optimistic concurrency and canonical ownership checks."""
     pool = FakePostgresPool()
     store = repository(pool)
-    await store.save_turn(Conversation(key=key()), tool_turn())
+    await store.save_turn(
+        Conversation(key=key()),
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
 
     with pytest.raises(ConversationConflictError):
-        await store.save_turn(Conversation(key=key()), tool_turn("Otra"))
+        await store.save_turn(
+            Conversation(key=key()),
+            tool_turn("Otra"),
+            turn_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        )
     with pytest.raises(ConversationAccessDeniedError):
         await store.load(key(user_id="user-2"))
 
@@ -275,7 +410,11 @@ async def test_postgres_delete_cascades_owned_history() -> None:
     """Delete conversation metadata and all associated item rows."""
     pool = FakePostgresPool()
     store = repository(pool)
-    await store.save_turn(Conversation(key=key()), tool_turn())
+    await store.save_turn(
+        Conversation(key=key()),
+        tool_turn(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
 
     assert await store.delete(key()) is True
     assert await store.load(key()) is None
@@ -351,8 +490,16 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "a2a_jobs_delivery_mode_check" in combined_sql
     assert "interaction_commands_delivery_mode_check" in combined_sql
     assert "interaction_commands_realtime_claim_idx" in combined_sql
+    assert "ADD COLUMN IF NOT EXISTS user_id TEXT" in combined_sql
+    assert "SET user_id = parent.user_id" in combined_sql
+    assert "DROP CONSTRAINT IF EXISTS a2a_threads_distinct_conversations_check" in combined_sql
+    assert "validate_a2a_conversation_correlation" in combined_sql
+    assert "NEW.user_id <> parent_user_id" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
     assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)
+    assert any(
+        args == ("008_a2a_conversation_correlation.sql",) for _, args in pool.connection.statements
+    )
     assert any(
         args == ("004_interaction_notifications.sql",) for _, args in pool.connection.statements
     )

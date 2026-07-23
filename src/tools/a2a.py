@@ -51,6 +51,8 @@ class DelegateToWorkerTool(AgentTool[DelegateToWorkerArguments]):
             "thread_id": receipt.thread_id,
             "job_id": receipt.job_id,
             "status": receipt.status,
+            "parent_conversation_id": receipt.parent_conversation_id,
+            "worker_conversation_id": receipt.worker_conversation_id,
         }
 
 
@@ -93,6 +95,8 @@ class WorkerAgentStatusTool(AgentTool[WorkerAgentStatusArguments]):
             "thread_id": report.thread_id,
             "job_id": report.job_id,
             "status": report.status,
+            "parent_conversation_id": report.parent_conversation_id,
+            "worker_conversation_id": report.worker_conversation_id,
             "answer": report.answer,
             "error_code": report.error_code,
         }
@@ -150,4 +154,6 @@ class ContinueWorkerTool(AgentTool[ContinueWorkerArguments]):
             "thread_id": receipt.thread_id,
             "job_id": receipt.job_id,
             "status": receipt.status,
+            "parent_conversation_id": receipt.parent_conversation_id,
+            "worker_conversation_id": receipt.worker_conversation_id,
         }

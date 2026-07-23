@@ -10,6 +10,9 @@ from application.conversations import (
 )
 from domain.conversations import (
     Conversation,
+    ConversationCorrelation,
+    ConversationGroup,
+    ConversationGroupMember,
     ConversationHistoryPage,
     ConversationItem,
     ConversationKey,
@@ -39,8 +42,11 @@ class StubConversationRepository:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Declare the complete repository contract; unused in these tests."""
+        del conversation, turn, turn_id
         raise NotImplementedError
 
     async def delete(self, key: ConversationKey) -> bool:
@@ -73,6 +79,10 @@ class StubConversationHistoryRepository:
                     created_at=timestamp,
                     updated_at=timestamp,
                     last_message_at=None,
+                    correlation=ConversationCorrelation(
+                        conversation_id="known",
+                        root_conversation_id="known",
+                    ),
                 ),
             ),
             has_more=False,
@@ -102,6 +112,23 @@ class StubConversationHistoryRepository:
             last_message_at=None,
             items=(),
             has_more=False,
+            correlation=ConversationCorrelation(
+                conversation_id=key.conversation_id,
+                root_conversation_id=key.conversation_id,
+            ),
+        )
+
+    async def load_group(self, key: ConversationKey) -> ConversationGroup | None:
+        """Return one root-only group for the known conversation."""
+        if key.conversation_id != "known":
+            return None
+        correlation = ConversationCorrelation(
+            conversation_id=key.conversation_id,
+            root_conversation_id=key.conversation_id,
+        )
+        return ConversationGroup(
+            root_conversation=key,
+            members=(ConversationGroupMember(correlation=correlation),),
         )
 
 
@@ -128,6 +155,7 @@ async def test_history_service_rejects_unknown_sessions() -> None:
     listed = await service.list_sessions("user-1", offset=0, limit=50)
     assert listed.sessions[0].key == known
     assert (await service.load(known, after_sequence=0, limit=50)).title == "Historial"
+    assert (await service.load_group(known)).root_conversation == known
     with pytest.raises(ConversationNotFoundError):
         await service.load(
             ConversationKey(conversation_id="missing", user_id="user-1"),

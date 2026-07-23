@@ -1,4 +1,5 @@
 import type {
+  ConversationGroupResponse,
   ConversationHistoryResponse,
   ConversationListResponse,
   SessionResponse,
@@ -65,6 +66,28 @@ export async function loadConversationHistory(
   }
 
   return (await response.json()) as ConversationHistoryResponse
+}
+
+/** Resolve the root conversation and every isolated A2A worker session. */
+export async function loadConversationGroup(
+  baseUrl: string,
+  userId: string,
+  sessionUid: string,
+  signal?: AbortSignal,
+): Promise<ConversationGroupResponse> {
+  const query = new URLSearchParams({ user_id: userId })
+  const response = await fetch(
+    httpUrl(`/v1/sessions/${encodeURIComponent(sessionUid)}/group?${query}`, baseUrl),
+    { signal },
+  )
+
+  if (!response.ok) {
+    if (response.status === 404) throw new Error('No existe una sesión con ese identificador.')
+    if (response.status === 403) throw new Error('La sesión pertenece a otro usuario.')
+    throw new Error(`No se pudo cargar el grupo de conversaciones (${response.status}).`)
+  }
+
+  return (await response.json()) as ConversationGroupResponse
 }
 
 /** List a bounded page of persisted sessions owned by the configured user. */

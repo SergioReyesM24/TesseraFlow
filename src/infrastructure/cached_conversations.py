@@ -50,10 +50,12 @@ class CachedConversationRepository(ConversationRepository):
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Commit to PostgreSQL first, then refresh Redis without risking data loss."""
         compacted_messages = self._compactor.compact(conversation.messages + turn)
-        saved = await self._canonical.save_turn(conversation, turn)
+        saved = await self._canonical.save_turn(conversation, turn, turn_id=turn_id)
         compacted = Conversation(
             key=saved.key,
             messages=compacted_messages,

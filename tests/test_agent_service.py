@@ -160,7 +160,10 @@ class InMemoryConversationRepository:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
+        del turn_id
         current = self.conversations.get(conversation.key.conversation_id)
         current_version = current.version if current is not None else 0
         if current_version != conversation.version:

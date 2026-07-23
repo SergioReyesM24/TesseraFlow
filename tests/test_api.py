@@ -18,6 +18,9 @@ from application.realtime import RealtimeBackpressureError
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import (
     Conversation,
+    ConversationCorrelation,
+    ConversationGroup,
+    ConversationGroupMember,
     ConversationHistoryItem,
     ConversationHistoryPage,
     ConversationKey,
@@ -177,9 +180,24 @@ class StubConversationHistoryService:
                     created_at=timestamp,
                     updated_at=timestamp,
                     last_message_at=timestamp,
+                    correlation=ConversationCorrelation(
+                        conversation_id=SESSION_UID,
+                        root_conversation_id=SESSION_UID,
+                    ),
                 ),
             ),
             has_more=False,
+        )
+
+    async def load_group(self, key: ConversationKey) -> ConversationGroup:
+        """Expose the deterministic primary session as a root-only group."""
+        correlation = ConversationCorrelation(
+            conversation_id=key.conversation_id,
+            root_conversation_id=key.conversation_id,
+        )
+        return ConversationGroup(
+            root_conversation=key,
+            members=(ConversationGroupMember(correlation=correlation),),
         )
 
     async def load(
@@ -237,6 +255,10 @@ class StubConversationHistoryService:
                 ),
             ),
             has_more=False,
+            correlation=ConversationCorrelation(
+                conversation_id=key.conversation_id,
+                root_conversation_id=key.conversation_id,
+            ),
         )
 
 
@@ -449,10 +471,46 @@ async def test_session_list_exposes_clickable_conversation_summaries() -> None:
                 "created_at": "2026-07-22T10:00:00Z",
                 "updated_at": "2026-07-22T10:00:00Z",
                 "last_message_at": "2026-07-22T10:00:00Z",
+                "correlation": {
+                    "conversation_id": SESSION_UID,
+                    "root_conversation_id": SESSION_UID,
+                    "parent_conversation_id": None,
+                    "worker_conversation_id": None,
+                    "thread_id": None,
+                },
             }
         ],
         "has_more": False,
         "next_offset": None,
+    }
+
+
+async def test_session_group_exposes_root_correlation_without_merging_history() -> None:
+    """Return the consultable root projection independently from message history."""
+    async with AsyncClient(
+        transport=ASGITransport(app=build_test_app()), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            f"/v1/sessions/{SESSION_UID}/group",
+            params={"user_id": "user-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user-1",
+        "root_conversation_id": SESSION_UID,
+        "conversations": [
+            {
+                "correlation": {
+                    "conversation_id": SESSION_UID,
+                    "root_conversation_id": SESSION_UID,
+                    "parent_conversation_id": None,
+                    "worker_conversation_id": None,
+                    "thread_id": None,
+                },
+                "jobs": [],
+            }
+        ],
     }
 
 

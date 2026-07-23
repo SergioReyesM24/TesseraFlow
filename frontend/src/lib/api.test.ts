@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   httpUrl,
   listConversationSessions,
+  loadConversationGroup,
   loadConversationHistory,
   normalizeBaseUrl,
 } from './api'
@@ -73,6 +74,40 @@ describe('API URL composition', () => {
     ).resolves.toEqual(payload)
     expect(fetchMock).toHaveBeenCalledWith(
       'http://api.test/v1/sessions?user_id=user-1&offset=10&limit=25',
+      { signal: undefined },
+    )
+
+    vi.unstubAllGlobals()
+  })
+
+  it('loads the root and isolated worker conversations through owner scope', async () => {
+    const payload = {
+      user_id: 'user-1',
+      root_conversation_id: 'main-1',
+      conversations: [
+        {
+          correlation: {
+            conversation_id: 'main-1',
+            root_conversation_id: 'main-1',
+            parent_conversation_id: null,
+            worker_conversation_id: null,
+            thread_id: null,
+          },
+          jobs: [],
+        },
+      ],
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      loadConversationGroup('http://api.test/', 'user-1', 'main-1'),
+    ).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/sessions/main-1/group?user_id=user-1',
       { signal: undefined },
     )
 

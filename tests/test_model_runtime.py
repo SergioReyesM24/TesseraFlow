@@ -25,8 +25,11 @@ class StubConversations:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Append a neutral turn in memory."""
+        del turn_id
         return Conversation(
             key=conversation.key,
             messages=conversation.messages + turn,

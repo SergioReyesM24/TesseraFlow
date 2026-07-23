@@ -88,6 +88,8 @@ class A2AJobReceipt:
     thread_id: str
     job_id: str
     status: A2AJobStatus
+    parent_conversation_id: str
+    worker_conversation_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,5 +99,7 @@ class A2AJobReport:
     thread_id: str
     job_id: str
     status: A2AJobStatus
+    parent_conversation_id: str
+    worker_conversation_id: str
     answer: str | None = None
     error_code: str | None = None

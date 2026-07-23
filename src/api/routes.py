@@ -17,6 +17,7 @@ from starlette.requests import HTTPConnection
 
 from api.realtime_websocket import serve_realtime_websocket
 from api.schemas import (
+    ConversationGroupResponse,
     ConversationHistoryResponse,
     ConversationListResponse,
     CreateSessionRequest,
@@ -143,6 +144,30 @@ async def get_session_history(
     except ConversationAccessDeniedError as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Conversation access denied") from exc
     return ConversationHistoryResponse.from_history(history)
+
+
+@router.get(
+    "/v1/sessions/{session_uid}/group",
+    response_model=ConversationGroupResponse,
+    tags=["agent"],
+)
+async def get_session_group(
+    session_uid: Annotated[UUID, Path()],
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    service: Annotated[
+        ConversationHistoryService,
+        Depends(get_conversation_history_service),
+    ],
+) -> ConversationGroupResponse:
+    """Return one root conversation and its isolated A2A worker sessions."""
+    key = ConversationKey(conversation_id=str(session_uid), user_id=user_id)
+    try:
+        group = await service.load_group(key)
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
+    except ConversationAccessDeniedError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Conversation access denied") from exc
+    return ConversationGroupResponse.from_group(group)
 
 
 @router.post("/v1/agent/stream", response_class=StreamingResponse, tags=["agent"])

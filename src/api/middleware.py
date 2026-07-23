@@ -15,7 +15,7 @@ async def request_logging_middleware(
     """Log an HTTP request with a correlation ID and elapsed execution time."""
     request_id = request.headers.get("x-request-id") or str(uuid4())
     structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(request_id=request_id)
+    structlog.contextvars.bind_contextvars(http_request_id=request_id)
     started = time.perf_counter()
 
     logger.info(

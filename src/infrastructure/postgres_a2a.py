@@ -7,6 +7,11 @@ from domain.a2a import A2AJob, A2AJobStatus, A2AThread
 from domain.conversations import ConversationKey
 from domain.interactions import InteractionDeliveryMode
 
+INSERT_WORKER_CONVERSATION = """
+INSERT INTO conversations (id, user_id, title, version, last_sequence)
+VALUES ($1, $2, 'Conversación interna', 0, 0)
+"""
+
 INSERT_THREAD = """
 INSERT INTO a2a_threads (
     id, parent_conversation_id, worker_conversation_id, user_id
@@ -19,11 +24,13 @@ VALUES ($1, $2, $3, $4)
 """
 
 SELECT_THREAD = """
-SELECT id, parent_conversation_id, worker_conversation_id, user_id
-FROM a2a_threads
-WHERE id = $1
-  AND parent_conversation_id = $2
-  AND user_id = $3
+SELECT thread.id, thread.parent_conversation_id, thread.worker_conversation_id,
+       parent.user_id
+FROM a2a_threads AS thread
+JOIN conversations AS parent ON parent.id = thread.parent_conversation_id
+WHERE thread.id = $1
+  AND thread.parent_conversation_id = $2
+  AND parent.user_id = $3
 """
 
 SELECT_JOB = """
@@ -38,12 +45,13 @@ SELECT
     j.delivery_mode,
     t.parent_conversation_id,
     t.worker_conversation_id,
-    t.user_id
+    parent.user_id
 FROM a2a_jobs AS j
 JOIN a2a_threads AS t ON t.id = j.thread_id
+JOIN conversations AS parent ON parent.id = t.parent_conversation_id
 WHERE j.id = $1
   AND t.parent_conversation_id = $2
-  AND t.user_id = $3
+  AND parent.user_id = $3
 """
 
 CLAIM_NEXT_JOB = """
@@ -149,9 +157,10 @@ WHERE id = $1 AND worker_id = $2 AND status = 'running'
 """
 
 SELECT_THREAD_FOR_JOB = """
-SELECT parent_conversation_id, worker_conversation_id, user_id
-FROM a2a_threads
-WHERE id = $1
+SELECT thread.parent_conversation_id, thread.worker_conversation_id, parent.user_id
+FROM a2a_threads AS thread
+JOIN conversations AS parent ON parent.id = thread.parent_conversation_id
+WHERE thread.id = $1
 """
 
 
@@ -163,8 +172,13 @@ class PostgresA2AJobRepository(A2AJobRepository):
         self._pool = pool
 
     async def create_thread(self, thread: A2AThread, first_job: A2AJob) -> None:
-        """Insert the thread and first message in one transaction."""
+        """Insert the worker session, relation, and first message atomically."""
         async with self._pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                INSERT_WORKER_CONVERSATION,
+                thread.worker_conversation_id,
+                thread.parent_conversation.user_id,
+            )
             await connection.execute(
                 INSERT_THREAD,
                 thread.thread_id,

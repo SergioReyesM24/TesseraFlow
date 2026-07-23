@@ -6,6 +6,7 @@ from domain.a2a import A2AJob, A2AThread
 from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
+    ConversationGroup,
     ConversationHistoryPage,
     ConversationItem,
     ConversationKey,
@@ -133,8 +134,10 @@ class ConversationRepository(Protocol):
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
-        """Atomically append one complete turn at the expected conversation version."""
+        """Append one complete turn under its application-level correlation ID."""
         ...
 
     async def delete(self, key: ConversationKey) -> bool:
@@ -181,12 +184,16 @@ class ConversationHistoryRepository(Protocol):
         """Load one bounded page without consulting compacted model context."""
         ...
 
+    async def load_group(self, key: ConversationKey) -> ConversationGroup | None:
+        """Project one root chat and its isolated worker conversations."""
+        ...
+
 
 class A2AJobRepository(Protocol):
     """Persist and claim ordered messages exchanged between two agents."""
 
     async def create_thread(self, thread: A2AThread, first_job: A2AJob) -> None:
-        """Atomically create a worker thread and enqueue its initial message."""
+        """Atomically create the worker conversation, thread, and initial message."""
         ...
 
     async def load_thread(

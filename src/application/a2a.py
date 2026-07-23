@@ -35,13 +35,11 @@ class A2AService:
     def __init__(
         self,
         jobs: A2AJobRepository,
-        conversations: ConversationRepository,
         *,
         uid_factory: Callable[[], uuid.UUID] = uuid.uuid4,
     ) -> None:
         """Bind durable stores and an injectable public identifier factory."""
         self._jobs = jobs
-        self._conversations = conversations
         self._uid_factory = uid_factory
 
     async def delegate(
@@ -71,20 +69,24 @@ class A2AService:
             message=message,
             delivery_mode=delivery_mode,
         )
-        await self._conversations.create(worker_key)
-        try:
-            await self._jobs.create_thread(thread, job)
-        except BaseException:
-            try:
-                await asyncio.shield(self._conversations.delete(worker_key))
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "a2a_thread_cleanup_failed",
-                    error_type=type(cleanup_exc).__name__,
-                )
-            raise
-        logger.info("a2a_thread_created", thread_id=thread_id, job_id=job_id)
-        return A2AJobReceipt(thread_id=thread_id, job_id=job_id, status="queued")
+        await self._jobs.create_thread(thread, job)
+        logger.info(
+            "a2a_thread_created",
+            conversation_id=worker_key.conversation_id,
+            parent_conversation_id=parent.conversation_id,
+            worker_conversation_id=worker_key.conversation_id,
+            thread_id=thread_id,
+            job_id=job_id,
+            request_id=job_id,
+            turn_id=job_id,
+        )
+        return A2AJobReceipt(
+            thread_id=thread_id,
+            job_id=job_id,
+            status="queued",
+            parent_conversation_id=parent.conversation_id,
+            worker_conversation_id=worker_key.conversation_id,
+        )
 
     async def continue_thread(
         self,
@@ -107,8 +109,23 @@ class A2AService:
             delivery_mode=delivery_mode,
         )
         await self._jobs.enqueue(job)
-        logger.info("a2a_message_enqueued", thread_id=thread_id, job_id=job.job_id)
-        return A2AJobReceipt(thread_id=thread_id, job_id=job.job_id, status="queued")
+        logger.info(
+            "a2a_message_enqueued",
+            conversation_id=thread.worker_conversation_id,
+            parent_conversation_id=parent.conversation_id,
+            worker_conversation_id=thread.worker_conversation_id,
+            thread_id=thread_id,
+            job_id=job.job_id,
+            request_id=job.job_id,
+            turn_id=job.job_id,
+        )
+        return A2AJobReceipt(
+            thread_id=thread_id,
+            job_id=job.job_id,
+            status="queued",
+            parent_conversation_id=parent.conversation_id,
+            worker_conversation_id=thread.worker_conversation_id,
+        )
 
     async def status(self, parent: ConversationKey, job_id: str) -> A2AJobReport:
         """Return a safe snapshot containing a completed worker answer when available."""
@@ -119,6 +136,8 @@ class A2AService:
             thread_id=job.thread_id,
             job_id=job.job_id,
             status=job.status,
+            parent_conversation_id=job.parent_conversation.conversation_id,
+            worker_conversation_id=job.worker_conversation_id,
             answer=job.answer,
             error_code=job.error_code,
         )
@@ -172,12 +191,21 @@ class A2AWorker:
         job = await self._jobs.claim_next(self._worker_id, lease_seconds)
         if job is None:
             return False
-        logger.info("a2a_job_started", thread_id=job.thread_id, job_id=job.job_id)
-        try:
-            await self._process_job(job)
-        except asyncio.CancelledError:
-            await self._requeue_safely(job.job_id)
-            raise
+        with structlog.contextvars.bound_contextvars(
+            conversation_id=job.worker_conversation_id,
+            parent_conversation_id=job.parent_conversation.conversation_id,
+            worker_conversation_id=job.worker_conversation_id,
+            thread_id=job.thread_id,
+            job_id=job.job_id,
+            request_id=job.job_id,
+            turn_id=job.job_id,
+        ):
+            logger.info("a2a_job_started")
+            try:
+                await self._process_job(job)
+            except asyncio.CancelledError:
+                await self._requeue_safely(job.job_id)
+                raise
         return True
 
     async def _process_job(self, job: A2AJob) -> None:
@@ -204,6 +232,7 @@ class A2AWorker:
                         user_id=job.parent_conversation.user_id,
                     ),
                     source="worker_agent",
+                    turn_id=job.job_id,
                 ),
                 timeout=self._job_timeout_seconds,
             )

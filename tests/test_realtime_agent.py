@@ -142,8 +142,11 @@ class StubConversations:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> Conversation:
         """Append one semantic turn without retaining any raw audio."""
+        del turn_id
         assert conversation == self.conversation
         self.saved_turns.append(turn)
         self.conversation = Conversation(
@@ -166,6 +169,8 @@ class QueueRealtimeModelSession(StubRealtimeModelSession):
         super().__init__([])
         self.events_queue: asyncio.Queue[RealtimeModelEvent | None] = asyncio.Queue()
         self.text_sent = asyncio.Event()
+        self.receive_calls = 0
+        self.subsequent_receive_started = asyncio.Event()
 
     async def send_text(self, text: str) -> None:
         """Capture proactive input and wake the test producer."""
@@ -174,6 +179,9 @@ class QueueRealtimeModelSession(StubRealtimeModelSession):
 
     async def receive(self) -> AsyncIterator[RealtimeModelEvent]:
         """Yield provider events until the test closes the stream."""
+        self.receive_calls += 1
+        if self.receive_calls > 1:
+            self.subsequent_receive_started.set()
         while True:
             event = await self.events_queue.get()
             if event is None:
@@ -536,6 +544,160 @@ async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_ter
             ),
         )
     ]
+
+
+async def test_realtime_disconnect_drains_visible_proactive_turn_before_releasing_claim() -> None:
+    """Persist visible proactive output when the client leaves before its terminal event."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+
+    async with session.lifecycle():
+        stream = session.events()
+        visible_output = asyncio.create_task(anext(stream))
+        async with asyncio.timeout(0.5):
+            await model.text_sent.wait()
+        await model.events_queue.put(
+            RealtimeModelOutputTranscriptDelta(text="El trabajo ha terminado")
+        )
+        assert isinstance(await visible_output, RealtimeOutputTranscriptDelta)
+
+        # The provider terminal is already pending when the client disconnects and
+        # cancels its event consumer.
+        await model.events_queue.put(RealtimeModelTurnCompleted(response_id="realtime-1"))
+        await stream.aclose()
+
+    assert interactions.requeued == []
+    assert interactions.completed == [(command.command_id, interactions.claimed_by)]
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(
+                role="user",
+                content=command.message,
+                source="worker_agent",
+            ),
+            ConversationMessage(
+                role="assistant",
+                content="El trabajo ha terminado",
+                source="assistant",
+            ),
+        )
+    ]
+
+
+async def test_realtime_disconnect_requeues_visible_turn_without_provider_terminal() -> None:
+    """Bound shutdown and avoid persisting an assistant response that never completed."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        proactive_turn_timeout_seconds=0.01,
+        command_reconciliation_seconds=0.01,
+    )
+
+    async with asyncio.timeout(0.5):
+        async with session.lifecycle():
+            stream = session.events()
+            visible_output = asyncio.create_task(anext(stream))
+            await model.text_sent.wait()
+            await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Parcial"))
+            assert isinstance(await visible_output, RealtimeOutputTranscriptDelta)
+            await stream.aclose()
+
+    assert interactions.completed == []
+    assert len(interactions.requeued) == 1
+    assert conversations.saved_turns == []
+
+
+async def test_realtime_drain_propagates_cancellation_after_releasing_claim() -> None:
+    """Release durable state during cancelled shutdown without hiding cancellation."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+
+    async def disconnect_during_drain() -> None:
+        """Expose one delta and then enter lifecycle shutdown without a terminal."""
+        async with session.lifecycle():
+            stream = session.events()
+            visible_output = asyncio.create_task(anext(stream))
+            await model.text_sent.wait()
+            await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Parcial"))
+            assert isinstance(await visible_output, RealtimeOutputTranscriptDelta)
+            await stream.aclose()
+
+    closing = asyncio.create_task(disconnect_during_drain())
+    async with asyncio.timeout(0.5):
+        await model.subsequent_receive_started.wait()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert interactions.completed == []
+    assert len(interactions.requeued) == 1
+    assert conversations.saved_turns == []
 
 
 async def test_realtime_single_writer_serializes_concurrent_audio_commands() -> None:

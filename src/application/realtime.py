@@ -240,11 +240,13 @@ class RealtimeAgentSession:
         self._writer_task: asyncio.Task[None] | None = None
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._lifecycle_active = False
+        self._closing = False
         self._worker_id = f"realtime:{uuid4()}"
         self._idle = asyncio.Event()
         self._idle.set()
         self._command_done = asyncio.Event()
         self._active_command: InteractionCommand | None = None
+        self._active_command_deadline: float | None = None
         self._turn_id: str | None = None
         self._pending_audio_turn_id: str | None = None
         self._source: InteractionSource = "speech_user"
@@ -267,6 +269,7 @@ class RealtimeAgentSession:
     async def lifecycle(self) -> AsyncIterator[None]:
         """Own writer and durable dispatcher tasks for the socket lifetime."""
         self._lifecycle_active = True
+        self._closing = False
         self._ensure_writer()
         if self._interactions is not None and self._notifier is not None:
             self._dispatcher_task = asyncio.create_task(
@@ -467,11 +470,12 @@ class RealtimeAgentSession:
                 *self._turn_items,
                 ConversationMessage(role="assistant", content=answer, source="assistant"),
             )
-            await self._persist_turn(turn)
+            await self._persist_turn(turn, turn_id=turn_id)
         if active_command is not None and active_command.request_id == turn_id:
             assert self._interactions is not None
             await self._interactions.complete(active_command.command_id, self._worker_id)
             self._active_command = None
+            self._active_command_deadline = None
             self._command_done.set()
         self._turn_id = None
         self._reset_turn_buffers()
@@ -484,14 +488,19 @@ class RealtimeAgentSession:
             causation_id=active_command.causation_id if active_command is not None else None,
         )
 
-    async def _persist_turn(self, turn: tuple[ConversationItem, ...]) -> None:
+    async def _persist_turn(
+        self,
+        turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
+    ) -> None:
         """Append against the latest version and retry one concurrent write."""
         for attempt in range(2):
             conversation = await self._conversations.load(self._conversation_key)
             if conversation is None:
                 raise ConversationNotFoundError("Conversation session does not exist")
             try:
-                await self._conversations.save_turn(conversation, turn)
+                await self._conversations.save_turn(conversation, turn, turn_id=turn_id)
             except ConversationConflictError:
                 if attempt == 1:
                     raise
@@ -507,8 +516,10 @@ class RealtimeAgentSession:
         async with self._notifier.subscribe_realtime_commands(
             self._conversation_key.conversation_id
         ) as subscription:
-            while True:
+            while not self._closing:
                 await self._idle.wait()
+                if self._closing:
+                    return
                 checkpoint = subscription.checkpoint()
                 command = await self._interactions.claim_next_realtime(
                     self._conversation_key,
@@ -522,14 +533,23 @@ class RealtimeAgentSession:
                     )
                     continue
                 self._active_command = command
+                self._active_command_deadline = (
+                    asyncio.get_running_loop().time() + self._proactive_turn_timeout_seconds
+                )
                 self._command_done.clear()
+                if self._closing:
+                    await self._requeue_active_command()
+                    return
                 self._begin_turn(command.request_id, source="worker_agent")
                 self._input_parts.append(command.message)
                 try:
                     await self._enqueue("a2a_completion", command.message)
+                    remaining = self._active_command_time_remaining()
+                    if remaining <= 0:
+                        raise TimeoutError
                     await asyncio.wait_for(
                         self._command_done.wait(),
-                        timeout=self._proactive_turn_timeout_seconds,
+                        timeout=remaining,
                     )
                 except asyncio.CancelledError:
                     await self._requeue_active_command()
@@ -652,13 +672,41 @@ class RealtimeAgentSession:
     async def _close_tasks(self) -> None:
         """Stop connection tasks and release any claimed durable command."""
         self._connection_state = "disconnected"
-        await self._requeue_active_command()
-        if self._dispatcher_task is not None:
-            self._dispatcher_task.cancel()
-            await asyncio.gather(self._dispatcher_task, return_exceptions=True)
-        await self._stop_writer()
-        self._dispatcher_task = None
-        self._writer_task = None
+        self._closing = True
+        try:
+            await self._drain_visible_proactive_turn()
+        finally:
+            await self._requeue_active_command()
+            if self._dispatcher_task is not None:
+                self._dispatcher_task.cancel()
+                await asyncio.gather(self._dispatcher_task, return_exceptions=True)
+            await self._stop_writer()
+            self._dispatcher_task = None
+            self._writer_task = None
+
+    async def _drain_visible_proactive_turn(self) -> None:
+        """Finish a response already exposed to the client before closing its session."""
+        command = self._active_command
+        if command is None or not self._turn_has_output:
+            return
+        remaining = self._active_command_time_remaining()
+        if remaining <= 0:
+            return
+        try:
+            async with asyncio.timeout(remaining):
+                async for event in self._model_session.receive():
+                    async for _ in self._handle_model_event(event):
+                        pass
+                    if self._active_command is None:
+                        return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "realtime_visible_turn_drain_failed",
+                command_id=command.command_id,
+                error_type=type(exc).__name__,
+            )
 
     async def _stop_writer(self) -> None:
         """Close the serialized command stream, cancelling only if it cannot drain."""
@@ -691,6 +739,7 @@ class RealtimeAgentSession:
         if command is None or self._interactions is None:
             return
         self._active_command = None
+        self._active_command_deadline = None
         self._command_done.set()
         try:
             await asyncio.shield(self._interactions.requeue(command.command_id, self._worker_id))
@@ -700,6 +749,15 @@ class RealtimeAgentSession:
                 command_id=command.command_id,
                 error_type=type(exc).__name__,
             )
+
+    def _active_command_time_remaining(self) -> float:
+        """Return the bounded time left for the current proactive model turn."""
+        if self._active_command_deadline is None:
+            return 0.0
+        return max(
+            0.0,
+            self._active_command_deadline - asyncio.get_running_loop().time(),
+        )
 
     def _begin_turn(self, turn_id: str, *, source: InteractionSource) -> None:
         """Start a logical turn and discard any response superseded by barge-in."""

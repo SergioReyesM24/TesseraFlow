@@ -269,9 +269,10 @@ class AudioEventAgentService:
         conversation: ConversationKey,
         *,
         source: InteractionSource,
+        turn_id: str,
     ) -> AsyncIterator[AgentAudioDelta | AgentTextDelta | AgentStreamCompleted]:
         """Yield one audio fragment, transcription, and terminal result."""
-        del message, definition, source
+        del message, definition, source, turn_id
         yield AgentAudioDelta(data=b"pcm", mime_type="audio/pcm;rate=24000")
         yield AgentTextDelta(text="Hola")
         yield AgentStreamCompleted(

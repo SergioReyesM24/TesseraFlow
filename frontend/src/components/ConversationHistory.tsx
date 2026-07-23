@@ -1,4 +1,5 @@
 import {
+  Bot,
   ChevronDown,
   Database,
   MessageSquare,
@@ -7,8 +8,13 @@ import {
   Wrench,
 } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import { listConversationSessions, loadConversationHistory } from '../lib/api'
+import {
+  listConversationSessions,
+  loadConversationGroup,
+  loadConversationHistory,
+} from '../lib/api'
 import type {
+  ConversationGroupResponse,
   ConversationHistoryItem,
   ConversationHistoryResponse,
   ConversationListResponse,
@@ -98,7 +104,11 @@ export function ConversationHistory({
 }: ConversationHistoryProps) {
   const [draftSessionUid, setDraftSessionUid] = useState(activeSessionUid)
   const [targetSessionUid, setTargetSessionUid] = useState(activeSessionUid)
+  const [selectedConversationUid, setSelectedConversationUid] = useState(activeSessionUid)
   const [reloadCount, setReloadCount] = useState(0)
+  const [group, setGroup] = useState<ConversationGroupResponse | null>(null)
+  const [groupLoading, setGroupLoading] = useState(true)
+  const [groupError, setGroupError] = useState<string | null>(null)
   const [history, setHistory] = useState<ConversationHistoryResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -126,10 +136,42 @@ export function ConversationHistory({
 
   useEffect(() => {
     const controller = new AbortController()
-    void loadConversationHistory(
+    void loadConversationGroup(
       apiBaseUrl,
       userId,
       targetSessionUid,
+      controller.signal,
+    )
+      .then((nextGroup) => {
+        setGroup(nextGroup)
+        const requestedMember = nextGroup.conversations.find(
+          (member) => member.correlation.conversation_id === targetSessionUid,
+        )
+        setSelectedConversationUid(
+          requestedMember?.correlation.conversation_id ?? nextGroup.root_conversation_id,
+        )
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return
+        setGroup(null)
+        setGroupError(
+          reason instanceof Error
+            ? reason.message
+            : 'No se pudo cargar el grupo de conversaciones.',
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGroupLoading(false)
+      })
+    return () => controller.abort()
+  }, [apiBaseUrl, reloadCount, targetSessionUid, userId])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void loadConversationHistory(
+      apiBaseUrl,
+      userId,
+      selectedConversationUid,
       0,
       50,
       controller.signal,
@@ -144,7 +186,7 @@ export function ConversationHistory({
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [apiBaseUrl, reloadCount, targetSessionUid, userId])
+  }, [apiBaseUrl, reloadCount, selectedConversationUid, userId])
 
   const turns = useMemo(() => {
     const grouped = new Map<string, ConversationHistoryItem[]>()
@@ -163,7 +205,11 @@ export function ConversationHistory({
     if (!next) return
     setLoading(true)
     setError(null)
+    setGroupError(null)
+    setGroupLoading(true)
     setHistory(null)
+    setGroup(null)
+    setSelectedConversationUid(next)
     if (next === targetSessionUid) setReloadCount((value) => value + 1)
     else setTargetSessionUid(next)
   }
@@ -173,9 +219,22 @@ export function ConversationHistory({
     setDraftSessionUid(sessionUid)
     setLoading(true)
     setError(null)
+    setGroupError(null)
+    setGroupLoading(true)
     setHistory(null)
+    setGroup(null)
+    setSelectedConversationUid(sessionUid)
     if (sessionUid === targetSessionUid) setReloadCount((value) => value + 1)
     else setTargetSessionUid(sessionUid)
+  }
+
+  /** Switch between the root and worker histories without merging their records. */
+  const selectConversation = (conversationId: string) => {
+    if (conversationId === selectedConversationUid) return
+    setLoading(true)
+    setError(null)
+    setHistory(null)
+    setSelectedConversationUid(conversationId)
   }
 
   /** Append another page of session headers to the browser. */
@@ -208,7 +267,7 @@ export function ConversationHistory({
       const next = await loadConversationHistory(
         apiBaseUrl,
         userId,
-        targetSessionUid,
+        selectedConversationUid,
         history.next_after_sequence,
       )
       setHistory({ ...next, items: [...history.items, ...next.items] })
@@ -237,8 +296,16 @@ export function ConversationHistory({
               placeholder="UUID de la sesión"
               required
             />
-            <button type="submit" disabled={loading} aria-label="Consultar sesión">
-              {loading ? <RefreshCw className="spin" size={17} /> : <Search size={17} />}
+            <button
+              type="submit"
+              disabled={loading || groupLoading}
+              aria-label="Consultar sesión"
+            >
+              {loading || groupLoading ? (
+                <RefreshCw className="spin" size={17} />
+              ) : (
+                <Search size={17} />
+              )}
               Consultar
             </button>
           </div>
@@ -250,7 +317,7 @@ export function ConversationHistory({
           <aside className="history-session-browser" aria-label="Sesiones del usuario">
             <header>
               <div>
-                <strong>Sesiones</strong>
+                <strong>Sesiones principales</strong>
                 <span>{sessionList?.sessions.length ?? 0} cargadas</span>
               </div>
               {listLoading && <RefreshCw className="spin" size={14} aria-label="Cargando" />}
@@ -263,10 +330,18 @@ export function ConversationHistory({
             <div className="history-session-list">
               {sessionList?.sessions.map((session) => (
                 <button
-                  className={session.session_uid === targetSessionUid ? 'active' : ''}
+                  className={
+                    session.session_uid ===
+                    (group?.root_conversation_id ?? targetSessionUid)
+                      ? 'active'
+                      : ''
+                  }
                   type="button"
                   key={session.session_uid}
-                  aria-pressed={session.session_uid === targetSessionUid}
+                  aria-pressed={
+                    session.session_uid ===
+                    (group?.root_conversation_id ?? targetSessionUid)
+                  }
                   onClick={() => selectSession(session.session_uid)}
                 >
                   <span className="history-list-title">{session.title}</span>
@@ -296,6 +371,7 @@ export function ConversationHistory({
           </aside>
 
           <div className="history-detail">
+            {groupError && <div className="history-error" role="alert">{groupError}</div>}
             {error && <div className="history-error" role="alert">{error}</div>}
             {loading && !history && !error && (
               <div className="history-detail-loading">
@@ -306,23 +382,77 @@ export function ConversationHistory({
 
             {history && (
               <>
+                {group && (
+                  <section
+                    className="history-conversation-group"
+                    aria-label="Conversaciones relacionadas"
+                  >
+                    <header>
+                      <div>
+                        <span className="eyebrow">Conversación de usuario</span>
+                        <strong>Historiales aislados</strong>
+                      </div>
+                      <span>{group.conversations.length} conversaciones</span>
+                    </header>
+                    <div className="history-conversation-tabs">
+                      {group.conversations.map((member, index) => {
+                        const correlation = member.correlation
+                        const isRoot = correlation.parent_conversation_id === null
+                        const isActive =
+                          correlation.conversation_id === selectedConversationUid
+                        return (
+                          <button
+                            className={isActive ? 'active' : ''}
+                            type="button"
+                            key={correlation.conversation_id}
+                            aria-pressed={isActive}
+                            onClick={() => selectConversation(correlation.conversation_id)}
+                          >
+                            <span className="history-conversation-icon" aria-hidden="true">
+                              {isRoot ? <MessageSquare size={16} /> : <Bot size={16} />}
+                            </span>
+                            <span className="history-conversation-copy">
+                              <strong>{isRoot ? 'Principal' : `Agente interno ${index}`}</strong>
+                              <code>{correlation.conversation_id}</code>
+                              {!isRoot && (
+                                <small>
+                                  {member.jobs.length} {member.jobs.length === 1 ? 'job' : 'jobs'}
+                                </small>
+                              )}
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )}
+
                 <div className="history-summary">
-              <div className="history-session-heading">
-                <Database size={20} />
-                <div>
-                  <strong>{history.title}</strong>
-                  <code>{history.session_uid}</code>
-                </div>
-                <span className={`history-status history-status-${history.status}`}>
-                  {history.status}
-                </span>
-              </div>
-              <dl>
-                <div><dt>Versión</dt><dd>{history.version}</dd></div>
-                <div><dt>Última secuencia</dt><dd>{history.last_sequence}</dd></div>
-                <div><dt>Creada</dt><dd>{formatTimestamp(history.created_at)}</dd></div>
-                <div><dt>Último mensaje</dt><dd>{formatTimestamp(history.last_message_at)}</dd></div>
-              </dl>
+                  <div className="history-session-heading">
+                    {history.correlation.parent_conversation_id === null ? (
+                      <Database size={20} />
+                    ) : (
+                      <Bot size={20} />
+                    )}
+                    <div>
+                      <span className="history-session-kind">
+                        {history.correlation.parent_conversation_id === null
+                          ? 'Conversación principal'
+                          : 'Conversación interna aislada'}
+                      </span>
+                      <strong>{history.title}</strong>
+                      <code>{history.session_uid}</code>
+                    </div>
+                    <span className={`history-status history-status-${history.status}`}>
+                      {history.status}
+                    </span>
+                  </div>
+                  <dl>
+                    <div><dt>Versión</dt><dd>{history.version}</dd></div>
+                    <div><dt>Última secuencia</dt><dd>{history.last_sequence}</dd></div>
+                    <div><dt>Creada</dt><dd>{formatTimestamp(history.created_at)}</dd></div>
+                    <div><dt>Último mensaje</dt><dd>{formatTimestamp(history.last_message_at)}</dd></div>
+                  </dl>
                 </div>
 
                 {turns.length === 0 ? (

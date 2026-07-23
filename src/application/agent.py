@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from uuid import uuid4
 
 import structlog
 
@@ -68,6 +69,7 @@ class AgentService:
         conversation_key: ConversationKey,
         *,
         source: InteractionSource = "text_user",
+        turn_id: str | None = None,
     ) -> AgentResult:
         """Continue and persist one owned conversation after a complete model run."""
         conversation = await self._load_conversation(conversation_key)
@@ -129,7 +131,11 @@ class AgentService:
         turn_items.append(
             ConversationMessage(role="assistant", content=result.answer, source="assistant")
         )
-        await self._persist_turn(conversation, tuple(turn_items))
+        await self._persist_turn(
+            conversation,
+            tuple(turn_items),
+            turn_id=turn_id or str(uuid4()),
+        )
         return result
 
     async def stream(
@@ -139,6 +145,7 @@ class AgentService:
         conversation_key: ConversationKey,
         *,
         source: InteractionSource = "text_user",
+        turn_id: str | None = None,
     ) -> AsyncGenerator[AgentStreamEvent, None]:
         """Stream one conversation turn and persist it before terminal success."""
         conversation = await self._load_conversation(conversation_key)
@@ -202,7 +209,11 @@ class AgentService:
                             source="assistant",
                         )
                     )
-                    await self._persist_turn(conversation, tuple(turn_items))
+                    await self._persist_turn(
+                        conversation,
+                        tuple(turn_items),
+                        turn_id=turn_id or str(uuid4()),
+                    )
                     logger.info(
                         "agent_stream_completed",
                         response_id=result.response_id,
@@ -243,6 +254,8 @@ class AgentService:
         self,
         conversation: Conversation,
         turn: tuple[ConversationItem, ...],
+        *,
+        turn_id: str,
     ) -> None:
         """Append one complete model/tool turn and save it with optimistic concurrency."""
-        await self._conversations.save_turn(conversation, turn)
+        await self._conversations.save_turn(conversation, turn, turn_id=turn_id)
