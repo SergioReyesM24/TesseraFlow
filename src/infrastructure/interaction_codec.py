@@ -13,7 +13,9 @@ from domain.turn_events import (
     AgentTextDelta,
     AgentToolCompleted,
     AgentToolStarted,
+    AgentVisualComponent,
 )
+from domain.visuals import visual_presentation_from_payload, visual_presentation_payload
 
 
 def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]:
@@ -40,6 +42,8 @@ def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]
             "error": record.error,
             "duration_ms": record.duration_ms,
         }
+    if isinstance(event, AgentVisualComponent):
+        return "visual_component", visual_presentation_payload(event.presentation)
     if isinstance(event, AgentStreamCompleted):
         result = event.result
         return "completed", {
@@ -57,6 +61,9 @@ def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]
                     "duration_ms": record.duration_ms,
                 }
                 for record in result.tool_calls
+            ],
+            "visual_components": [
+                visual_presentation_payload(component) for component in result.visual_components
             ],
         }
     if isinstance(event, AgentStreamFailed):
@@ -90,16 +97,24 @@ def decode_agent_event(event_type: str, raw: object) -> AgentStreamEvent:
         )
     if event_type == "tool_completed":
         return AgentToolCompleted(record=_decode_tool_record(payload))
+    if event_type == "visual_component":
+        return AgentVisualComponent(presentation=visual_presentation_from_payload(payload))
     if event_type == "completed":
         raw_records = payload.get("tool_calls")
         if not isinstance(raw_records, list):
             raise ValueError("completed tool_calls must be a list")
+        raw_components = payload.get("visual_components", [])
+        if not isinstance(raw_components, list):
+            raise ValueError("completed visual_components must be a list")
         return AgentStreamCompleted(
             result=AgentResult(
                 answer=_required_text(payload, "answer"),
                 response_id=_required_text(payload, "response_id"),
                 conversation_id=_required_text(payload, "conversation_id"),
                 tool_calls=tuple(_decode_tool_record(record) for record in raw_records),
+                visual_components=tuple(
+                    visual_presentation_from_payload(component) for component in raw_components
+                ),
             )
         )
     if event_type == "error":

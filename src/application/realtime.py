@@ -15,7 +15,12 @@ from application.ports import (
     RealtimeModelGateway,
     RealtimeModelSession,
 )
-from application.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
+from application.tools import (
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolRegistry,
+    extend_visual_components,
+)
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationItem, ConversationKey, ConversationMessage
 from domain.interactions import InteractionCommand, InteractionSource
@@ -47,8 +52,10 @@ from domain.realtime import (
     RealtimeToolCompleted,
     RealtimeToolStarted,
     RealtimeTurnCompleted,
+    RealtimeVisualComponent,
 )
 from domain.tools import ToolCallRecord, ToolResult
+from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
 
@@ -258,6 +265,7 @@ class RealtimeAgentSession:
         self._output_parts: list[str] = []
         self._turn_items: list[ConversationItem] = []
         self._records: list[ToolCallRecord] = []
+        self._visual_components: list[VisualPresentation] = []
         self._tool_rounds = 0
 
     @property
@@ -437,7 +445,7 @@ class RealtimeAgentSession:
                 call_id=call.call_id,
                 tool_name=call.tool_name,
             )
-        records, results = await self._tool_executor.execute(
+        execution = await self._tool_executor.execute(
             event.calls,
             self._tools,
             ToolExecutionContext.from_conversation(
@@ -445,12 +453,15 @@ class RealtimeAgentSession:
                 delivery_mode="realtime",
             ),
         )
-        self._records.extend(records)
+        self._records.extend(execution.records)
+        extend_visual_components(self._visual_components, execution.visual_components)
         self._turn_items.extend(event.calls)
-        self._turn_items.extend(results)
-        for record in records:
+        self._turn_items.extend(execution.results)
+        for record in execution.records:
             yield RealtimeToolCompleted(turn_id=turn_id, record=record)
-        await self._enqueue("tool_results", results)
+        for presentation in execution.visual_components:
+            yield RealtimeVisualComponent(turn_id=turn_id, presentation=presentation)
+        await self._enqueue("tool_results", execution.results)
 
     async def _complete_turn(self, turn_id: str, response_id: str) -> RealtimeTurnCompleted:
         """Persist one real provider turn before confirming proactive delivery."""
@@ -463,6 +474,7 @@ class RealtimeAgentSession:
             response_id=response_id,
             conversation_id=self._conversation_key.conversation_id,
             tool_calls=tuple(self._records),
+            visual_components=tuple(self._visual_components),
         )
         if user_text:
             turn = (
@@ -783,6 +795,7 @@ class RealtimeAgentSession:
         self._output_parts = []
         self._turn_items = []
         self._records = []
+        self._visual_components = []
         self._tool_rounds = 0
         self._turn_has_input = False
         self._turn_has_output = False

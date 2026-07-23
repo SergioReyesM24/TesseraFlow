@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 from domain.tools import ToolCallRecord
+from domain.visuals import VisualPresentation
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,3 +21,4 @@ class AgentResult:
     response_id: str
     conversation_id: str
     tool_calls: tuple[ToolCallRecord, ...] = field(default_factory=tuple)
+    visual_components: tuple[VisualPresentation, ...] = field(default_factory=tuple)

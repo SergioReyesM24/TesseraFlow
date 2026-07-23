@@ -596,6 +596,7 @@ El protocolo público utiliza eventos neutrales al proveedor:
 | `text_delta` | Fragmento incremental del texto. |
 | `tool_started` | Una tool validada está a punto de ejecutarse. |
 | `tool_completed` | Resultado, estado, duración y posible error de la tool. |
+| `visual_component` | Componente semántico v1 validado; actualmente gráfica o grupo de métricas. |
 | `completed` | Resultado final; siempre es el último evento exitoso. |
 | `error` | El stream no pudo completarse; los detalles internos quedan en logs. |
 
@@ -615,6 +616,50 @@ producen un evento `error` seguro sin exponer detalles internos.
 
 `POST /v1/agent/stream` continúa disponible temporalmente como transporte SSE de
 compatibilidad. Los nuevos clientes deben usar el WebSocket.
+
+### Componentes visuales
+
+El agente interactivo puede complementar —nunca sustituir— su respuesta textual mediante
+la tool `present_visual`. El backend valida un catálogo deliberadamente pequeño y publica
+un evento neutral al framework:
+
+```json
+{
+  "type": "visual_component",
+  "request_id": "7a655494-7413-42f2-8e7e-77e3c26b0334",
+  "data": {
+    "schema": "tesseraflow.visual",
+    "version": 1,
+    "component_id": "weekly-balance",
+    "fallback_text": "El saldo termina el periodo en 13.275,65 EUR.",
+    "component": {
+      "kind": "chart",
+      "title": "Saldo semanal",
+      "subtitle": "Últimas dos semanas",
+      "chart_type": "line",
+      "x_axis": {"label": "Semana"},
+      "y_axis": {"label": "Saldo", "unit": "EUR"},
+      "series": [
+        {
+          "name": "Saldo al cierre",
+          "points": [
+            {"x": "2026-07-12", "y": 13450.0},
+            {"x": "2026-07-19", "y": 13275.65}
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+La versión 1 permite únicamente gráficas `line`/`bar` y `metric_group`. Los títulos,
+series, métricas y cantidades de puntos tienen límites explícitos; los campos desconocidos,
+números no finitos y tipos no registrados se rechazan. El contrato no acepta HTML, CSS,
+JavaScript, callbacks ni nombres de componentes React. Tanto el WebSocket textual como el
+realtime exponen el mismo evento, y el SSE de compatibilidad utiliza el mismo codec. Un
+cliente que no soporte el tipo o la versión debe mostrar `fallback_text`; la respuesta
+textual completa sigue llegando normalmente.
 
 ### WebSocket speech-to-speech
 

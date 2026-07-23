@@ -4,22 +4,22 @@ Este documento recoge funcionalidades deliberadamente fuera del alcance de la fa
 actual. Su implementación deberá conservar los contratos neutrales al proveedor, el
 aislamiento entre usuarios y la separación entre dominio, aplicación y adaptadores.
 
-## Componentes visuales
+## Evolución de componentes visuales
 
-Permitir que el backend envíe componentes visuales estructurados a un futuro frontend
-como eventos del stream, además de texto y eventos de tools.
+El catálogo v1 actual ya publica eventos neutrales `visual_component`, valida gráficas
+`line`/`bar` y grupos de métricas, conserva un fallback textual y funciona en los
+transportes WebSocket y SSE. Las siguientes extensiones continúan fuera de alcance:
 
-Aspectos que deberá cubrir:
-
-- Definir eventos neutrales como `visual_component` con un esquema versionado.
-- Empezar con un conjunto limitado de componentes permitidos, por ejemplo tablas,
-  tarjetas, avisos, métricas y formularios de confirmación.
-- Validar los payloads en el backend antes de enviarlos.
-- Mantener separada la descripción semántica del componente de su implementación
-  concreta en React, Vue u otro framework.
-- Evitar HTML o JavaScript arbitrario generado por el modelo.
-- Añadir compatibilidad con el WebSocket actual y permitir que clientes sin soporte
-  visual degraden el contenido a texto.
+- Añadir tablas y avisos solo cuando exista un caso de producto que justifique cada
+  semántica, manteniendo límites de filas, columnas y contenido.
+- Diseñar formularios de confirmación como un protocolo de entrada independiente con
+  autorización, expiración, idempotencia y protección frente a dobles envíos.
+- Persistir componentes como elementos canónicos del historial si el frontend debe
+  reconstruirlos después de que el evento del outbox haya sido entregado.
+- Negociar capacidades del cliente cuando sea necesario omitir por completo eventos que
+  no comprende, sin debilitar el fallback textual obligatorio.
+- Incorporar nuevos tipos de gráfica únicamente mediante una nueva variante validada o
+  versión del esquema; no aceptar configuraciones opacas de librerías de frontend.
 
 ## Evolución de la entrega proactiva
 

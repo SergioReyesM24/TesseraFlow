@@ -7,6 +7,7 @@ import pytest
 
 from application.agent import AgentService
 from application.conversations import ConversationConflictError, ConversationNotFoundError
+from application.tools import ToolRegistry
 from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
@@ -27,12 +28,14 @@ from domain.turn_events import (
     AgentTextDelta,
     AgentToolCompleted,
     AgentToolStarted,
+    AgentVisualComponent,
     ModelAudioDelta,
     ModelAudioInterrupted,
     ModelStreamCompleted,
     ModelStreamEvent,
     ModelTextDelta,
 )
+from tools.present_visual import PresentVisualTool
 from tools.registry import build_tool_registry
 
 
@@ -352,6 +355,68 @@ async def test_streams_text_and_tool_lifecycle_events() -> None:
     assert isinstance(events[3], AgentStreamCompleted)
     assert events[3].result.answer == "El resultado es 5."
     assert events[3].result.tool_calls[0].output == {"result": "5"}
+
+
+async def test_streams_visual_component_before_terminal_text_result() -> None:
+    """Expose a validated presentation and retain it in the complete result."""
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(
+                    response_id="resp_visual",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_visual",
+                            tool_name="present_visual",
+                            arguments={
+                                "component_id": "trend",
+                                "fallback_text": "La serie sube de 10 a 12.",
+                                "component": {
+                                    "kind": "chart",
+                                    "title": "Tendencia",
+                                    "subtitle": None,
+                                    "chart_type": "line",
+                                    "x_label": None,
+                                    "y_label": None,
+                                    "y_unit": None,
+                                    "series": [
+                                        {
+                                            "name": "Valor",
+                                            "points": [
+                                                {"x": "A", "y": 10},
+                                                {"x": "B", "y": 12},
+                                            ],
+                                        }
+                                    ],
+                                },
+                            },
+                        ),
+                    ),
+                ),
+                ModelReply(response_id="resp_done", text="La tendencia es ascendente."),
+            ]
+        ]
+    )
+    repository = InMemoryConversationRepository()
+    service = AgentService(gateway, ToolRegistry([PresentVisualTool()]), repository)
+    await repository.create(conversation_key())
+
+    events = [
+        event
+        async for event in service.stream(
+            "Muéstrame la tendencia",
+            agent_definition("present_visual"),
+            conversation_key(),
+        )
+    ]
+
+    assert isinstance(events[0], AgentToolStarted)
+    assert isinstance(events[1], AgentToolCompleted)
+    assert isinstance(events[2], AgentVisualComponent)
+    assert isinstance(events[3], AgentTextDelta)
+    assert isinstance(events[4], AgentStreamCompleted)
+    assert events[4].result.visual_components == (events[2].presentation,)
 
 
 def test_tool_specs_are_provider_neutral_and_closed() -> None:

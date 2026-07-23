@@ -15,6 +15,49 @@ export interface ConversationMessage {
   content: string
   status?: 'streaming' | 'complete' | 'error'
   tools?: ToolActivity[]
+  visuals?: VisualPresentation[]
+}
+
+export interface ChartPoint {
+  x: string
+  y: number
+}
+
+export interface ChartSeries {
+  name: string
+  points: ChartPoint[]
+}
+
+export interface ChartVisualComponent {
+  kind: 'chart'
+  title: string
+  subtitle: string | null
+  chart_type: 'line' | 'bar'
+  x_axis: { label: string | null }
+  y_axis: { label: string | null; unit: string | null }
+  series: ChartSeries[]
+}
+
+export interface MetricVisual {
+  label: string
+  value: string
+  unit: string | null
+  detail: string | null
+}
+
+export interface MetricGroupVisualComponent {
+  kind: 'metric_group'
+  title: string
+  subtitle: string | null
+  metrics: MetricVisual[]
+}
+
+export type VisualComponent = ChartVisualComponent | MetricGroupVisualComponent
+
+export interface VisualPresentation {
+  componentId: string
+  fallbackText: string
+  component: VisualComponent | null
 }
 
 export interface SocketEnvelope {

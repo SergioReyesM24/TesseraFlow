@@ -4,6 +4,7 @@ from tools.a2a import ContinueWorkerTool, DelegateToWorkerTool, WorkerAgentStatu
 from tools.calculator import CalculatorTool
 from tools.current_time import CurrentTimeTool
 from tools.mock_bizum import MockBizumTool
+from tools.present_visual import PresentVisualTool
 from tools.weekly_balance_history import WeeklyBalanceHistoryTool
 
 
@@ -21,5 +22,6 @@ def build_interactive_tool_registry(service: A2AService) -> ToolRegistry:
             DelegateToWorkerTool(service),
             WorkerAgentStatusTool(service),
             ContinueWorkerTool(service),
+            PresentVisualTool(),
         ]
     )

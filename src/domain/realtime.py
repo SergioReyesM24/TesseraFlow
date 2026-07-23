@@ -12,6 +12,7 @@ from typing import Literal, TypeAlias
 from domain.agent import AgentResult
 from domain.interactions import InteractionSource
 from domain.tools import ToolCall, ToolCallRecord
+from domain.visuals import VisualPresentation
 
 # Media sent into the provider session.
 
@@ -194,6 +195,14 @@ class RealtimeToolCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class RealtimeVisualComponent:
+    """Validated semantic component correlated to one realtime turn."""
+
+    turn_id: str
+    presentation: VisualPresentation
+
+
+@dataclass(frozen=True, slots=True)
 class RealtimeTurnCompleted:
     """Close one logical speech turn without closing the realtime session."""
 
@@ -239,6 +248,7 @@ RealtimeAgentEvent: TypeAlias = (
     | RealtimeAudioInterrupted
     | RealtimeToolStarted
     | RealtimeToolCompleted
+    | RealtimeVisualComponent
     | RealtimeTurnCompleted
     | RealtimeActivityStarted
     | RealtimeActivityEnded

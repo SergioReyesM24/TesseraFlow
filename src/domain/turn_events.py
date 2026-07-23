@@ -16,6 +16,7 @@ from typing import TypeAlias
 from domain.agent import AgentResult
 from domain.model import ModelReply
 from domain.tools import ToolCallRecord
+from domain.visuals import VisualPresentation
 
 # Provider gateway events for one finite model response.
 
@@ -91,6 +92,13 @@ class AgentToolCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentVisualComponent:
+    """Validated semantic component ready for a visual-capable consumer."""
+
+    presentation: VisualPresentation
+
+
+@dataclass(frozen=True, slots=True)
 class AgentStreamCompleted:
     """Terminal agent-stream event containing the complete application result."""
 
@@ -111,6 +119,7 @@ AgentStreamEvent: TypeAlias = (
     | AgentAudioInterrupted
     | AgentToolStarted
     | AgentToolCompleted
+    | AgentVisualComponent
     | AgentStreamCompleted
     | AgentStreamFailed
 )

@@ -1,6 +1,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, TypeVar
 
 import structlog
@@ -10,8 +11,10 @@ from domain.conversations import ConversationKey
 from domain.interactions import InteractionDeliveryMode
 from domain.tools import ToolCall, ToolCallRecord, ToolResult, ToolSpec
 from domain.types import JsonObject
+from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
+MAX_VISUAL_COMPONENTS_PER_TURN = 3
 
 
 class ToolArguments(BaseModel):
@@ -21,6 +24,39 @@ class ToolArguments(BaseModel):
 
 
 ArgumentsT = TypeVar("ArgumentsT", bound=ToolArguments)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionOutput:
+    """Tool value returned to the model plus optional public presentations."""
+
+    value: Any
+    visual_components: tuple[VisualPresentation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionBatch:
+    """Ordered results of one concurrently executed model tool-call batch."""
+
+    records: tuple[ToolCallRecord, ...]
+    results: tuple[ToolResult, ...]
+    visual_components: tuple[VisualPresentation, ...]
+
+
+class VisualComponentLimitError(RuntimeError):
+    """Raised when one model turn attempts to overwhelm a visual consumer."""
+
+
+def extend_visual_components(
+    current: list[VisualPresentation],
+    incoming: tuple[VisualPresentation, ...],
+) -> None:
+    """Append presentations while enforcing the per-turn public output bound."""
+    if len(current) + len(incoming) > MAX_VISUAL_COMPONENTS_PER_TURN:
+        raise VisualComponentLimitError(
+            f"Agent turn cannot exceed {MAX_VISUAL_COMPONENTS_PER_TURN} visual components"
+        )
+    current.extend(incoming)
 
 
 class ToolExecutionContext(BaseModel):
@@ -133,25 +169,38 @@ class ToolExecutor:
         calls: tuple[ToolCall, ...],
         tools: ToolRegistry,
         context: ToolExecutionContext,
-    ) -> tuple[tuple[ToolCallRecord, ...], tuple[ToolResult, ...]]:
+    ) -> ToolExecutionBatch:
         """Execute one complete batch concurrently and preserve call ordering."""
         executions = await asyncio.gather(
             *(self._execute_call(call, tools, context) for call in calls)
         )
-        records, results = zip(*executions, strict=True)
-        return tuple(records), tuple(results)
+        records = tuple(execution[0] for execution in executions)
+        results = tuple(execution[1] for execution in executions)
+        visual_components = tuple(
+            component for execution in executions for component in execution[2]
+        )
+        return ToolExecutionBatch(
+            records=records,
+            results=results,
+            visual_components=visual_components,
+        )
 
     async def _execute_call(
         self,
         call: ToolCall,
         tools: ToolRegistry,
         context: ToolExecutionContext,
-    ) -> tuple[ToolCallRecord, ToolResult]:
+    ) -> tuple[ToolCallRecord, ToolResult, tuple[VisualPresentation, ...]]:
         """Measure one invocation and convert expected failures into model results."""
         started = time.perf_counter()
         logger.info("tool_call_started", call_id=call.call_id, tool_name=call.tool_name)
         try:
-            output = await tools.execute(call.tool_name, call.arguments, context)
+            raw_output = await tools.execute(call.tool_name, call.arguments, context)
+            execution = (
+                raw_output
+                if isinstance(raw_output, ToolExecutionOutput)
+                else ToolExecutionOutput(value=raw_output)
+            )
             duration_ms = (time.perf_counter() - started) * 1000
             logger.info(
                 "tool_call_completed",
@@ -165,11 +214,12 @@ class ToolExecutor:
                     tool_name=call.tool_name,
                     arguments=call.arguments,
                     status="success",
-                    output=output,
+                    output=execution.value,
                     error=None,
                     duration_ms=duration_ms,
                 ),
-                ToolResult(call_id=call.call_id, output=output),
+                ToolResult(call_id=call.call_id, output=execution.value),
+                execution.visual_components,
             )
         except Exception as exc:
             duration_ms = (time.perf_counter() - started) * 1000
@@ -192,4 +242,5 @@ class ToolExecutor:
                     duration_ms=duration_ms,
                 ),
                 ToolResult(call_id=call.call_id, error=error_message),
+                (),
             )

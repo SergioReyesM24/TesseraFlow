@@ -13,6 +13,7 @@ from domain.conversations import (
     ConversationMessage,
 )
 from domain.tools import ToolCall, ToolResult
+from domain.visuals import visual_presentation_payload
 
 
 class StreamAgentRequest(BaseModel):
@@ -107,6 +108,7 @@ class AgentCompletedResponse(BaseModel):
     response_id: str
     session_uid: UUID
     tool_calls: list[ToolCallResponse]
+    visual_components: list[dict[str, Any]]
 
     @classmethod
     def from_result(cls, result: AgentResult) -> "AgentCompletedResponse":
@@ -126,6 +128,9 @@ class AgentCompletedResponse(BaseModel):
                     duration_ms=round(record.duration_ms, 2),
                 )
                 for record in result.tool_calls
+            ],
+            visual_components=[
+                visual_presentation_payload(component) for component in result.visual_components
             ],
         )
 

@@ -5,7 +5,12 @@ import structlog
 
 from application.conversations import ConversationNotFoundError
 from application.ports import ConversationRepository, ModelGateway
-from application.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
+from application.tools import (
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolRegistry,
+    extend_visual_components,
+)
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import (
     Conversation,
@@ -23,11 +28,13 @@ from domain.turn_events import (
     AgentTextDelta,
     AgentToolCompleted,
     AgentToolStarted,
+    AgentVisualComponent,
     ModelAudioDelta,
     ModelAudioInterrupted,
     ModelStreamCompleted,
     ModelTextDelta,
 )
+from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
 
@@ -75,6 +82,7 @@ class AgentService:
         conversation = await self._load_conversation(conversation_key)
         selected_tools = self._tools.select(definition.tool_names)
         records: list[ToolCallRecord] = []
+        visual_components: list[VisualPresentation] = []
         turn_items: list[ConversationItem] = [
             ConversationMessage(role="user", content=message, source=source)
         ]
@@ -102,15 +110,16 @@ class AgentService:
                 if not reply.tool_calls:
                     break
 
-                round_records, results = await self._tool_executor.execute(
+                execution = await self._tool_executor.execute(
                     reply.tool_calls,
                     selected_tools,
                     ToolExecutionContext.from_conversation(conversation_key),
                 )
-                records.extend(round_records)
+                records.extend(execution.records)
+                extend_visual_components(visual_components, execution.visual_components)
                 turn_items.extend(reply.tool_calls)
-                turn_items.extend(results)
-                reply = await session.send_tool_results(results)
+                turn_items.extend(execution.results)
+                reply = await session.send_tool_results(execution.results)
             else:
                 if reply.tool_calls:
                     raise ToolRoundsExceededError(
@@ -127,6 +136,7 @@ class AgentService:
             response_id=reply.response_id,
             conversation_id=conversation_key.conversation_id,
             tool_calls=tuple(records),
+            visual_components=tuple(visual_components),
         )
         turn_items.append(
             ConversationMessage(role="assistant", content=result.answer, source="assistant")
@@ -151,6 +161,7 @@ class AgentService:
         conversation = await self._load_conversation(conversation_key)
         selected_tools = self._tools.select(definition.tool_names)
         records: list[ToolCallRecord] = []
+        visual_components: list[VisualPresentation] = []
         turn_items: list[ConversationItem] = [
             ConversationMessage(role="user", content=message, source=source)
         ]
@@ -201,6 +212,7 @@ class AgentService:
                         response_id=completed_reply.response_id,
                         conversation_id=conversation_key.conversation_id,
                         tool_calls=tuple(records),
+                        visual_components=tuple(visual_components),
                     )
                     turn_items.append(
                         ConversationMessage(
@@ -229,17 +241,20 @@ class AgentService:
 
                 for call in completed_reply.tool_calls:
                     yield AgentToolStarted(call_id=call.call_id, tool_name=call.tool_name)
-                round_records, results = await self._tool_executor.execute(
+                execution = await self._tool_executor.execute(
                     completed_reply.tool_calls,
                     selected_tools,
                     ToolExecutionContext.from_conversation(conversation_key),
                 )
-                records.extend(round_records)
+                records.extend(execution.records)
+                extend_visual_components(visual_components, execution.visual_components)
                 turn_items.extend(completed_reply.tool_calls)
-                turn_items.extend(results)
-                for record in round_records:
+                turn_items.extend(execution.results)
+                for record in execution.records:
                     yield AgentToolCompleted(record=record)
-                model_events = session.stream_tool_results(results)
+                for presentation in execution.visual_components:
+                    yield AgentVisualComponent(presentation=presentation)
+                model_events = session.stream_tool_results(execution.results)
 
         raise AssertionError("Unreachable")
 

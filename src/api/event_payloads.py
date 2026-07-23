@@ -11,7 +11,9 @@ from domain.turn_events import (
     AgentTextDelta,
     AgentToolCompleted,
     AgentToolStarted,
+    AgentVisualComponent,
 )
+from domain.visuals import visual_presentation_payload
 
 
 def agent_event_payload(event: AgentStreamEvent) -> tuple[str, dict[str, Any]]:
@@ -39,6 +41,8 @@ def agent_event_payload(event: AgentStreamEvent) -> tuple[str, dict[str, Any]]:
             duration_ms=round(record.duration_ms, 2),
         )
         return "tool_completed", tool_payload.model_dump(mode="json")
+    if isinstance(event, AgentVisualComponent):
+        return "visual_component", visual_presentation_payload(event.presentation)
     if isinstance(event, AgentStreamCompleted):
         completed_payload = AgentCompletedResponse.from_result(event.result)
         return "completed", completed_payload.model_dump(mode="json")

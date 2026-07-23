@@ -13,7 +13,9 @@ from domain.realtime import (
     RealtimeToolCompleted,
     RealtimeToolStarted,
     RealtimeTurnCompleted,
+    RealtimeVisualComponent,
 )
+from domain.visuals import visual_presentation_payload
 
 
 def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, Any]]:
@@ -50,6 +52,11 @@ def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, An
             duration_ms=round(record.duration_ms, 2),
         ).model_dump(mode="json")
         return "tool_completed", {"turn_id": event.turn_id, **payload}
+    if isinstance(event, RealtimeVisualComponent):
+        return "visual_component", {
+            "turn_id": event.turn_id,
+            **visual_presentation_payload(event.presentation),
+        }
     if isinstance(event, RealtimeTurnCompleted):
         return "turn_completed", {
             "turn_id": event.turn_id,
@@ -59,5 +66,9 @@ def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, An
             "source": event.source,
             "job_id": event.job_id,
             "causation_id": event.causation_id,
+            "visual_components": [
+                visual_presentation_payload(component)
+                for component in event.result.visual_components
+            ],
         }
     raise TypeError(f"Unsupported realtime JSON event: {type(event).__name__}")

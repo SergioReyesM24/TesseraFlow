@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { websocketUrl } from '../lib/api'
 import { base64ToArrayBuffer, PcmPlayer } from '../lib/audio'
+import { mergeVisual, parseVisualPresentation } from '../lib/visuals'
 import type {
   ConnectionState,
   ConversationMessage,
@@ -103,6 +104,15 @@ export function useAgentSocket(options: AgentSocketOptions): AgentSocketControll
               status: data.status === 'error' ? 'error' : 'success',
               durationMs: typeof data.duration_ms === 'number' ? data.duration_ms : undefined,
             }),
+          })),
+        )
+      } else if (event.type === 'visual_component') {
+        const visual = parseVisualPresentation(data)
+        if (!visual) return
+        setMessages((current) =>
+          updateAssistantMessage(current, requestId, (message) => ({
+            ...message,
+            visuals: mergeVisual(message.visuals, visual),
           })),
         )
       } else if (event.type === 'completed') {
