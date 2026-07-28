@@ -361,8 +361,9 @@ ni escribe directamente al WebSocket.
 Cada job conserva el `delivery_mode` de la ejecución que lo creó. El
 `ConversationCoordinator` solo reclama comandos `turn_based`; el resultado A2A abre un
 turno nuevo del agente textual y sus eventos se guardan en el outbox antes de entregarse.
-La sesión realtime solo reclama comandos `realtime` de su conversación y propietario,
-cuando no hay un turno o micrófono activo. Si no existe socket, el comando permanece
+La sesión realtime solo reclama comandos `realtime` de su conversación y propietario
+cuando el VAD del proveedor no tiene un turno activo. La captura del micrófono puede seguir
+abierta mientras el usuario está en silencio. Si no existe socket, el comando permanece
 durable hasta la siguiente conexión. Se inyecta el envelope versionado
 `tesseraflow.a2a.result` en la sesión STS, y el claim se confirma únicamente después de
 persistir el evento terminal real del proveedor. Por tanto una finalización realtime no

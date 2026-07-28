@@ -176,7 +176,7 @@ async def test_present_visual_supports_transactions_based_on_savings() -> None:
                         "El ahorro pasa de 10.000,00 EUR a 12.109,16 EUR tras los movimientos."
                     ),
                     "component": {
-                        "kind": "transaction_list",
+                        "kind": "transaction-list",
                         "title": "Últimos movimientos",
                         "subtitle": "Ingresos y gastos sobre el ahorro base",
                         "currency": "EUR",
@@ -212,6 +212,7 @@ async def test_present_visual_supports_transactions_based_on_savings() -> None:
 
     component = batch.visual_components[0].component
     assert isinstance(component, TransactionListComponent)
+    assert component.kind == "transaction_list"
     assert component.base_savings == 10000.0
     assert component.current_savings == 12109.16
     assert component.transactions[0].merchant == "La Tagliatella"

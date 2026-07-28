@@ -79,7 +79,9 @@ class MetricArguments(VisualArguments):
 class MetricGroupArguments(VisualArguments):
     """Small related set of prominent values."""
 
-    kind: Literal["metric_group"]
+    kind: Literal["metric_group", "metric-group"] = Field(
+        description="Component discriminator; prefer metric_group with an underscore"
+    )
     title: str = Field(min_length=1, max_length=120)
     subtitle: str | None = Field(min_length=1, max_length=240)
     metrics: list[MetricArguments] = Field(min_length=1, max_length=6)
@@ -106,7 +108,9 @@ class FinancialTransactionArguments(VisualArguments):
 class TransactionListArguments(VisualArguments):
     """Savings summary with its latest categorized movements."""
 
-    kind: Literal["transaction_list"]
+    kind: Literal["transaction_list", "transaction-list"] = Field(
+        description="Component discriminator; prefer transaction_list with an underscore"
+    )
     title: str = Field(min_length=1, max_length=120)
     subtitle: str | None = Field(min_length=1, max_length=240)
     currency: str = Field(min_length=1, max_length=8)
