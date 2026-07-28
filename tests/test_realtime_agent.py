@@ -222,9 +222,10 @@ class StubInteractionNotifier:
 class StubRealtimeInteractions:
     """Lease one realtime completion and record its terminal transition."""
 
-    def __init__(self, command: InteractionCommand) -> None:
+    def __init__(self, command: InteractionCommand, *, available: bool = True) -> None:
         """Initialize one queued durable command."""
         self.command = command
+        self.available = available
         self.claimed_by: str | None = None
         self.completed: list[tuple[str, str]] = []
         self.requeued: list[tuple[str, str]] = []
@@ -238,7 +239,7 @@ class StubRealtimeInteractions:
         """Lease the command only through its exact conversation ownership key."""
         assert conversation == self.command.conversation
         assert lease_seconds > 0
-        if self.claimed_by is not None or self.command.status != "queued":
+        if not self.available or self.claimed_by is not None or self.command.status != "queued":
             return None
         self.claimed_by = worker_id
         self.command = replace(self.command, status="running", attempt_count=1)
@@ -544,6 +545,149 @@ async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_ter
             ),
         )
     ]
+
+
+async def test_realtime_dispatcher_injects_completion_while_microphone_is_open() -> None:
+    """Treat provider VAD idleness as safe even while capture keeps streaming."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+    await session.start_audio("turn-1")
+
+    async with session.lifecycle():
+        stream = session.events()
+        first_event = asyncio.create_task(anext(stream))
+        async with asyncio.timeout(0.5):
+            await model.text_sent.wait()
+        await model.events_queue.put(
+            RealtimeModelOutputTranscriptDelta(text="El trabajo ha terminado")
+        )
+        await model.events_queue.put(RealtimeModelTurnCompleted(response_id="realtime-1"))
+        assert isinstance(await first_event, RealtimeOutputTranscriptDelta)
+        terminal = await anext(stream)
+        await stream.aclose()
+
+    assert terminal.source == "worker_agent"
+    assert terminal.job_id == "job-1"
+    assert interactions.completed == [(command.command_id, interactions.claimed_by)]
+    assert model.text == [command.message]
+
+
+async def test_realtime_vad_activity_requeues_proactive_turn_for_user_speech() -> None:
+    """Let provider-detected speech interrupt a completion without losing it."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = QueueRealtimeModelSession()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        StubConversations(key),
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+    await session.start_audio("turn-1")
+
+    async with session.lifecycle():
+        stream = session.events()
+        activity_event = asyncio.create_task(anext(stream))
+        async with asyncio.timeout(0.5):
+            await model.text_sent.wait()
+        await model.events_queue.put(RealtimeModelActivityStarted())
+        assert await activity_event == RealtimeActivityStarted(turn_id="turn-1")
+        await stream.aclose()
+
+    assert interactions.completed == []
+    assert len(interactions.requeued) == 1
+    assert interactions.requeued[0][0] == command.command_id
+    assert interactions.requeued[0][1].startswith("realtime:")
+    assert model.text == [command.message]
+
+
+async def test_realtime_activity_end_after_terminal_does_not_create_phantom_turn() -> None:
+    """Deliver queued work when Gemini closes VAD activity after its turn terminal."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command, available=False)
+    model = QueueRealtimeModelSession()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        StubConversations(key),
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+    await session.start_audio("turn-1")
+
+    async with session.lifecycle():
+        stream = session.events()
+        await model.events_queue.put(RealtimeModelActivityStarted())
+        await model.events_queue.put(RealtimeModelInputTranscriptDelta(text="Consulta"))
+        await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Un momento"))
+        await model.events_queue.put(RealtimeModelTurnCompleted(response_id="user-response"))
+        await model.events_queue.put(RealtimeModelActivityEnded())
+        events = [await anext(stream) for _ in range(5)]
+        assert events[-1] == RealtimeActivityEnded(turn_id="turn-1")
+
+        interactions.available = True
+        async with asyncio.timeout(0.5):
+            await model.text_sent.wait()
+        await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Terminado"))
+        await model.events_queue.put(RealtimeModelTurnCompleted(response_id="worker-response"))
+        assert isinstance(await anext(stream), RealtimeOutputTranscriptDelta)
+        terminal = await anext(stream)
+        await stream.aclose()
+
+    assert terminal.source == "worker_agent"
+    assert interactions.completed == [(command.command_id, interactions.claimed_by)]
 
 
 async def test_realtime_disconnect_drains_visible_proactive_turn_before_releasing_claim() -> None:

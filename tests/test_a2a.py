@@ -423,6 +423,7 @@ async def test_interactive_agent_delegates_without_receiving_worker_tools() -> N
         "delegate_to_worker_agent",
         "get_worker_agent_status",
         "continue_worker_agent",
+        "present_visual",
     )
     assert result.answer == "He delegado el trabajo."
     assert result.tool_calls[0].output is not None

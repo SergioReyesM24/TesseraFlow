@@ -315,8 +315,8 @@ transcripciones, tool calls, resultados y respuestas proactivas se guardan por t
 
 ## Protocolo entre agentes
 
-El agente que habla con el usuario no tiene acceso a `calculator`, `current_time` ni a
-otras tools operativas. Solo puede utilizar estas capacidades neutrales:
+El agente que habla con el usuario no tiene acceso a las tools operativas. Solo puede
+utilizar estas capacidades neutrales:
 
 | Tool A2A | Efecto |
 | --- | --- |
@@ -361,8 +361,9 @@ ni escribe directamente al WebSocket.
 Cada job conserva el `delivery_mode` de la ejecución que lo creó. El
 `ConversationCoordinator` solo reclama comandos `turn_based`; el resultado A2A abre un
 turno nuevo del agente textual y sus eventos se guardan en el outbox antes de entregarse.
-La sesión realtime solo reclama comandos `realtime` de su conversación y propietario,
-cuando no hay un turno o micrófono activo. Si no existe socket, el comando permanece
+La sesión realtime solo reclama comandos `realtime` de su conversación y propietario
+cuando el VAD del proveedor no tiene un turno activo. La captura del micrófono puede seguir
+abierta mientras el usuario está en silencio. Si no existe socket, el comando permanece
 durable hasta la siguiente conexión. Se inyecta el envelope versionado
 `tesseraflow.a2a.result` en la sesión STS, y el claim se confirma únicamente después de
 persistir el evento terminal real del proveedor. Por tanto una finalización realtime no
@@ -596,6 +597,7 @@ El protocolo público utiliza eventos neutrales al proveedor:
 | `text_delta` | Fragmento incremental del texto. |
 | `tool_started` | Una tool validada está a punto de ejecutarse. |
 | `tool_completed` | Resultado, estado, duración y posible error de la tool. |
+| `visual_component` | Componente semántico v1 validado: gráfica, métricas o movimientos financieros. |
 | `completed` | Resultado final; siempre es el último evento exitoso. |
 | `error` | El stream no pudo completarse; los detalles internos quedan en logs. |
 
@@ -615,6 +617,52 @@ producen un evento `error` seguro sin exponer detalles internos.
 
 `POST /v1/agent/stream` continúa disponible temporalmente como transporte SSE de
 compatibilidad. Los nuevos clientes deben usar el WebSocket.
+
+### Componentes visuales
+
+El agente interactivo puede complementar —nunca sustituir— su respuesta textual mediante
+la tool `present_visual`. El backend valida un catálogo deliberadamente pequeño y publica
+un evento neutral al framework:
+
+```json
+{
+  "type": "visual_component",
+  "request_id": "7a655494-7413-42f2-8e7e-77e3c26b0334",
+  "data": {
+    "schema": "tesseraflow.visual",
+    "version": 1,
+    "component_id": "weekly-balance",
+    "fallback_text": "El saldo termina el periodo en 13.275,65 EUR.",
+    "component": {
+      "kind": "chart",
+      "title": "Saldo semanal",
+      "subtitle": "Últimas dos semanas",
+      "chart_type": "line",
+      "x_axis": {"label": "Semana"},
+      "y_axis": {"label": "Saldo", "unit": "EUR"},
+      "series": [
+        {
+          "name": "Saldo al cierre",
+          "points": [
+            {"x": "2026-07-12", "y": 13450.0},
+            {"x": "2026-07-19", "y": 13275.65}
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+La versión 1 permite gráficas `line`/`bar`, grupos `metric_group` y listas
+`transaction_list`. Estas últimas muestran ahorro base y actual, ingresos, gastos y
+movimientos con comercio, categoría, cantidad y saldo resultante. Los títulos, series,
+métricas, transacciones y cantidades de puntos tienen límites explícitos; los campos
+desconocidos, números no finitos y tipos no registrados se rechazan. El contrato no acepta
+HTML, CSS, JavaScript, callbacks ni nombres de componentes React. Tanto el WebSocket
+textual como el realtime exponen el mismo evento, y el SSE de compatibilidad utiliza el
+mismo codec. Un cliente que no soporte el tipo o la versión debe mostrar `fallback_text`;
+la respuesta textual completa sigue llegando normalmente.
 
 ### WebSocket speech-to-speech
 
@@ -695,10 +743,9 @@ curl \
 
 | Tool | Capacidad |
 | --- | --- |
-| `calculator` | Suma, resta, multiplica y divide números decimales. |
-| `current_time` | Devuelve fecha y hora para una zona horaria IANA. |
-| `weekly_balance_history` | Espera 5 segundos y devuelve ocho semanas de saldos mock en EUR. |
+| `weekly_balance_history` | Espera 2 segundos y devuelve ocho semanas de saldos mock en EUR. |
 | `send_mock_bizum_to_mom` | Simula un Bizum en EUR al destinatario fijo `Mamá`. |
+| `recent_transactions` | Espera 5 segundos y devuelve los diez últimos movimientos categorizados en EUR. |
 
 `weekly_balance_history` solo está registrada en el worker. Para probar el recorrido
 completo de la doble capa, pide al agente interactivo «devuelve mi historial de saldo
@@ -710,6 +757,11 @@ pero el resultado todavía no se reinyecta automáticamente para que Gemini lo p
 `send_mock_bizum_to_mom` también pertenece exclusivamente al worker. Exige un importe
 positivo, no permite cambiar el destinatario y devuelve un justificante sintético con
 `mock: true`; nunca contacta con un proveedor de pagos ni mueve dinero real.
+
+`recent_transactions` está registrada exclusivamente en el worker, no necesita
+argumentos y devuelve un ahorro base, el ahorro actual y los movimientos del más
+reciente al más antiguo. Cada movimiento incluye fecha, tipo (ingreso o gasto),
+comercio, categoría, cantidad positiva y saldo resultante.
 
 ### Añadir una tool
 

@@ -15,7 +15,12 @@ from application.ports import (
     RealtimeModelGateway,
     RealtimeModelSession,
 )
-from application.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
+from application.tools import (
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolRegistry,
+    extend_visual_components,
+)
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationItem, ConversationKey, ConversationMessage
 from domain.interactions import InteractionCommand, InteractionSource
@@ -47,8 +52,10 @@ from domain.realtime import (
     RealtimeToolCompleted,
     RealtimeToolStarted,
     RealtimeTurnCompleted,
+    RealtimeVisualComponent,
 )
 from domain.tools import ToolCallRecord, ToolResult
+from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
 
@@ -248,6 +255,7 @@ class RealtimeAgentSession:
         self._active_command: InteractionCommand | None = None
         self._active_command_deadline: float | None = None
         self._turn_id: str | None = None
+        self._activity_turn_id: str | None = None
         self._pending_audio_turn_id: str | None = None
         self._source: InteractionSource = "speech_user"
         self._connection_state: RealtimeConnectionState = "connected"
@@ -258,6 +266,7 @@ class RealtimeAgentSession:
         self._output_parts: list[str] = []
         self._turn_items: list[ConversationItem] = []
         self._records: list[ToolCallRecord] = []
+        self._visual_components: list[VisualPresentation] = []
         self._tool_rounds = 0
 
     @property
@@ -283,13 +292,12 @@ class RealtimeAgentSession:
             self._lifecycle_active = False
 
     async def start_audio(self, turn_id: str) -> None:
-        """Begin a logical speech turn and allow subsequent binary PCM frames."""
+        """Open microphone capture and let provider VAD begin the speech turn."""
         if self._accepting_audio:
             raise RealtimeSessionStateError("An audio input stream is already active")
-        if self._turn_id is None:
-            self._begin_turn(turn_id, source="speech_user")
-        else:
-            self._pending_audio_turn_id = turn_id
+        if not turn_id:
+            raise RealtimeSessionStateError("turn_id cannot be empty")
+        self._pending_audio_turn_id = turn_id
         self._accepting_audio = True
         self._refresh_idle()
 
@@ -399,9 +407,7 @@ class RealtimeAgentSession:
                 mime_type=event.mime_type,
             )
         elif isinstance(event, RealtimeModelAudioInterrupted):
-            if self._pending_audio_turn_id is not None:
-                await self._requeue_active_command()
-                self._begin_turn(self._pending_audio_turn_id, source="speech_user")
+            await self._activate_audio_turn_for_input()
             yield RealtimeAudioInterrupted(turn_id=self._ensure_turn_id())
         elif isinstance(event, RealtimeModelToolCall):
             async for tool_event in self._handle_tools(self._ensure_turn_id(), event):
@@ -410,9 +416,18 @@ class RealtimeAgentSession:
             turn_id = self._ensure_turn_id()
             yield await self._complete_turn(turn_id, event.response_id)
         elif isinstance(event, RealtimeModelActivityStarted):
-            yield RealtimeActivityStarted(turn_id=self._ensure_turn_id())
+            await self._activate_audio_turn_for_input()
+            self._activity_turn_id = self._ensure_turn_id()
+            yield RealtimeActivityStarted(turn_id=self._activity_turn_id)
         elif isinstance(event, RealtimeModelActivityEnded):
-            yield RealtimeActivityEnded(turn_id=self._ensure_turn_id())
+            turn_id = (
+                self._activity_turn_id
+                or self._turn_id
+                or self._pending_audio_turn_id
+                or str(uuid4())
+            )
+            self._activity_turn_id = None
+            yield RealtimeActivityEnded(turn_id=turn_id)
         elif isinstance(event, RealtimeModelReconnectRequested):
             self._connection_state = "recovering"
             yield RealtimeReconnectRequested(deadline_seconds=event.deadline_seconds)
@@ -437,7 +452,7 @@ class RealtimeAgentSession:
                 call_id=call.call_id,
                 tool_name=call.tool_name,
             )
-        records, results = await self._tool_executor.execute(
+        execution = await self._tool_executor.execute(
             event.calls,
             self._tools,
             ToolExecutionContext.from_conversation(
@@ -445,12 +460,15 @@ class RealtimeAgentSession:
                 delivery_mode="realtime",
             ),
         )
-        self._records.extend(records)
+        self._records.extend(execution.records)
+        extend_visual_components(self._visual_components, execution.visual_components)
         self._turn_items.extend(event.calls)
-        self._turn_items.extend(results)
-        for record in records:
+        self._turn_items.extend(execution.results)
+        for record in execution.records:
             yield RealtimeToolCompleted(turn_id=turn_id, record=record)
-        await self._enqueue("tool_results", results)
+        for presentation in execution.visual_components:
+            yield RealtimeVisualComponent(turn_id=turn_id, presentation=presentation)
+        await self._enqueue("tool_results", execution.results)
 
     async def _complete_turn(self, turn_id: str, response_id: str) -> RealtimeTurnCompleted:
         """Persist one real provider turn before confirming proactive delivery."""
@@ -463,6 +481,7 @@ class RealtimeAgentSession:
             response_id=response_id,
             conversation_id=self._conversation_key.conversation_id,
             tool_calls=tuple(self._records),
+            visual_components=tuple(self._visual_components),
         )
         if user_text:
             turn = (
@@ -540,7 +559,11 @@ class RealtimeAgentSession:
                 if self._closing:
                     await self._requeue_active_command()
                     return
-                self._begin_turn(command.request_id, source="worker_agent")
+                self._begin_turn(
+                    command.request_id,
+                    source="worker_agent",
+                    preserve_pending_audio=self._accepting_audio,
+                )
                 self._input_parts.append(command.message)
                 try:
                     await self._enqueue("a2a_completion", command.message)
@@ -759,21 +782,31 @@ class RealtimeAgentSession:
             self._active_command_deadline - asyncio.get_running_loop().time(),
         )
 
-    def _begin_turn(self, turn_id: str, *, source: InteractionSource) -> None:
+    def _begin_turn(
+        self,
+        turn_id: str,
+        *,
+        source: InteractionSource,
+        preserve_pending_audio: bool = False,
+    ) -> None:
         """Start a logical turn and discard any response superseded by barge-in."""
         if not turn_id:
             raise RealtimeSessionStateError("turn_id cannot be empty")
         self._turn_id = turn_id
-        self._pending_audio_turn_id = None
+        if not preserve_pending_audio:
+            self._pending_audio_turn_id = None
         self._source = source
         self._reset_turn_buffers()
         self._refresh_idle()
 
     async def _activate_audio_turn_for_input(self) -> None:
-        """Correlate initial or barge-in speech before exposing transcription."""
+        """Let provider activity supersede a proactive turn and correlate speech."""
         if self._pending_audio_turn_id is not None:
             await self._requeue_active_command()
             self._begin_turn(self._pending_audio_turn_id, source="speech_user")
+        elif self._active_command is not None:
+            await self._requeue_active_command()
+            self._begin_turn(str(uuid4()), source="speech_user")
         elif self._turn_id is None or self._turn_has_output:
             self._begin_turn(str(uuid4()), source="speech_user")
 
@@ -783,13 +816,14 @@ class RealtimeAgentSession:
         self._output_parts = []
         self._turn_items = []
         self._records = []
+        self._visual_components = []
         self._tool_rounds = 0
         self._turn_has_input = False
         self._turn_has_output = False
 
     def _refresh_idle(self) -> None:
-        """Wake the durable dispatcher only at a safe provider input boundary."""
-        if self._turn_id is None and not self._accepting_audio:
+        """Wake the dispatcher when provider VAD has no logical turn in flight."""
+        if self._turn_id is None:
             self._idle.set()
         else:
             self._idle.clear()

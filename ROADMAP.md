@@ -4,22 +4,22 @@ Este documento recoge funcionalidades deliberadamente fuera del alcance de la fa
 actual. Su implementación deberá conservar los contratos neutrales al proveedor, el
 aislamiento entre usuarios y la separación entre dominio, aplicación y adaptadores.
 
-## Componentes visuales
+## Evolución de componentes visuales
 
-Permitir que el backend envíe componentes visuales estructurados a un futuro frontend
-como eventos del stream, además de texto y eventos de tools.
+El catálogo v1 actual ya publica eventos neutrales `visual_component`, valida gráficas
+`line`/`bar` y grupos de métricas, conserva un fallback textual y funciona en los
+transportes WebSocket y SSE. Las siguientes extensiones continúan fuera de alcance:
 
-Aspectos que deberá cubrir:
-
-- Definir eventos neutrales como `visual_component` con un esquema versionado.
-- Empezar con un conjunto limitado de componentes permitidos, por ejemplo tablas,
-  tarjetas, avisos, métricas y formularios de confirmación.
-- Validar los payloads en el backend antes de enviarlos.
-- Mantener separada la descripción semántica del componente de su implementación
-  concreta en React, Vue u otro framework.
-- Evitar HTML o JavaScript arbitrario generado por el modelo.
-- Añadir compatibilidad con el WebSocket actual y permitir que clientes sin soporte
-  visual degraden el contenido a texto.
+- Añadir tablas y avisos solo cuando exista un caso de producto que justifique cada
+  semántica, manteniendo límites de filas, columnas y contenido.
+- Diseñar formularios de confirmación como un protocolo de entrada independiente con
+  autorización, expiración, idempotencia y protección frente a dobles envíos.
+- Persistir componentes como elementos canónicos del historial si el frontend debe
+  reconstruirlos después de que el evento del outbox haya sido entregado.
+- Negociar capacidades del cliente cuando sea necesario omitir por completo eventos que
+  no comprende, sin debilitar el fallback textual obligatorio.
+- Incorporar nuevos tipos de gráfica únicamente mediante una nueva variante validada o
+  versión del esquema; no aceptar configuraciones opacas de librerías de frontend.
 
 ## Evolución de la entrega proactiva
 
@@ -142,10 +142,6 @@ escritor único, backpressure, actividad automática o explícita, recuperación
 cuando el adaptador la soporta y entrega proactiva durable de resultados A2A. Las
 extensiones que continúan fuera de alcance son:
 
-- Añadir WebRTC cuando se necesiten jitter buffers, negociación de codecs, cancelación de
-  eco y transporte adaptativo frente a WebSocket PCM.
-- Definir políticas desplegables de consentimiento, retención de transcripciones y borrado
-  de datos de voz, aunque el audio crudo actual no se almacene.
 - Añadir métricas de latencia hasta el primer audio, interrupciones, duración de sesión,
   bytes descartados y conflictos de persistencia.
 - Probar navegadores y dispositivos reales con cancelación de eco, pérdida de red,
@@ -187,47 +183,6 @@ Aspectos que deberá cubrir:
 - Registrar cada intento sin incluir argumentos o resultados sensibles.
 - Propagar cancelaciones del cliente sin convertirlas en reintentos.
 - Añadir métricas de intentos, recuperación, agotamiento y latencia acumulada.
-
-## Hooks de observabilidad y alertas
-
-Añadir un mecanismo desacoplado para reaccionar ante excepciones personalizadas o
-eventos críticos registrados por la aplicación. El logger deberá producir un evento
-estructurado y uno o varios adaptadores podrán enviarlo por email, webhook, Slack u
-otro canal sin acoplar el dominio al proveedor de notificaciones.
-
-Aspectos que deberá cubrir:
-
-- Definir un puerto como `ErrorEventPublisher` o `AlertSink` independiente del logger y
-  de la API concreta de email.
-- Crear un catálogo explícito de excepciones y severidades que generan alertas; no
-  enviar notificaciones por cualquier error indiscriminadamente.
-- Recopilar `request_id`, `conversation_id`, `session_id` y usuario cuando sea
-  seguro, nombre de la excepción, mensaje sanitizado, stack trace, endpoint, proveedor,
-  modelo y timestamps.
-- Propagar el contexto mediante `structlog.contextvars` para que logger y publisher
-  compartan identificadores de correlación.
-- Aplicar redacción de API keys, tokens, mensajes, argumentos y resultados sensibles
-  antes de construir el evento o adjuntar logs.
-- Ejecutar el envío fuera del camino crítico de la request mediante una cola o tarea
-  controlada, con timeout y política de reintentos propia.
-- Evitar bucles: un fallo al enviar una alerta no deberá generar otra alerta idéntica.
-- Añadir deduplicación, rate limiting y ventanas de agrupación para impedir tormentas
-  de emails ante un fallo repetido.
-- Registrar el resultado del envío sin bloquear ni modificar la excepción original.
-- Permitir múltiples sinks configurables y una implementación `NoOpAlertSink` para
-  entornos donde las alertas estén desactivadas.
-
-Pruebas previstas:
-
-- Mockear el cliente de la API de email o webhook sin realizar comunicaciones reales.
-- Provocar una excepción personalizada y comprobar que se publica exactamente un
-  evento.
-- Verificar que el evento contiene todos los identificadores de correlación y metadatos
-  necesarios.
-- Confirmar que secretos, argumentos de tools y contenido sensible están redactados.
-- Simular timeout y error del proveedor de alertas y comprobar que la respuesta
-  principal no queda bloqueada ni sustituida.
-- Verificar deduplicación y rate limiting para errores repetidos.
 
 ## Criterios transversales
 

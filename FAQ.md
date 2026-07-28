@@ -100,8 +100,8 @@ El job usa `delivery_mode="realtime"`. Al terminar el worker:
 
 1. PostgreSQL actualiza el job y crea un comando `worker_completed` con el mismo modo.
 2. El coordinador turn-based no puede reclamarlo.
-3. Una sesión realtime de la conversación espera a estar sin turno activo y con el
-   micrófono pausado.
+3. Una sesión realtime de la conversación espera a que el VAD del proveedor no tenga un
+   turno activo; el stream del micrófono puede permanecer abierto mientras el usuario calla.
 4. La sesión reclama el comando y envía el resultado A2A al proveedor STS mediante
    `send_text`.
 5. El proveedor genera la respuesta hablada y su transcripción.

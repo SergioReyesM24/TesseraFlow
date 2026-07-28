@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { websocketUrl } from '../lib/api'
 import { MicrophoneCapture, PcmPlayer } from '../lib/audio'
+import { mergeVisual, parseVisualPresentation } from '../lib/visuals'
 import type {
   ConnectionState,
   ConversationMessage,
@@ -130,6 +131,15 @@ export function useRealtimeSocket(
           updateTurnMessage(current, turnId, 'assistant', (message) => ({
             ...message,
             tools: mergeTool(message.tools, tool),
+          })),
+        )
+      } else if (event.type === 'visual_component') {
+        const visual = parseVisualPresentation(data)
+        if (!visual) return
+        setMessages((current) =>
+          updateTurnMessage(current, turnId, 'assistant', (message) => ({
+            ...message,
+            visuals: mergeVisual(message.visuals, visual),
           })),
         )
       } else if (event.type === 'turn_completed') {

@@ -1,6 +1,7 @@
 import { Bot, Check, LoaderCircle, Wrench, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import type { ConversationMessage } from '../types'
+import { VisualPresentation } from './VisualPresentation'
 
 interface MessageListProps {
   messages: ConversationMessage[]
@@ -75,6 +76,9 @@ export function MessageList({
                   <i />
                 </span>
               )}
+              {message.visuals?.map((visual) => (
+                <VisualPresentation key={visual.componentId} presentation={visual} />
+              ))}
               <ToolRow message={message} />
               {message.status === 'error' && <small className="message-error">Error</small>}
             </div>
