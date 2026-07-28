@@ -1,17 +1,20 @@
 from application.a2a import A2AService
 from application.tools import ToolRegistry
 from tools.a2a import ContinueWorkerTool, DelegateToWorkerTool, WorkerAgentStatusTool
-from tools.calculator import CalculatorTool
-from tools.current_time import CurrentTimeTool
 from tools.mock_bizum import MockBizumTool
 from tools.present_visual import PresentVisualTool
+from tools.recent_transactions import RecentTransactionsTool
 from tools.weekly_balance_history import WeeklyBalanceHistoryTool
 
 
 def build_tool_registry() -> ToolRegistry:
     """Build operational tools exposed only to the background worker agent."""
     return ToolRegistry(
-        [CalculatorTool(), CurrentTimeTool(), WeeklyBalanceHistoryTool(), MockBizumTool()]
+        [
+            WeeklyBalanceHistoryTool(),
+            MockBizumTool(),
+            RecentTransactionsTool(),
+        ]
     )
 
 

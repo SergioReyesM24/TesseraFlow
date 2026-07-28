@@ -2,8 +2,10 @@ import type {
   ChartPoint,
   ChartSeries,
   ChartVisualComponent,
+  FinancialTransactionVisual,
   MetricGroupVisualComponent,
   MetricVisual,
+  TransactionListVisualComponent,
   VisualPresentation,
 } from '../types'
 
@@ -24,7 +26,9 @@ export function parseVisualPresentation(data: UnknownObject): VisualPresentation
       ? parseChart(rawComponent)
       : rawComponent.kind === 'metric_group'
         ? parseMetricGroup(rawComponent)
-        : null
+        : rawComponent.kind === 'transaction_list'
+          ? parseTransactionList(rawComponent)
+          : null
   return { componentId, fallbackText, component }
 }
 
@@ -115,6 +119,75 @@ function parseMetric(value: unknown): MetricVisual | null {
   }
 }
 
+/** Validate a financial summary and its bounded movement list. */
+function parseTransactionList(raw: UnknownObject): TransactionListVisualComponent | null {
+  const title = text(raw.title)
+  const currency = text(raw.currency)
+  const baseSavings = finiteNumber(raw.base_savings)
+  const currentSavings = finiteNumber(raw.current_savings)
+  const totalIncome = nonNegativeNumber(raw.total_income)
+  const totalExpenses = nonNegativeNumber(raw.total_expenses)
+  if (
+    !title ||
+    !currency ||
+    baseSavings === null ||
+    currentSavings === null ||
+    totalIncome === null ||
+    totalExpenses === null ||
+    !Array.isArray(raw.transactions) ||
+    raw.transactions.length < 1 ||
+    raw.transactions.length > 50
+  ) {
+    return null
+  }
+  const transactions = raw.transactions.map(parseFinancialTransaction)
+  if (transactions.some((transaction) => transaction === null)) return null
+  return {
+    kind: 'transaction_list',
+    title,
+    subtitle: nullableText(raw.subtitle),
+    currency,
+    base_savings: baseSavings,
+    current_savings: currentSavings,
+    total_income: totalIncome,
+    total_expenses: totalExpenses,
+    transactions: transactions as FinancialTransactionVisual[],
+  }
+}
+
+/** Parse one exact income or expense without deriving monetary values in the client. */
+function parseFinancialTransaction(value: unknown): FinancialTransactionVisual | null {
+  const raw = object(value)
+  if (!raw) return null
+  const bookedAt = text(raw.booked_at)
+  const merchant = text(raw.merchant)
+  const category = text(raw.category)
+  const transactionType =
+    raw.transaction_type === 'income' || raw.transaction_type === 'expense'
+      ? raw.transaction_type
+      : null
+  const amount = positiveNumber(raw.amount)
+  const balanceAfter = finiteNumber(raw.balance_after)
+  if (
+    !bookedAt ||
+    !merchant ||
+    !category ||
+    !transactionType ||
+    amount === null ||
+    balanceAfter === null
+  ) {
+    return null
+  }
+  return {
+    booked_at: bookedAt,
+    merchant,
+    category,
+    transaction_type: transactionType,
+    amount,
+    balance_after: balanceAfter,
+  }
+}
+
 /** Narrow an unknown JSON value to a plain object. */
 function object(value: unknown): UnknownObject | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -130,4 +203,21 @@ function text(value: unknown): string | null {
 /** Accept the nullable text fields produced by the v1 schema. */
 function nullableText(value: unknown): string | null {
   return value === null || value === undefined ? null : text(value)
+}
+
+/** Accept one finite JSON number. */
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** Accept a finite amount that cannot be negative. */
+function nonNegativeNumber(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  return parsed !== null && parsed >= 0 ? parsed : null
+}
+
+/** Accept a strictly positive transaction amount. */
+function positiveNumber(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  return parsed !== null && parsed > 0 ? parsed : null
 }

@@ -12,11 +12,14 @@ from application.tools import (
 )
 from domain.visuals import (
     MAX_CHART_POINTS,
+    MAX_TRANSACTIONS,
     ChartComponent,
     ChartPoint,
     ChartSeries,
+    FinancialTransaction,
     Metric,
     MetricGroupComponent,
+    TransactionListComponent,
     VisualComponent,
     VisualPresentation,
 )
@@ -89,7 +92,35 @@ class MetricGroupArguments(VisualArguments):
         return self
 
 
-ComponentArguments = ChartArguments | MetricGroupArguments
+class FinancialTransactionArguments(VisualArguments):
+    """One income or expense relative to a resulting savings balance."""
+
+    booked_at: str = Field(min_length=1, max_length=40)
+    merchant: str = Field(min_length=1, max_length=120)
+    category: str = Field(min_length=1, max_length=80)
+    transaction_type: Literal["income", "expense"]
+    amount: float = Field(gt=0)
+    balance_after: float
+
+
+class TransactionListArguments(VisualArguments):
+    """Savings summary with its latest categorized movements."""
+
+    kind: Literal["transaction_list"]
+    title: str = Field(min_length=1, max_length=120)
+    subtitle: str | None = Field(min_length=1, max_length=240)
+    currency: str = Field(min_length=1, max_length=8)
+    base_savings: float
+    current_savings: float
+    total_income: float = Field(ge=0)
+    total_expenses: float = Field(ge=0)
+    transactions: list[FinancialTransactionArguments] = Field(
+        min_length=1,
+        max_length=MAX_TRANSACTIONS,
+    )
+
+
+ComponentArguments = ChartArguments | MetricGroupArguments | TransactionListArguments
 
 
 class PresentVisualArguments(ToolArguments):
@@ -115,9 +146,10 @@ class PresentVisualTool(AgentTool[PresentVisualArguments]):
     description = (
         "Presents exact data already available in context as one safe visual component. "
         "Use a line chart for temporal trends with several points, a bar chart for category "
-        "comparisons, or a metric group for a few related headline values. Do not use it for "
-        "a single fact, uncertain data, or as a replacement for a concise textual answer. "
-        "Never invent, interpolate, or transform source values."
+        "comparisons, a metric group for a few related headline values, or a transaction list "
+        "for income and expenses tied to base and current savings. Do not use it for a single "
+        "fact, uncertain data, or as a replacement for a concise textual answer. Never invent, "
+        "interpolate, or transform source values."
     )
     arguments_model: ClassVar[type[PresentVisualArguments]] = PresentVisualArguments
 
@@ -147,7 +179,7 @@ class PresentVisualTool(AgentTool[PresentVisualArguments]):
                     for series in raw_component.series
                 ),
             )
-        else:
+        elif isinstance(raw_component, MetricGroupArguments):
             component = MetricGroupComponent(
                 kind="metric_group",
                 title=raw_component.title,
@@ -160,6 +192,28 @@ class PresentVisualTool(AgentTool[PresentVisualArguments]):
                         detail=metric.detail,
                     )
                     for metric in raw_component.metrics
+                ),
+            )
+        else:
+            component = TransactionListComponent(
+                kind="transaction_list",
+                title=raw_component.title,
+                subtitle=raw_component.subtitle,
+                currency=raw_component.currency,
+                base_savings=raw_component.base_savings,
+                current_savings=raw_component.current_savings,
+                total_income=raw_component.total_income,
+                total_expenses=raw_component.total_expenses,
+                transactions=tuple(
+                    FinancialTransaction(
+                        booked_at=transaction.booked_at,
+                        merchant=transaction.merchant,
+                        category=transaction.category,
+                        transaction_type=transaction.transaction_type,
+                        amount=transaction.amount,
+                        balance_after=transaction.balance_after,
+                    )
+                    for transaction in raw_component.transactions
                 ),
             )
         presentation = VisualPresentation(

@@ -2,12 +2,13 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import ClassVar
 
 import pytest
 
 from application.agent import AgentService
 from application.conversations import ConversationConflictError, ConversationNotFoundError
-from application.tools import ToolRegistry
+from application.tools import AgentTool, ToolArguments, ToolExecutionContext, ToolRegistry
 from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
@@ -184,6 +185,31 @@ class InMemoryConversationRepository:
         return self.conversations.pop(key.conversation_id, None) is not None
 
 
+class SampleToolArguments(ToolArguments):
+    """Inputs for the test-only tool used by agent orchestration tests."""
+
+    result: str
+    error: str | None = None
+
+
+class SampleTool(AgentTool[SampleToolArguments]):
+    """Return a value or a requested error without depending on product tools."""
+
+    name = "sample_tool"
+    description = "Test-only deterministic tool."
+    arguments_model: ClassVar[type[SampleToolArguments]] = SampleToolArguments
+
+    async def execute(
+        self,
+        arguments: SampleToolArguments,
+        context: ToolExecutionContext,
+    ) -> object:
+        del context
+        if arguments.error is not None:
+            raise ValueError(arguments.error)
+        return {"result": arguments.result}
+
+
 def conversation_key(conversation_id: str = "conversation-1") -> ConversationKey:
     return ConversationKey(conversation_id=conversation_id, user_id="user-1")
 
@@ -194,7 +220,7 @@ def build_service(
 ) -> AgentService:
     return AgentService(
         gateway,
-        build_tool_registry(),
+        ToolRegistry([SampleTool()]),
         repository or InMemoryConversationRepository(),
     )
 
@@ -217,8 +243,8 @@ async def test_runs_and_captures_a_tool_call() -> None:
                     tool_calls=(
                         ToolCall(
                             call_id="call_1",
-                            tool_name="calculator",
-                            arguments={"operation": "add", "a": "2.5", "b": "3"},
+                            tool_name="sample_tool",
+                            arguments={"result": "5.5"},
                         ),
                     ),
                 ),
@@ -228,7 +254,7 @@ async def test_runs_and_captures_a_tool_call() -> None:
     )
     repository = InMemoryConversationRepository()
     service = build_service(gateway, repository)
-    definition = agent_definition("calculator")
+    definition = agent_definition("sample_tool")
     await repository.create(conversation_key())
 
     result = await service.run("Suma 2.5 y 3", definition, conversation_key())
@@ -239,7 +265,7 @@ async def test_runs_and_captures_a_tool_call() -> None:
     assert result.tool_calls[0].status == "success"
     assert result.tool_calls[0].output == {"result": "5.5"}
     assert gateway.definitions == [definition]
-    assert [spec.name for spec in gateway.tool_specs[0]] == ["calculator"]
+    assert [spec.name for spec in gateway.tool_specs[0]] == ["sample_tool"]
     assert gateway.sessions[0].tool_result_batches == [
         (ToolResult(call_id="call_1", output={"result": "5.5"}),)
     ]
@@ -247,8 +273,8 @@ async def test_runs_and_captures_a_tool_call() -> None:
         ConversationMessage(role="user", content="Suma 2.5 y 3"),
         ToolCall(
             call_id="call_1",
-            tool_name="calculator",
-            arguments={"operation": "add", "a": "2.5", "b": "3"},
+            tool_name="sample_tool",
+            arguments={"result": "5.5"},
         ),
         ToolResult(call_id="call_1", output={"result": "5.5"}),
         ConversationMessage(
@@ -269,12 +295,12 @@ async def test_returns_tool_errors_to_the_model() -> None:
                     tool_calls=(
                         ToolCall(
                             call_id="call_1",
-                            tool_name="calculator",
-                            arguments={"operation": "divide", "a": "1", "b": "0"},
+                            tool_name="sample_tool",
+                            arguments={"result": "", "error": "Requested failure"},
                         ),
                     ),
                 ),
-                ModelReply(response_id="resp_2", text="No se puede dividir entre cero."),
+                ModelReply(response_id="resp_2", text="La operación ha fallado."),
             ]
         ]
     )
@@ -282,14 +308,12 @@ async def test_returns_tool_errors_to_the_model() -> None:
     service = build_service(gateway, repository)
     await repository.create(conversation_key())
 
-    result = await service.run(
-        "Divide uno entre cero", agent_definition("calculator"), conversation_key()
-    )
+    result = await service.run("Falla", agent_definition("sample_tool"), conversation_key())
 
     assert result.tool_calls[0].status == "error"
-    assert result.tool_calls[0].error == "Cannot divide by zero"
+    assert result.tool_calls[0].error == "Requested failure"
     assert gateway.sessions[0].tool_result_batches == [
-        (ToolResult(call_id="call_1", error="Cannot divide by zero"),)
+        (ToolResult(call_id="call_1", error="Requested failure"),)
     ]
 
 
@@ -328,8 +352,8 @@ async def test_streams_text_and_tool_lifecycle_events() -> None:
                     tool_calls=(
                         ToolCall(
                             call_id="call_1",
-                            tool_name="calculator",
-                            arguments={"operation": "add", "a": "2", "b": "3"},
+                            tool_name="sample_tool",
+                            arguments={"result": "5"},
                         ),
                     ),
                 ),
@@ -344,7 +368,7 @@ async def test_streams_text_and_tool_lifecycle_events() -> None:
     events = [
         event
         async for event in service.stream(
-            "Suma 2 y 3", agent_definition("calculator"), conversation_key()
+            "Ejecuta la operación", agent_definition("sample_tool"), conversation_key()
         )
     ]
 
@@ -423,10 +447,9 @@ def test_tool_specs_are_provider_neutral_and_closed() -> None:
     specs = build_tool_registry().specs
 
     assert [spec.name for spec in specs] == [
-        "calculator",
-        "current_time",
         "weekly_balance_history",
         "send_mock_bizum_to_mom",
+        "recent_transactions",
     ]
     assert all(spec.arguments_schema["additionalProperties"] is False for spec in specs)
     assert all(not hasattr(spec, "strict") for spec in specs)

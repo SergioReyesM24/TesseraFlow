@@ -6,7 +6,7 @@ from tools.weekly_balance_history import (
 )
 
 
-async def test_returns_deterministic_mock_balances_after_five_second_delay() -> None:
+async def test_returns_deterministic_mock_balances_after_two_second_delay() -> None:
     """Expose the complete fixture after requesting the configured artificial delay."""
     delays: list[float] = []
 
@@ -21,7 +21,7 @@ async def test_returns_deterministic_mock_balances_after_five_second_delay() -> 
         ToolExecutionContext(conversation_id="worker-conversation", user_id="user-1"),
     )
 
-    assert delays == [5.0]
+    assert delays == [2.0]
     assert result == {
         "data_source": "mock",
         "account_id": "mock-account-001",

@@ -28,10 +28,10 @@ class WeeklyBalanceHistoryTool(AgentTool[WeeklyBalanceHistoryArguments]):
     name = "weekly_balance_history"
     description = (
         "Returns eight weeks of mock account closing balances in EUR. The lookup takes "
-        "approximately five seconds and is intended for end-to-end worker-agent tests."
+        "approximately two seconds and is intended for end-to-end worker-agent tests."
     )
     arguments_model: ClassVar[type[WeeklyBalanceHistoryArguments]] = WeeklyBalanceHistoryArguments
-    delay_seconds: ClassVar[float] = 5.0
+    delay_seconds: ClassVar[float] = 2.0
 
     def __init__(self, sleeper: Sleeper = asyncio.sleep) -> None:
         """Accept an asynchronous sleeper so tests can avoid wall-clock delays."""

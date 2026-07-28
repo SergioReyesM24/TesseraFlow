@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type {
   ChartVisualComponent,
   MetricGroupVisualComponent,
+  TransactionListVisualComponent,
   VisualPresentation as VisualPresentationData,
 } from '../types'
 
@@ -32,10 +33,100 @@ export function VisualPresentation({ presentation }: VisualPresentationProps) {
     <section className="visual-card" aria-label={component.title}>
       {component.kind === 'chart' ? (
         <Chart component={component} fallbackText={presentation.fallbackText} />
+      ) : component.kind === 'transaction_list' ? (
+        <TransactionList component={component} />
       ) : (
         <MetricGroup component={component} />
       )}
     </section>
+  )
+}
+
+/** Show savings before and after the period plus the exact income and expense rows. */
+function TransactionList({ component }: { component: TransactionListVisualComponent }) {
+  return (
+    <>
+      <VisualHeader title={component.title} subtitle={component.subtitle} />
+      <div className="transaction-summary" aria-label="Resumen del ahorro">
+        <FinancialMetric
+          label="Ahorro base"
+          value={formatMoney(component.base_savings, component.currency)}
+        />
+        <FinancialMetric
+          label="Ahorro actual"
+          value={formatMoney(component.current_savings, component.currency)}
+          emphasis
+        />
+        <FinancialMetric
+          label="Ingresos"
+          value={`+${formatMoney(component.total_income, component.currency)}`}
+          tone="income"
+        />
+        <FinancialMetric
+          label="Gastos"
+          value={`−${formatMoney(component.total_expenses, component.currency)}`}
+          tone="expense"
+        />
+      </div>
+      <div className="transaction-table" role="table" aria-label="Últimos movimientos">
+        <div className="transaction-table-header" role="row">
+          <span role="columnheader">Movimiento</span>
+          <span role="columnheader">Comercio</span>
+          <span role="columnheader">Cantidad</span>
+        </div>
+        {component.transactions.map((transaction, index) => {
+          const isIncome = transaction.transaction_type === 'income'
+          return (
+            <div
+              className="transaction-row"
+              role="row"
+              key={`${transaction.booked_at}-${transaction.merchant}-${index}`}
+              style={{ animationDelay: `${100 + index * 45}ms` }}
+            >
+              <div className="transaction-kind" role="cell">
+                <span className={isIncome ? 'income' : 'expense'}>
+                  {isIncome ? 'Ingreso' : 'Gasto'}
+                </span>
+                <time>{transaction.booked_at.slice(0, 10)}</time>
+              </div>
+              <div className="transaction-merchant" role="cell">
+                <strong>{transaction.merchant}</strong>
+                <span>{transaction.category}</span>
+              </div>
+              <div className="transaction-amount" role="cell">
+                <strong className={isIncome ? 'income' : 'expense'}>
+                  {isIncome ? '+' : '−'}
+                  {formatMoney(transaction.amount, component.currency)}
+                </strong>
+                <span>
+                  Saldo: {formatMoney(transaction.balance_after, component.currency)}
+                </span>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
+/** Render one compact monetary summary value with a semantic tone. */
+function FinancialMetric({
+  label,
+  value,
+  emphasis = false,
+  tone,
+}: {
+  label: string
+  value: string
+  emphasis?: boolean
+  tone?: 'income' | 'expense'
+}) {
+  return (
+    <div className={`financial-metric${emphasis ? ' emphasized' : ''}`}>
+      <span>{label}</span>
+      <strong className={tone}>{value}</strong>
+    </div>
   )
 }
 
@@ -287,6 +378,15 @@ function VisualHeader({ title, subtitle }: { title: string; subtitle: string | n
 /** Keep dense axis labels legible without changing their underlying meaning. */
 function shorten(value: string): string {
   return value.length > 14 ? `${value.slice(0, 12)}…` : value
+}
+
+/** Format exact source money consistently while keeping the supplied currency visible. */
+function formatMoney(value: number, currency: string): string {
+  const formatted = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
+  return `${formatted} ${currency}`
 }
 
 /** Build one exact, series-agnostic tooltip from the X and Y source values. */

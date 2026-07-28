@@ -13,6 +13,7 @@ VISUAL_SCHEMA_VERSION = 1
 MAX_CHART_SERIES = 6
 MAX_CHART_POINTS = 200
 MAX_METRICS = 6
+MAX_TRANSACTIONS = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +114,68 @@ class MetricGroupComponent:
             raise ValueError("metric labels must be unique")
 
 
-VisualComponent: TypeAlias = ChartComponent | MetricGroupComponent
+@dataclass(frozen=True, slots=True)
+class FinancialTransaction:
+    """One monetary movement shown relative to a savings balance."""
+
+    booked_at: str
+    merchant: str
+    category: str
+    transaction_type: Literal["income", "expense"]
+    amount: float
+    balance_after: float
+
+    def __post_init__(self) -> None:
+        """Require bounded labels and finite monetary values."""
+        _require_text(self.booked_at, "transaction booking date", maximum=40)
+        _require_text(self.merchant, "transaction merchant", maximum=120)
+        _require_text(self.category, "transaction category", maximum=80)
+        if self.transaction_type not in ("income", "expense"):
+            raise ValueError("transaction type must be income or expense")
+        if isinstance(self.amount, bool) or not isfinite(self.amount) or self.amount <= 0:
+            raise ValueError("transaction amount must be a positive finite number")
+        if isinstance(self.balance_after, bool) or not isfinite(self.balance_after):
+            raise ValueError("transaction balance must be a finite number")
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionListComponent:
+    """Savings summary followed by a bounded list of income and expenses."""
+
+    kind: Literal["transaction_list"]
+    title: str
+    currency: str
+    base_savings: float
+    current_savings: float
+    total_income: float
+    total_expenses: float
+    transactions: tuple[FinancialTransaction, ...]
+    subtitle: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the financial summary and keep the movement list bounded."""
+        if self.kind != "transaction_list":
+            raise ValueError("transaction list component kind must be transaction_list")
+        _require_text(self.title, "transaction list title", maximum=120)
+        _optional_text(self.subtitle, "transaction list subtitle", maximum=240)
+        _require_text(self.currency, "transaction currency", maximum=8)
+        for name, value in (
+            ("base savings", self.base_savings),
+            ("current savings", self.current_savings),
+            ("total income", self.total_income),
+            ("total expenses", self.total_expenses),
+        ):
+            if isinstance(value, bool) or not isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+        if self.total_income < 0 or self.total_expenses < 0:
+            raise ValueError("transaction totals cannot be negative")
+        if not 1 <= len(self.transactions) <= MAX_TRANSACTIONS:
+            raise ValueError(
+                f"transaction list must contain 1 to {MAX_TRANSACTIONS} transactions"
+            )
+
+
+VisualComponent: TypeAlias = ChartComponent | MetricGroupComponent | TransactionListComponent
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +211,7 @@ def visual_presentation_payload(presentation: VisualPresentation) -> dict[str, o
                 for series in component.series
             ],
         }
-    else:
+    elif isinstance(component, MetricGroupComponent):
         encoded_component = {
             "kind": component.kind,
             "title": component.title,
@@ -162,6 +224,28 @@ def visual_presentation_payload(presentation: VisualPresentation) -> dict[str, o
                     "detail": metric.detail,
                 }
                 for metric in component.metrics
+            ],
+        }
+    else:
+        encoded_component = {
+            "kind": component.kind,
+            "title": component.title,
+            "subtitle": component.subtitle,
+            "currency": component.currency,
+            "base_savings": component.base_savings,
+            "current_savings": component.current_savings,
+            "total_income": component.total_income,
+            "total_expenses": component.total_expenses,
+            "transactions": [
+                {
+                    "booked_at": transaction.booked_at,
+                    "merchant": transaction.merchant,
+                    "category": transaction.category,
+                    "transaction_type": transaction.transaction_type,
+                    "amount": transaction.amount,
+                    "balance_after": transaction.balance_after,
+                }
+                for transaction in component.transactions
             ],
         }
     return {
@@ -187,6 +271,8 @@ def visual_presentation_from_payload(raw: object) -> VisualPresentation:
         decoded = _chart_from_payload(component)
     elif kind == "metric_group":
         decoded = _metric_group_from_payload(component)
+    elif kind == "transaction_list":
+        decoded = _transaction_list_from_payload(component)
     else:
         raise ValueError("visual component kind is unsupported")
     return VisualPresentation(
@@ -254,6 +340,35 @@ def _metric_group_from_payload(component: dict[str, Any]) -> MetricGroupComponen
     )
 
 
+def _transaction_list_from_payload(component: dict[str, Any]) -> TransactionListComponent:
+    """Decode a savings summary and its categorized monetary movements."""
+    raw_transactions = component.get("transactions")
+    if not isinstance(raw_transactions, list):
+        raise ValueError("transactions must be a list")
+    transactions = tuple(
+        FinancialTransaction(
+            booked_at=_text(item, "booked_at"),
+            merchant=_text(item, "merchant"),
+            category=_text(item, "category"),
+            transaction_type=_transaction_type(item.get("transaction_type")),
+            amount=_number(item, "amount"),
+            balance_after=_number(item, "balance_after"),
+        )
+        for item in (_object(raw_item, "transaction") for raw_item in raw_transactions)
+    )
+    return TransactionListComponent(
+        kind="transaction_list",
+        title=_text(component, "title"),
+        subtitle=_optional_payload_text(component, "subtitle"),
+        currency=_text(component, "currency"),
+        base_savings=_number(component, "base_savings"),
+        current_savings=_number(component, "current_savings"),
+        total_income=_number(component, "total_income"),
+        total_expenses=_number(component, "total_expenses"),
+        transactions=transactions,
+    )
+
+
 def _object(raw: object, name: str) -> dict[str, Any]:
     """Narrow an unknown JSON value to an object."""
     if not isinstance(raw, dict):
@@ -275,6 +390,21 @@ def _optional_payload_text(payload: dict[str, Any], name: str) -> str | None:
     if value is not None and not isinstance(value, str):
         raise ValueError(f"{name} must be a string or null")
     return value
+
+
+def _number(payload: dict[str, Any], name: str) -> float:
+    """Read one finite JSON number without accepting booleans."""
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float) or not isfinite(value):
+        raise ValueError(f"{name} must be a finite number")
+    return float(value)
+
+
+def _transaction_type(raw: object) -> Literal["income", "expense"]:
+    """Narrow a monetary movement discriminator."""
+    if raw not in ("income", "expense"):
+        raise ValueError("transaction type must be income or expense")
+    return raw
 
 
 def _require_text(value: str, name: str, *, maximum: int) -> None:

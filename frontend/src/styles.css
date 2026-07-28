@@ -637,6 +637,146 @@ button:disabled {
   line-height: 1.4;
 }
 
+.transaction-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 15px;
+}
+
+.financial-metric {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #e3e8e3;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.financial-metric.emphasized {
+  border-color: #c9ddd3;
+  background: var(--accent-soft);
+}
+
+.financial-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.financial-metric strong {
+  display: block;
+  margin-top: 5px;
+  color: #263129;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.income {
+  color: #287052 !important;
+}
+
+.expense {
+  color: #a44b45 !important;
+}
+
+.transaction-table {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid #e3e7e2;
+  border-radius: 11px;
+  background: #ffffff;
+}
+
+.transaction-table-header,
+.transaction-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) minmax(145px, auto);
+  align-items: center;
+  gap: 12px;
+}
+
+.transaction-table-header {
+  padding: 8px 12px;
+  color: #818880;
+  background: #f4f6f3;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.transaction-table-header span:last-child {
+  text-align: right;
+}
+
+.transaction-row {
+  padding: 11px 12px;
+  border-top: 1px solid #edf0ec;
+  opacity: 0;
+  animation: metric-item-enter 320ms ease-out forwards;
+}
+
+.transaction-kind,
+.transaction-merchant,
+.transaction-amount {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.transaction-kind > span {
+  width: fit-content;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f0f3ef;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.transaction-kind time,
+.transaction-merchant span,
+.transaction-amount span {
+  color: #858c85;
+  font-size: 9px;
+}
+
+.transaction-merchant strong,
+.transaction-amount strong {
+  color: #333a34;
+  font-size: 12px;
+}
+
+.transaction-merchant strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transaction-merchant span {
+  text-transform: capitalize;
+}
+
+.transaction-amount {
+  text-align: right;
+}
+
+@media (max-width: 620px) {
+  .transaction-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .transaction-table-header {
+    display: none;
+  }
+
+  .transaction-row {
+    grid-template-columns: 76px minmax(0, 1fr) minmax(118px, auto);
+    gap: 8px;
+  }
+}
+
 .typing-dots {
   display: flex;
   align-items: center;

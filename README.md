@@ -315,8 +315,8 @@ transcripciones, tool calls, resultados y respuestas proactivas se guardan por t
 
 ## Protocolo entre agentes
 
-El agente que habla con el usuario no tiene acceso a `calculator`, `current_time` ni a
-otras tools operativas. Solo puede utilizar estas capacidades neutrales:
+El agente que habla con el usuario no tiene acceso a las tools operativas. Solo puede
+utilizar estas capacidades neutrales:
 
 | Tool A2A | Efecto |
 | --- | --- |
@@ -596,7 +596,7 @@ El protocolo público utiliza eventos neutrales al proveedor:
 | `text_delta` | Fragmento incremental del texto. |
 | `tool_started` | Una tool validada está a punto de ejecutarse. |
 | `tool_completed` | Resultado, estado, duración y posible error de la tool. |
-| `visual_component` | Componente semántico v1 validado; actualmente gráfica o grupo de métricas. |
+| `visual_component` | Componente semántico v1 validado: gráfica, métricas o movimientos financieros. |
 | `completed` | Resultado final; siempre es el último evento exitoso. |
 | `error` | El stream no pudo completarse; los detalles internos quedan en logs. |
 
@@ -653,13 +653,15 @@ un evento neutral al framework:
 }
 ```
 
-La versión 1 permite únicamente gráficas `line`/`bar` y `metric_group`. Los títulos,
-series, métricas y cantidades de puntos tienen límites explícitos; los campos desconocidos,
-números no finitos y tipos no registrados se rechazan. El contrato no acepta HTML, CSS,
-JavaScript, callbacks ni nombres de componentes React. Tanto el WebSocket textual como el
-realtime exponen el mismo evento, y el SSE de compatibilidad utiliza el mismo codec. Un
-cliente que no soporte el tipo o la versión debe mostrar `fallback_text`; la respuesta
-textual completa sigue llegando normalmente.
+La versión 1 permite gráficas `line`/`bar`, grupos `metric_group` y listas
+`transaction_list`. Estas últimas muestran ahorro base y actual, ingresos, gastos y
+movimientos con comercio, categoría, cantidad y saldo resultante. Los títulos, series,
+métricas, transacciones y cantidades de puntos tienen límites explícitos; los campos
+desconocidos, números no finitos y tipos no registrados se rechazan. El contrato no acepta
+HTML, CSS, JavaScript, callbacks ni nombres de componentes React. Tanto el WebSocket
+textual como el realtime exponen el mismo evento, y el SSE de compatibilidad utiliza el
+mismo codec. Un cliente que no soporte el tipo o la versión debe mostrar `fallback_text`;
+la respuesta textual completa sigue llegando normalmente.
 
 ### WebSocket speech-to-speech
 
@@ -740,10 +742,9 @@ curl \
 
 | Tool | Capacidad |
 | --- | --- |
-| `calculator` | Suma, resta, multiplica y divide números decimales. |
-| `current_time` | Devuelve fecha y hora para una zona horaria IANA. |
-| `weekly_balance_history` | Espera 5 segundos y devuelve ocho semanas de saldos mock en EUR. |
+| `weekly_balance_history` | Espera 2 segundos y devuelve ocho semanas de saldos mock en EUR. |
 | `send_mock_bizum_to_mom` | Simula un Bizum en EUR al destinatario fijo `Mamá`. |
+| `recent_transactions` | Espera 5 segundos y devuelve los diez últimos movimientos categorizados en EUR. |
 
 `weekly_balance_history` solo está registrada en el worker. Para probar el recorrido
 completo de la doble capa, pide al agente interactivo «devuelve mi historial de saldo
@@ -755,6 +756,11 @@ pero el resultado todavía no se reinyecta automáticamente para que Gemini lo p
 `send_mock_bizum_to_mom` también pertenece exclusivamente al worker. Exige un importe
 positivo, no permite cambiar el destinatario y devuelve un justificante sintético con
 `mock: true`; nunca contacta con un proveedor de pagos ni mueve dinero real.
+
+`recent_transactions` está registrada exclusivamente en el worker, no necesita
+argumentos y devuelve un ahorro base, el ahorro actual y los movimientos del más
+reciente al más antiguo. Cada movimiento incluye fecha, tipo (ingreso o gasto),
+comercio, categoría, cantidad positiva y saldo resultante.
 
 ### Añadir una tool
 

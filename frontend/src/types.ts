@@ -52,7 +52,31 @@ export interface MetricGroupVisualComponent {
   metrics: MetricVisual[]
 }
 
-export type VisualComponent = ChartVisualComponent | MetricGroupVisualComponent
+export interface FinancialTransactionVisual {
+  booked_at: string
+  merchant: string
+  category: string
+  transaction_type: 'income' | 'expense'
+  amount: number
+  balance_after: number
+}
+
+export interface TransactionListVisualComponent {
+  kind: 'transaction_list'
+  title: string
+  subtitle: string | null
+  currency: string
+  base_savings: number
+  current_savings: number
+  total_income: number
+  total_expenses: number
+  transactions: FinancialTransactionVisual[]
+}
+
+export type VisualComponent =
+  | ChartVisualComponent
+  | MetricGroupVisualComponent
+  | TransactionListVisualComponent
 
 export interface VisualPresentation {
   componentId: string

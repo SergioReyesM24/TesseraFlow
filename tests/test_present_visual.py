@@ -13,6 +13,7 @@ from domain.visuals import (
     ChartComponent,
     Metric,
     MetricGroupComponent,
+    TransactionListComponent,
     VisualPresentation,
 )
 from tools.present_visual import PresentVisualTool
@@ -158,6 +159,63 @@ async def test_present_visual_supports_bounded_metric_groups() -> None:
 
     assert isinstance(batch.visual_components[0].component, MetricGroupComponent)
     assert len(batch.visual_components[0].component.metrics) == 2
+
+
+async def test_present_visual_supports_transactions_based_on_savings() -> None:
+    """Represent income and expenses together with their base and resulting savings."""
+    executor = ToolExecutor()
+
+    batch = await executor.execute(
+        (
+            ToolCall(
+                call_id="transactions-1",
+                tool_name="present_visual",
+                arguments={
+                    "component_id": "recent-transactions",
+                    "fallback_text": (
+                        "El ahorro pasa de 10.000,00 EUR a 12.109,16 EUR tras los movimientos."
+                    ),
+                    "component": {
+                        "kind": "transaction_list",
+                        "title": "Últimos movimientos",
+                        "subtitle": "Ingresos y gastos sobre el ahorro base",
+                        "currency": "EUR",
+                        "base_savings": 10000.0,
+                        "current_savings": 12109.16,
+                        "total_income": 2450.0,
+                        "total_expenses": 340.84,
+                        "transactions": [
+                            {
+                                "booked_at": "2026-07-22T20:14:00+02:00",
+                                "merchant": "La Tagliatella",
+                                "category": "comida",
+                                "transaction_type": "expense",
+                                "amount": 38.6,
+                                "balance_after": 12109.16,
+                            },
+                            {
+                                "booked_at": "2026-07-17T09:00:00+02:00",
+                                "merchant": "Nómina",
+                                "category": "ingresos",
+                                "transaction_type": "income",
+                                "amount": 2450.0,
+                                "balance_after": 12315.84,
+                            },
+                        ],
+                    },
+                },
+            ),
+        ),
+        ToolRegistry([PresentVisualTool()]),
+        execution_context(),
+    )
+
+    component = batch.visual_components[0].component
+    assert isinstance(component, TransactionListComponent)
+    assert component.base_savings == 10000.0
+    assert component.current_savings == 12109.16
+    assert component.transactions[0].merchant == "La Tagliatella"
+    assert component.transactions[1].transaction_type == "income"
 
 
 def test_visual_output_is_limited_per_turn() -> None:
