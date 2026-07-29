@@ -55,6 +55,21 @@ function mergeTool(tools: ToolActivity[] | undefined, incoming: ToolActivity): T
     : [...current, incoming]
 }
 
+/** Close transcript bubbles whose realtime turn can no longer receive deltas. */
+export function completeStreamingMessages(
+  current: ConversationMessage[],
+  exceptTurnId?: string,
+): ConversationMessage[] {
+  const exceptIds = exceptTurnId
+    ? new Set([`voice-user-${exceptTurnId}`, `voice-assistant-${exceptTurnId}`])
+    : null
+  return current.map((message) =>
+    message.status === 'streaming' && !exceptIds?.has(message.id)
+      ? { ...message, status: 'complete' }
+      : message,
+  )
+}
+
 /** Manage microphone capture, PCM playback and semantic realtime events. */
 export function useRealtimeSocket(
   options: RealtimeSocketOptions,
@@ -170,6 +185,15 @@ export function useRealtimeSocket(
         if (currentTurnRef.current === turnId) currentTurnRef.current = null
       } else if (event.type === 'audio_interrupted') {
         player.clear()
+        setMessages((current) =>
+          updateTurnMessage(current, turnId, 'assistant', (message) => ({
+            ...message,
+            status: 'complete',
+          })),
+        )
+        if (currentTurnRef.current === turnId) currentTurnRef.current = null
+      } else if (event.type === 'activity_started') {
+        setMessages((current) => completeStreamingMessages(current, turnId))
       } else if (event.type === 'reconnecting') {
         readyRef.current = false
         void capture.stop()
@@ -255,6 +279,7 @@ export function useRealtimeSocket(
         void capture.stop()
         setRecording(false)
         setReady(false)
+        setMessages((current) => completeStreamingMessages(current))
         if (disposed) return
         setConnection('disconnected')
         if (closeEvent.code === 1008) {

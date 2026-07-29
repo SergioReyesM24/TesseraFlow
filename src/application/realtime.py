@@ -427,8 +427,8 @@ class RealtimeAgentSession:
                 mime_type=event.mime_type,
             )
         elif isinstance(event, RealtimeModelAudioInterrupted):
-            await self._activate_audio_turn_for_input()
-            yield RealtimeAudioInterrupted(turn_id=self._ensure_turn_id())
+            interrupted_turn_id = await self._activate_audio_turn_for_input()
+            yield RealtimeAudioInterrupted(turn_id=interrupted_turn_id or self._ensure_turn_id())
         elif isinstance(event, RealtimeModelToolCall):
             self._capture_metrics(event.usage)
             async for tool_event in self._handle_tools(self._ensure_turn_id(), event):
@@ -544,6 +544,38 @@ class RealtimeAgentSession:
             job_id=active_command.request_id if active_command is not None else None,
             causation_id=active_command.causation_id if active_command is not None else None,
         )
+
+    async def _persist_interrupted_user_turn(self) -> str | None:
+        """Persist the client-visible prefix of a user turn before discarding it."""
+        turn_id = self._turn_id
+        if turn_id is None or self._source == "worker_agent":
+            return None
+        answer = "".join(self._output_parts).strip()
+        user_text = "".join(self._input_parts).strip()
+        metrics = TurnMetrics(calls=tuple(self._model_calls))
+        if user_text:
+            turn = (
+                ConversationMessage(role="user", content=user_text, source=self._source),
+                *self._turn_items,
+                ConversationMessage(
+                    role="assistant",
+                    content=answer,
+                    source="assistant",
+                    metrics=metrics if metrics.calls else None,
+                ),
+            )
+            await self._persist_turn(turn, turn_id=turn_id)
+        self._turn_id = None
+        self._reset_turn_buffers()
+        self._refresh_idle()
+        logger.info(
+            "realtime_turn_interrupted",
+            turn_id=turn_id,
+            persisted=bool(user_text),
+            input_tokens=metrics.usage.input_tokens,
+            output_tokens=metrics.usage.output_tokens,
+        )
+        return turn_id
 
     def _capture_metrics(self, usage: ModelUsage) -> None:
         """Accumulate each billable realtime response inside its logical turn."""
@@ -742,13 +774,16 @@ class RealtimeAgentSession:
         try:
             await self._drain_visible_proactive_turn()
         finally:
-            await self._requeue_active_command()
-            if self._dispatcher_task is not None:
-                self._dispatcher_task.cancel()
-                await asyncio.gather(self._dispatcher_task, return_exceptions=True)
-            await self._stop_writer()
-            self._dispatcher_task = None
-            self._writer_task = None
+            try:
+                await self._requeue_active_command()
+                await self._persist_interrupted_user_turn()
+            finally:
+                if self._dispatcher_task is not None:
+                    self._dispatcher_task.cancel()
+                    await asyncio.gather(self._dispatcher_task, return_exceptions=True)
+                await self._stop_writer()
+                self._dispatcher_task = None
+                self._writer_task = None
 
     async def _drain_visible_proactive_turn(self) -> None:
         """Finish a response already exposed to the client before closing its session."""
@@ -842,16 +877,24 @@ class RealtimeAgentSession:
         self._reset_turn_buffers()
         self._refresh_idle()
 
-    async def _activate_audio_turn_for_input(self) -> None:
-        """Let provider activity supersede a proactive turn and correlate speech."""
+    async def _activate_audio_turn_for_input(self) -> str | None:
+        """Supersede an active turn, retaining any user response already exposed."""
+        interrupted_turn_id: str | None = None
         if self._pending_audio_turn_id is not None:
-            await self._requeue_active_command()
+            if self._active_command is not None:
+                await self._requeue_active_command()
+            else:
+                interrupted_turn_id = await self._persist_interrupted_user_turn()
             self._begin_turn(self._pending_audio_turn_id, source="speech_user")
         elif self._active_command is not None:
             await self._requeue_active_command()
             self._begin_turn(str(uuid4()), source="speech_user")
-        elif self._turn_id is None or self._turn_has_output:
+        elif self._turn_id is None:
             self._begin_turn(str(uuid4()), source="speech_user")
+        elif self._turn_has_output:
+            interrupted_turn_id = await self._persist_interrupted_user_turn()
+            self._begin_turn(str(uuid4()), source="speech_user")
+        return interrupted_turn_id
 
     def _reset_turn_buffers(self) -> None:
         """Discard connection-local transcript and audit buffers between turns."""

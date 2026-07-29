@@ -30,10 +30,12 @@ from domain.realtime import (
     RealtimeActivityEnded,
     RealtimeActivityStarted,
     RealtimeAudioDelta,
+    RealtimeAudioInterrupted,
     RealtimeInputTranscriptDelta,
     RealtimeModelActivityEnded,
     RealtimeModelActivityStarted,
     RealtimeModelAudioDelta,
+    RealtimeModelAudioInterrupted,
     RealtimeModelEvent,
     RealtimeModelInputTranscriptDelta,
     RealtimeModelOutputTranscriptDelta,
@@ -506,6 +508,55 @@ async def test_late_input_transcript_stays_on_the_turn_that_already_has_output()
     )
 
 
+async def test_realtime_barge_in_persists_visible_partial_turn_before_replacing_it() -> None:
+    """Retain the first exchange when new speech interrupts assistant output."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelInputTranscriptDelta(text="Primera pregunta"),
+            RealtimeModelOutputTranscriptDelta(text="Respuesta parcial"),
+            RealtimeModelAudioInterrupted(),
+            RealtimeModelActivityStarted(),
+            RealtimeModelInputTranscriptDelta(text="Segunda pregunta"),
+            RealtimeModelOutputTranscriptDelta(text="Segunda respuesta"),
+            RealtimeModelTurnCompleted(response_id="response-2"),
+        ]
+    )
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    interrupted = next(event for event in events if isinstance(event, RealtimeAudioInterrupted))
+    assert interrupted.turn_id == "turn-1"
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(
+                role="user",
+                content="Primera pregunta",
+                source="speech_user",
+            ),
+            ConversationMessage(role="assistant", content="Respuesta parcial"),
+        ),
+        (
+            ConversationMessage(
+                role="user",
+                content="Segunda pregunta",
+                source="speech_user",
+            ),
+            ConversationMessage(role="assistant", content="Segunda respuesta"),
+        ),
+    ]
+
+
 async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_terminal() -> None:
     """Use the active STS session, never the turn-based agent, for realtime jobs."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
@@ -781,6 +832,36 @@ async def test_realtime_disconnect_drains_visible_proactive_turn_before_releasin
     ]
 
 
+async def test_realtime_disconnect_persists_visible_user_turn_without_terminal() -> None:
+    """Save the user input and visible assistant prefix when its socket disappears."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    async with session.lifecycle():
+        await session.send_text("turn-1", "Pregunta")
+        stream = session.events()
+        visible_output = asyncio.create_task(anext(stream))
+        await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Respuesta parcial"))
+        assert isinstance(await visible_output, RealtimeOutputTranscriptDelta)
+        await stream.aclose()
+
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(role="user", content="Pregunta", source="text_user"),
+            ConversationMessage(role="assistant", content="Respuesta parcial"),
+        )
+    ]
+
+
 async def test_realtime_disconnect_requeues_visible_turn_without_provider_terminal() -> None:
     """Bound shutdown and avoid persisting an assistant response that never completed."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
@@ -993,9 +1074,7 @@ async def test_realtime_service_accepts_an_alternate_provider_and_rejects_capabi
         await session.end_audio()
 
     assert gateway.options == [supported]
-    assert gateway.model.audio == [
-        AudioChunk(data=b"\x00\x00", mime_type="audio/pcm;rate=8000")
-    ]
+    assert gateway.model.audio == [AudioChunk(data=b"\x00\x00", mime_type="audio/pcm;rate=8000")]
     assert service.capabilities.recovery_mode == "restart"
     with pytest.raises(RealtimeUnsupportedOptionError, match="Barge-in"):
         async with service.open_session(
