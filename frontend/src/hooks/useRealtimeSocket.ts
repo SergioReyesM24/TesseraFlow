@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { websocketUrl } from '../lib/api'
 import { MicrophoneCapture, PcmPlayer } from '../lib/audio'
 import { mergeVisual, parseVisualPresentation } from '../lib/visuals'
+import { parseTurnMetrics } from '../lib/costs'
 import type {
   ConnectionState,
   ConversationMessage,
@@ -158,6 +159,7 @@ export function useRealtimeSocket(
             ...message,
             content: typeof data.answer === 'string' ? data.answer : message.content,
             status: 'complete',
+            metrics: parseTurnMetrics(data.metrics),
           }))
           if (data.source === 'worker_agent') return withAssistant
           return updateTurnMessage(withAssistant, turnId, 'user', (message) => ({

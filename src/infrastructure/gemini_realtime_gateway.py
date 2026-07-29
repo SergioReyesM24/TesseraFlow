@@ -11,6 +11,7 @@ from google.genai import types
 from application.ports import RealtimeModelGateway, RealtimeModelSession
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationItem
+from domain.costs import ModelUsage
 from domain.realtime import (
     AudioChunk,
     RealtimeModelActivityEnded,
@@ -189,6 +190,7 @@ class GeminiRealtimeModelSession(RealtimeModelSession):
         self._connection_context: AbstractAsyncContextManager[genai.live.AsyncSession] | None = None
         self._messages: AsyncIterator[types.LiveServerMessage] | None = None
         self._pending_calls: dict[str, str] = {}
+        self._usage_turn_snapshot = ModelUsage()
         self._resume_handle: str | None = None
         self._ready = asyncio.Event()
         self._send_lock = asyncio.Lock()
@@ -281,6 +283,11 @@ class GeminiRealtimeModelSession(RealtimeModelSession):
                 yield RealtimeModelReconnected(resumed=True)
                 continue
 
+            if message.usage_metadata is not None:
+                # Gemini may emit periodic, cumulative usage snapshots for the
+                # current model turn. Keep only the latest one; they are not deltas.
+                self._usage_turn_snapshot = self._normalize_usage(message.usage_metadata)
+
             activity = message.voice_activity
             if activity is not None:
                 if activity.voice_activity_type == types.VoiceActivityType.ACTIVITY_START:
@@ -327,7 +334,60 @@ class GeminiRealtimeModelSession(RealtimeModelSession):
                     yield RealtimeModelToolCall(calls=calls)
 
             if server_content is not None and server_content.turn_complete:
-                yield RealtimeModelTurnCompleted(response_id=str(uuid4()))
+                yield RealtimeModelTurnCompleted(
+                    response_id=str(uuid4()),
+                    usage=self._take_turn_usage(),
+                )
+
+    def _take_turn_usage(self) -> ModelUsage:
+        """Commit the final cumulative snapshot at the Gemini turn boundary."""
+        usage = self._usage_turn_snapshot
+        self._usage_turn_snapshot = ModelUsage()
+        return usage
+
+    @staticmethod
+    def _normalize_usage(usage: types.UsageMetadata) -> ModelUsage:
+        """Translate Gemini prompt, thought, cache, and modality counters."""
+        prompt = int(usage.prompt_token_count or 0)
+        tool_prompt = int(usage.tool_use_prompt_token_count or 0)
+        response = int(usage.response_token_count or 0)
+        thoughts = int(usage.thoughts_token_count or 0)
+        return ModelUsage(
+            input_tokens=prompt + tool_prompt,
+            output_tokens=response + thoughts,
+            cached_input_tokens=int(usage.cached_content_token_count or 0),
+            cached_input_audio_tokens=GeminiRealtimeModelSession._modality_tokens(
+                usage.cache_tokens_details,
+                types.MediaModality.AUDIO,
+            ),
+            reasoning_tokens=thoughts,
+            input_audio_tokens=(
+                GeminiRealtimeModelSession._modality_tokens(
+                    usage.prompt_tokens_details,
+                    types.MediaModality.AUDIO,
+                )
+                + GeminiRealtimeModelSession._modality_tokens(
+                    usage.tool_use_prompt_tokens_details,
+                    types.MediaModality.AUDIO,
+                )
+            ),
+            output_audio_tokens=GeminiRealtimeModelSession._modality_tokens(
+                usage.response_tokens_details,
+                types.MediaModality.AUDIO,
+            ),
+        )
+
+    @staticmethod
+    def _modality_tokens(
+        details: list[types.ModalityTokenCount] | None,
+        modality: types.MediaModality,
+    ) -> int:
+        """Sum one modality from an optional SDK token-detail list."""
+        return sum(
+            int(detail.token_count or 0)
+            for detail in details or []
+            if detail.modality == modality
+        )
 
     async def _send(self, kind: str, payload: object) -> None:
         """Serialize one write and block while session recovery is active."""

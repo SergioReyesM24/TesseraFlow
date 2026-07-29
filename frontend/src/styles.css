@@ -828,6 +828,25 @@ button:disabled {
   color: #9aa099;
 }
 
+.cost-row {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+  color: #667069;
+  font-size: 11px;
+}
+
+.cost-row span {
+  color: #385f48;
+  font-weight: 700;
+}
+
+.cost-row small {
+  color: #9aa099;
+}
+
 .composer-wrap {
   width: min(calc(100% - 40px), 820px);
   flex: 0 0 auto;
@@ -1540,6 +1559,24 @@ button:disabled {
   font-size: 12px;
   line-height: 1.65;
   white-space: pre-wrap;
+}
+
+.history-cost-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid #dfe7df;
+  border-radius: 8px;
+  color: #7a837b;
+  background: #f7faf7;
+  font-size: 10px;
+}
+
+.history-cost-summary strong {
+  color: #385f48;
 }
 
 .history-tool-content {

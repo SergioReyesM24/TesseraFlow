@@ -1,7 +1,8 @@
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
@@ -16,6 +17,64 @@ def load_prompt(filename: str) -> str:
 DEFAULT_AGENT_INSTRUCTIONS = load_prompt("interactive_agent.md")
 DEFAULT_REALTIME_AGENT_INSTRUCTIONS = load_prompt("realtime_agent.md")
 DEFAULT_WORKER_AGENT_INSTRUCTIONS = load_prompt("worker_agent.md")
+
+
+class ModelRateTierSettings(BaseModel):
+    """Input-size tier for models whose rates change with context length."""
+
+    min_input_tokens: int = Field(ge=1)
+    input: Decimal = Field(ge=0)
+    output: Decimal = Field(ge=0)
+    cached_input: Decimal | None = Field(default=None, ge=0)
+    cached_input_audio: Decimal | None = Field(default=None, ge=0)
+    input_audio: Decimal | None = Field(default=None, ge=0)
+    output_audio: Decimal | None = Field(default=None, ge=0)
+
+
+class ModelRateSettings(BaseModel):
+    """Environment-validated price card per million tokens."""
+
+    input: Decimal = Field(ge=0)
+    output: Decimal = Field(ge=0)
+    cached_input: Decimal | None = Field(default=None, ge=0)
+    cached_input_audio: Decimal | None = Field(default=None, ge=0)
+    input_audio: Decimal | None = Field(default=None, ge=0)
+    output_audio: Decimal | None = Field(default=None, ge=0)
+    currency: str = Field(default="USD", min_length=1, max_length=12)
+    tiers: list[ModelRateTierSettings] = Field(default_factory=list)
+
+
+def default_model_pricing() -> dict[str, ModelRateSettings]:
+    """Return EUR reference rates reviewed on 2026-07-29 for project models."""
+    return {
+        "gpt-5-mini": ModelRateSettings(
+            input=Decimal("0.219684"),
+            cached_input=Decimal("0.021968"),
+            output=Decimal("1.757469"),
+            currency="EUR",
+        ),
+        "gpt-5.4": ModelRateSettings(
+            input=Decimal("2.193945"),
+            cached_input=Decimal("0.219394"),
+            output=Decimal("13.163668"),
+            currency="EUR",
+            tiers=[
+                ModelRateTierSettings(
+                    min_input_tokens=272_001,
+                    input=Decimal("4.387889"),
+                    cached_input=Decimal("0.438789"),
+                    output=Decimal("19.745502"),
+                )
+            ],
+        ),
+        "gemini-3.1-flash-live-preview": ModelRateSettings(
+            input=Decimal("0.659051"),
+            input_audio=Decimal("2.636204"),
+            output=Decimal("3.954306"),
+            output_audio=Decimal("10.544815"),
+            currency="EUR",
+        ),
+    }
 
 
 class Settings(BaseSettings):
@@ -41,6 +100,7 @@ class Settings(BaseSettings):
     openai_realtime_language_code: str | None = None
     openai_realtime_reasoning_effort: str | None = None
     worker_agent_model: str = "gpt-5-mini"
+    model_pricing: dict[str, ModelRateSettings] = Field(default_factory=default_model_pricing)
     openai_connect_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     gemini_api_key: str = Field(default="", repr=False)
     gemini_live_api_version: str = "v1beta"

@@ -23,6 +23,7 @@ from application.tools import (
 )
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationItem, ConversationKey, ConversationMessage
+from domain.costs import ModelCallMetrics, ModelCostCalculator, ModelUsage, TurnMetrics
 from domain.interactions import InteractionCommand, InteractionSource
 from domain.realtime import (
     AudioChunk,
@@ -122,6 +123,7 @@ class RealtimeAgentService:
         outbound_enqueue_timeout_seconds: float,
         proactive_turn_timeout_seconds: float,
         command_reconciliation_seconds: float,
+        cost_calculator: ModelCostCalculator | None = None,
     ) -> None:
         """Bind application ports, authorized tools, and bounded session limits."""
         self._model_gateway = model_gateway
@@ -137,6 +139,7 @@ class RealtimeAgentService:
         self._outbound_enqueue_timeout_seconds = outbound_enqueue_timeout_seconds
         self._proactive_turn_timeout_seconds = proactive_turn_timeout_seconds
         self._command_reconciliation_seconds = command_reconciliation_seconds
+        self._cost_calculator = cost_calculator or ModelCostCalculator()
 
     @property
     def capabilities(self) -> RealtimeSessionCapabilities:
@@ -186,6 +189,8 @@ class RealtimeAgentService:
                     selected_tools,
                     self._conversations,
                     conversation_key,
+                    model=definition.model,
+                    cost_calculator=self._cost_calculator,
                     interactions=self._interactions,
                     notifier=self._notifier,
                     activity_detection=options.activity.detection,
@@ -212,6 +217,8 @@ class RealtimeAgentSession:
         conversations: ConversationRepository,
         conversation_key: ConversationKey,
         *,
+        model: str = "unknown",
+        cost_calculator: ModelCostCalculator | None = None,
         max_audio_chunk_bytes: int,
         max_tool_rounds: int,
         interactions: InteractionRepository | None = None,
@@ -229,6 +236,8 @@ class RealtimeAgentSession:
         self._tools = tools
         self._conversations = conversations
         self._conversation_key = conversation_key
+        self._model = model
+        self._cost_calculator = cost_calculator or ModelCostCalculator()
         self._interactions = interactions
         self._notifier = notifier
         self._activity_detection = activity_detection
@@ -270,6 +279,7 @@ class RealtimeAgentSession:
         self._turn_items: list[ConversationItem] = []
         self._records: list[ToolCallRecord] = []
         self._visual_components: list[VisualPresentation] = []
+        self._model_calls: list[ModelCallMetrics] = []
         self._tool_rounds = 0
 
     @property
@@ -420,10 +430,12 @@ class RealtimeAgentSession:
             await self._activate_audio_turn_for_input()
             yield RealtimeAudioInterrupted(turn_id=self._ensure_turn_id())
         elif isinstance(event, RealtimeModelToolCall):
+            self._capture_metrics(event.usage)
             async for tool_event in self._handle_tools(self._ensure_turn_id(), event):
                 yield tool_event
         elif isinstance(event, RealtimeModelTurnCompleted):
             turn_id = self._ensure_turn_id()
+            self._capture_metrics(event.usage)
             yield await self._complete_turn(turn_id, event.response_id)
         elif isinstance(event, RealtimeModelActivityStarted):
             await self._activate_audio_turn_for_input()
@@ -486,18 +498,25 @@ class RealtimeAgentSession:
         user_text = "".join(self._input_parts).strip()
         source = self._source
         active_command = self._active_command
+        metrics = TurnMetrics(calls=tuple(self._model_calls))
         result = AgentResult(
             answer=answer,
             response_id=response_id,
             conversation_id=self._conversation_key.conversation_id,
             tool_calls=tuple(self._records),
             visual_components=tuple(self._visual_components),
+            metrics=metrics,
         )
         if user_text:
             turn = (
                 ConversationMessage(role="user", content=user_text, source=source),
                 *self._turn_items,
-                ConversationMessage(role="assistant", content=answer, source="assistant"),
+                ConversationMessage(
+                    role="assistant",
+                    content=answer,
+                    source="assistant",
+                    metrics=metrics if metrics.calls else None,
+                ),
             )
             await self._persist_turn(turn, turn_id=turn_id)
         if active_command is not None and active_command.request_id == turn_id:
@@ -509,6 +528,15 @@ class RealtimeAgentSession:
         self._turn_id = None
         self._reset_turn_buffers()
         self._refresh_idle()
+        logger.info(
+            "realtime_turn_completed",
+            response_id=response_id,
+            turn_id=turn_id,
+            input_tokens=metrics.usage.input_tokens,
+            output_tokens=metrics.usage.output_tokens,
+            cost_amount=str(metrics.cost.amount) if metrics.cost is not None else None,
+            cost_currency=metrics.cost.currency if metrics.cost is not None else None,
+        )
         return RealtimeTurnCompleted(
             turn_id=turn_id,
             result=result,
@@ -516,6 +544,11 @@ class RealtimeAgentSession:
             job_id=active_command.request_id if active_command is not None else None,
             causation_id=active_command.causation_id if active_command is not None else None,
         )
+
+    def _capture_metrics(self, usage: ModelUsage) -> None:
+        """Accumulate each billable realtime response inside its logical turn."""
+        if usage.total_tokens:
+            self._model_calls.append(self._cost_calculator.metrics(self._model, usage))
 
     async def _persist_turn(
         self,
@@ -827,6 +860,7 @@ class RealtimeAgentSession:
         self._turn_items = []
         self._records = []
         self._visual_components = []
+        self._model_calls = []
         self._tool_rounds = 0
         self._turn_has_input = False
         self._turn_has_output = False

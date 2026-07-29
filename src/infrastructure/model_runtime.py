@@ -19,6 +19,7 @@ from application.realtime import RealtimeAgentService
 from application.tools import ToolRegistry
 from config import Settings
 from domain.agent import AgentDefinition
+from domain.costs import ModelCostCalculator, ModelRates, ModelRateTier
 from infrastructure.gemini_realtime_gateway import GeminiRealtimeGateway
 from infrastructure.openai_gateway import OpenAIResponsesGateway
 from infrastructure.openai_realtime_gateway import OpenAIRealtimeGateway
@@ -141,6 +142,32 @@ def build_model_runtime(
     text_gateway = text_gateways[settings.text_agent_provider]()
     worker_gateway = worker_gateways[settings.worker_provider]()
     realtime_gateway = realtime_gateways[settings.realtime_agent_provider]()
+    cost_calculator = ModelCostCalculator(
+        {
+            model: ModelRates(
+                input=rates.input,
+                output=rates.output,
+                cached_input=rates.cached_input,
+                cached_input_audio=rates.cached_input_audio,
+                input_audio=rates.input_audio,
+                output_audio=rates.output_audio,
+                currency=rates.currency,
+                tiers=tuple(
+                    ModelRateTier(
+                        min_input_tokens=tier.min_input_tokens,
+                        input=tier.input,
+                        output=tier.output,
+                        cached_input=tier.cached_input,
+                        cached_input_audio=tier.cached_input_audio,
+                        input_audio=tier.input_audio,
+                        output_audio=tier.output_audio,
+                    )
+                    for tier in rates.tiers
+                ),
+            )
+            for model, rates in settings.model_pricing.items()
+        }
+    )
 
     text_definition = AgentDefinition(
         model=settings.text_agent_model,
@@ -162,12 +189,14 @@ def build_model_runtime(
         tools=interactive_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
+        cost_calculator=cost_calculator,
     )
     worker_agent_service = AgentService(
         model_gateway=worker_gateway,
         tools=worker_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
+        cost_calculator=cost_calculator,
     )
     realtime_agent_service = RealtimeAgentService(
         model_gateway=realtime_gateway,
@@ -183,6 +212,7 @@ def build_model_runtime(
         outbound_enqueue_timeout_seconds=settings.realtime_outbound_enqueue_timeout_seconds,
         proactive_turn_timeout_seconds=settings.realtime_proactive_turn_timeout_seconds,
         command_reconciliation_seconds=settings.realtime_command_reconciliation_seconds,
+        cost_calculator=cost_calculator,
     )
     return ModelRuntime(
         text_agent=TurnInteractionAgent(text_agent_service, text_definition),

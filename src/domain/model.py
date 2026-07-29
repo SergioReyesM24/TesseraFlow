@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from domain.costs import ModelUsage
 from domain.tools import ToolCall
 
 
@@ -10,3 +11,4 @@ class ModelReply:
     response_id: str
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
+    usage: ModelUsage = ModelUsage()

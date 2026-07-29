@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, TypeAlias
 
+from domain.costs import TurnMetrics
 from domain.tools import ToolCall, ToolResult
 
 
@@ -20,6 +21,7 @@ class ConversationMessage:
     role: Literal["user", "assistant"]
     content: str
     source: Literal["text_user", "speech_user", "worker_agent", "assistant"] | None = None
+    metrics: TurnMetrics | None = None
 
     def __post_init__(self) -> None:
         """Infer and validate provenance without changing provider-facing roles."""
@@ -28,6 +30,8 @@ class ConversationMessage:
             raise ValueError("Assistant messages must use the assistant source")
         if self.role == "user" and source == "assistant":
             raise ValueError("User messages must use an input source")
+        if self.role != "assistant" and self.metrics is not None:
+            raise ValueError("Only assistant messages can carry turn metrics")
         object.__setattr__(self, "source", source)
 
 

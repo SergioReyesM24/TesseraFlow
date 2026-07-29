@@ -19,6 +19,7 @@ import type {
   ConversationHistoryResponse,
   ConversationListResponse,
 } from '../types'
+import { formatModelCost } from '../lib/costs'
 
 interface ConversationHistoryProps {
   apiBaseUrl: string
@@ -71,7 +72,20 @@ function HistoryRecord({ record }: { record: ConversationHistoryItem }) {
         </header>
 
         {payload.type === 'message' && (
-          <p className="history-message-content">{payload.content || 'Respuesta vacía'}</p>
+          <>
+            <p className="history-message-content">{payload.content || 'Respuesta vacía'}</p>
+            {payload.metrics && (
+              <div className="history-cost-summary">
+                <strong>
+                  {payload.metrics.cost
+                    ? formatModelCost(payload.metrics.cost)
+                    : 'Tarifa no configurada'}
+                </strong>
+                <span>{payload.metrics.usage.total_tokens.toLocaleString('es-ES')} tokens</span>
+                <span>{payload.metrics.calls.length} llamadas al modelo</span>
+              </div>
+            )}
+          </>
         )}
         {payload.type === 'tool_call' && (
           <div className="history-tool-content">
@@ -196,6 +210,35 @@ export function ConversationHistory({
       grouped.set(item.turn_id, values)
     }
     return [...grouped.entries()]
+  }, [history])
+
+  const loadedAccounting = useMemo(() => {
+    let tokens = 0
+    let calls = 0
+    let amount = 0
+    let currency: string | null = null
+    let fullyPriced = true
+    let metricTurns = 0
+    for (const item of history?.items ?? []) {
+      const metrics = item.payload.type === 'message' ? item.payload.metrics : null
+      if (!metrics) continue
+      metricTurns += 1
+      tokens += metrics.usage.total_tokens
+      calls += metrics.calls.length
+      if (!metrics.cost) {
+        fullyPriced = false
+        continue
+      }
+      if (currency !== null && currency !== metrics.cost.currency) fullyPriced = false
+      currency ??= metrics.cost.currency
+      amount += metrics.cost.amount
+    }
+    return {
+      tokens,
+      calls,
+      cost:
+        metricTurns > 0 && fullyPriced && currency ? { amount, currency } : null,
+    }
   }, [history])
 
   /** Inspect the requested UUID or refresh when it is already selected. */
@@ -452,6 +495,20 @@ export function ConversationHistory({
                     <div><dt>Última secuencia</dt><dd>{history.last_sequence}</dd></div>
                     <div><dt>Creada</dt><dd>{formatTimestamp(history.created_at)}</dd></div>
                     <div><dt>Último mensaje</dt><dd>{formatTimestamp(history.last_message_at)}</dd></div>
+                    <div>
+                      <dt>Tokens cargados</dt>
+                      <dd>{loadedAccounting.tokens.toLocaleString('es-ES')}</dd>
+                    </div>
+                    <div>
+                      <dt>Coste cargado</dt>
+                      <dd>
+                        {loadedAccounting.cost
+                          ? formatModelCost(loadedAccounting.cost)
+                          : loadedAccounting.calls
+                            ? 'Parcial / sin tarifa'
+                            : '—'}
+                      </dd>
+                    </div>
                   </dl>
                 </div>
 

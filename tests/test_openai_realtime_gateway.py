@@ -185,3 +185,40 @@ async def test_openai_realtime_round_trips_complete_function_calls() -> None:
         },
         {"type": "response.create"},
     ]
+
+
+async def test_openai_realtime_normalizes_text_audio_and_cache_usage() -> None:
+    """Attach billing counters to the neutral realtime turn boundary."""
+    usage = SimpleNamespace(
+        input_tokens=100,
+        output_tokens=40,
+        input_token_details=SimpleNamespace(
+            cached_tokens=30,
+            audio_tokens=60,
+            cached_tokens_details=SimpleNamespace(audio_tokens=10),
+        ),
+        output_token_details=SimpleNamespace(audio_tokens=20),
+    )
+    connection = FakeOpenAIRealtimeConnection(
+        [
+            SimpleNamespace(
+                type="response.done",
+                response=SimpleNamespace(
+                    id="response-usage",
+                    status="completed",
+                    output=[],
+                    usage=usage,
+                ),
+            )
+        ]
+    )
+
+    events = [event async for event in OpenAIRealtimeModelSession(connection).receive()]
+
+    completed = events[0]
+    assert isinstance(completed, RealtimeModelTurnCompleted)
+    assert completed.usage.input_tokens == 100
+    assert completed.usage.cached_input_tokens == 30
+    assert completed.usage.cached_input_audio_tokens == 10
+    assert completed.usage.input_audio_tokens == 60
+    assert completed.usage.output_audio_tokens == 20

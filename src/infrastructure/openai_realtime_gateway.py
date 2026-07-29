@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 from application.ports import RealtimeModelGateway, RealtimeModelSession
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationItem, ConversationMessage
+from domain.costs import ModelUsage
 from domain.realtime import (
     AudioChunk,
     RealtimeModelActivityEnded,
@@ -134,7 +135,7 @@ class OpenAIRealtimeModelSession(RealtimeModelSession):
         self._response_calls: dict[str, dict[str, ToolCall]] = {}
         self._pending_transcriptions: set[str] = set()
         self._transcript_parts: dict[str, list[str]] = {}
-        self._pending_completion_id: str | None = None
+        self._pending_completion: tuple[str, ModelUsage] | None = None
         self._response_active = False
         self._audio_sent_since_boundary = False
 
@@ -327,10 +328,10 @@ class OpenAIRealtimeModelSession(RealtimeModelSession):
         elif transcript and not emitted:
             yield RealtimeModelInputTranscriptDelta(text=transcript)
         self._pending_transcriptions.discard(item_id)
-        if self._pending_completion_id is not None and not self._pending_transcriptions:
-            response_id = self._pending_completion_id
-            self._pending_completion_id = None
-            yield RealtimeModelTurnCompleted(response_id=response_id)
+        if self._pending_completion is not None and not self._pending_transcriptions:
+            response_id, usage = self._pending_completion
+            self._pending_completion = None
+            yield RealtimeModelTurnCompleted(response_id=response_id, usage=usage)
 
     async def _complete_response(self, event: Any) -> AsyncIterator[RealtimeModelEvent]:
         """Distinguish tool boundaries from successful logical-turn completion."""
@@ -344,6 +345,7 @@ class OpenAIRealtimeModelSession(RealtimeModelSession):
         status = getattr(response, "status", None)
         if status != "completed":
             return
+        usage = self._normalize_usage(getattr(response, "usage", None))
         self._capture_response_calls(response_id, getattr(response, "output", None) or [])
         calls = tuple(self._response_calls.pop(response_id, {}).values())
         if calls:
@@ -352,12 +354,36 @@ class OpenAIRealtimeModelSession(RealtimeModelSession):
                     "OpenAI emitted new calls before prior tool results returned"
                 )
             self._pending_calls = {call.call_id: call.tool_name for call in calls}
-            yield RealtimeModelToolCall(calls=calls)
+            yield RealtimeModelToolCall(calls=calls, usage=usage)
             return
         if self._pending_transcriptions:
-            self._pending_completion_id = response_id
+            self._pending_completion = (response_id, usage)
             return
-        yield RealtimeModelTurnCompleted(response_id=response_id)
+        yield RealtimeModelTurnCompleted(response_id=response_id, usage=usage)
+
+    @staticmethod
+    def _normalize_usage(usage: object | None) -> ModelUsage:
+        """Translate Realtime text/audio counters into shared usage fields."""
+        if usage is None:
+            return ModelUsage()
+        input_details = getattr(usage, "input_token_details", None)
+        output_details = getattr(usage, "output_token_details", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        cached_tokens = int(getattr(input_details, "cached_tokens", 0) or 0)
+        audio_tokens = int(getattr(input_details, "audio_tokens", 0) or 0)
+        cached_details = getattr(input_details, "cached_tokens_details", None)
+        cached_audio = int(getattr(cached_details, "audio_tokens", 0) or 0)
+        # Older SDK types expose only the cached total. Infer the minimum overlap
+        # needed to keep input categories consistent until details are available.
+        cached_audio = max(cached_audio, cached_tokens + audio_tokens - input_tokens)
+        return ModelUsage(
+            input_tokens=input_tokens,
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            cached_input_tokens=cached_tokens,
+            cached_input_audio_tokens=cached_audio,
+            input_audio_tokens=audio_tokens,
+            output_audio_tokens=int(getattr(output_details, "audio_tokens", 0) or 0),
+        )
 
     def _capture_tool_call(self, event: Any) -> None:
         """Retain one completed function item until its response boundary."""

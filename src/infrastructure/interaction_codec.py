@@ -3,6 +3,7 @@ import binascii
 from typing import Any, Literal, cast
 
 from domain.agent import AgentResult
+from domain.costs import TurnMetrics
 from domain.tools import ToolCallRecord
 from domain.turn_events import (
     AgentAudioDelta,
@@ -16,6 +17,7 @@ from domain.turn_events import (
     AgentVisualComponent,
 )
 from domain.visuals import visual_presentation_from_payload, visual_presentation_payload
+from infrastructure.conversation_codec import decode_turn_metrics, encode_turn_metrics
 
 
 def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]:
@@ -46,7 +48,7 @@ def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]
         return "visual_component", visual_presentation_payload(event.presentation)
     if isinstance(event, AgentStreamCompleted):
         result = event.result
-        return "completed", {
+        payload: dict[str, object] = {
             "answer": result.answer,
             "response_id": result.response_id,
             "conversation_id": result.conversation_id,
@@ -66,6 +68,9 @@ def encode_agent_event(event: AgentStreamEvent) -> tuple[str, dict[str, object]]
                 visual_presentation_payload(component) for component in result.visual_components
             ],
         }
+        if result.metrics.calls:
+            payload["metrics"] = encode_turn_metrics(result.metrics)
+        return "completed", payload
     if isinstance(event, AgentStreamFailed):
         return "error", {"code": event.code, "message": event.message}
     raise TypeError(f"Unsupported agent stream event: {type(event).__name__}")
@@ -106,6 +111,7 @@ def decode_agent_event(event_type: str, raw: object) -> AgentStreamEvent:
         raw_components = payload.get("visual_components", [])
         if not isinstance(raw_components, list):
             raise ValueError("completed visual_components must be a list")
+        metrics = decode_turn_metrics(payload.get("metrics"))
         return AgentStreamCompleted(
             result=AgentResult(
                 answer=_required_text(payload, "answer"),
@@ -115,6 +121,7 @@ def decode_agent_event(event_type: str, raw: object) -> AgentStreamEvent:
                 visual_components=tuple(
                     visual_presentation_from_payload(component) for component in raw_components
                 ),
+                metrics=metrics or TurnMetrics(),
             )
         )
     if event_type == "error":

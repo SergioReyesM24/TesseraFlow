@@ -12,6 +12,7 @@ from domain.conversations import (
     ConversationListPage,
     ConversationMessage,
 )
+from domain.costs import ModelUsage, TurnMetrics
 from domain.tools import ToolCall, ToolResult
 from domain.visuals import visual_presentation_payload
 
@@ -101,6 +102,84 @@ class ToolCallResponse(BaseModel):
     duration_ms: float
 
 
+class ModelUsageResponse(BaseModel):
+    """Provider-neutral token counters suitable for API consumers."""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cached_input_tokens: int
+    uncached_input_tokens: int
+    cached_input_audio_tokens: int
+    reasoning_tokens: int
+    input_audio_tokens: int
+    output_audio_tokens: int
+
+    @classmethod
+    def from_domain(cls, usage: ModelUsage) -> "ModelUsageResponse":
+        return cls(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            uncached_input_tokens=usage.uncached_input_tokens,
+            cached_input_audio_tokens=usage.cached_input_audio_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            input_audio_tokens=usage.input_audio_tokens,
+            output_audio_tokens=usage.output_audio_tokens,
+        )
+
+
+class ModelCostResponse(BaseModel):
+    """Calculated cost in the configured rate-card currency."""
+
+    amount: float
+    currency: str
+
+
+class ModelCallMetricsResponse(BaseModel):
+    """Accounting detail for one model request inside a logical turn."""
+
+    model: str
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+
+
+class TurnMetricsResponse(BaseModel):
+    """Aggregated accounting plus the auditable request-level breakdown."""
+
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    calls: list[ModelCallMetricsResponse]
+
+    @classmethod
+    def from_domain(cls, metrics: TurnMetrics) -> "TurnMetricsResponse":
+        total_cost = metrics.cost
+        return cls(
+            usage=ModelUsageResponse.from_domain(metrics.usage),
+            cost=(
+                ModelCostResponse(amount=float(total_cost.amount), currency=total_cost.currency)
+                if total_cost is not None
+                else None
+            ),
+            calls=[
+                ModelCallMetricsResponse(
+                    model=call.model,
+                    usage=ModelUsageResponse.from_domain(call.usage),
+                    cost=(
+                        ModelCostResponse(
+                            amount=float(call.cost.amount),
+                            currency=call.cost.currency,
+                        )
+                        if call.cost is not None
+                        else None
+                    ),
+                )
+                for call in metrics.calls
+            ],
+        )
+
+
 class AgentCompletedResponse(BaseModel):
     """Terminal stream payload containing the answer and tool execution trace."""
 
@@ -109,6 +188,10 @@ class AgentCompletedResponse(BaseModel):
     session_uid: UUID
     tool_calls: list[ToolCallResponse]
     visual_components: list[dict[str, Any]]
+    metrics: TurnMetricsResponse | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @classmethod
     def from_result(cls, result: AgentResult) -> "AgentCompletedResponse":
@@ -132,6 +215,11 @@ class AgentCompletedResponse(BaseModel):
             visual_components=[
                 visual_presentation_payload(component) for component in result.visual_components
             ],
+            metrics=(
+                TurnMetricsResponse.from_domain(result.metrics)
+                if result.metrics.calls
+                else None
+            ),
         )
 
 
@@ -142,6 +230,10 @@ class ConversationMessageHistoryPayload(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     source: Literal["text_user", "speech_user", "worker_agent", "assistant"]
+    metrics: TurnMetricsResponse | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class ToolCallHistoryPayload(BaseModel):
@@ -338,6 +430,11 @@ class ConversationHistoryResponse(BaseModel):
                     role=item.role,
                     content=item.content,
                     source=item.source,
+                    metrics=(
+                        TurnMetricsResponse.from_domain(item.metrics)
+                        if item.metrics is not None and item.metrics.calls
+                        else None
+                    ),
                 )
             elif isinstance(item, ToolCall):
                 payload = ToolCallHistoryPayload(

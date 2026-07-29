@@ -1,4 +1,13 @@
-from domain.turn_events import AgentAudioDelta, AgentAudioInterrupted, AgentVisualComponent
+from decimal import Decimal
+
+from domain.agent import AgentResult
+from domain.costs import ModelCallMetrics, ModelCost, ModelUsage, TurnMetrics
+from domain.turn_events import (
+    AgentAudioDelta,
+    AgentAudioInterrupted,
+    AgentStreamCompleted,
+    AgentVisualComponent,
+)
 from domain.visuals import (
     ChartComponent,
     ChartPoint,
@@ -85,4 +94,30 @@ def test_transaction_visual_round_trips_through_the_durable_json_codec() -> None
     event_type, payload = encode_agent_event(event)
 
     assert payload["component"]["kind"] == "transaction_list"
+    assert decode_agent_event(event_type, payload) == event
+
+
+def test_completed_metrics_survive_the_durable_interaction_outbox() -> None:
+    """Deliver cost to live clients even when a coordinator worker stores the event."""
+    event = AgentStreamCompleted(
+        result=AgentResult(
+            answer="Hecho",
+            response_id="response-1",
+            conversation_id="conversation-1",
+            metrics=TurnMetrics(
+                calls=(
+                    ModelCallMetrics(
+                        model="model-a",
+                        usage=ModelUsage(input_tokens=100, output_tokens=20),
+                        cost=ModelCost(amount=Decimal("0.000065"), currency="USD"),
+                    ),
+                )
+            ),
+        )
+    )
+
+    event_type, payload = encode_agent_event(event)
+
+    assert event_type == "completed"
+    assert "metrics" in payload
     assert decode_agent_event(event_type, payload) == event

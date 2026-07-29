@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from google.genai import types
 
 from domain.agent import AgentDefinition
+from domain.costs import ModelUsage
 from domain.realtime import (
     AudioChunk,
     RealtimeModelAudioDelta,
@@ -129,6 +130,96 @@ async def test_gemini_realtime_session_translates_full_duplex_media_and_tools() 
     assert response.id == "call-1"
     assert response.name == "lookup"
     assert response.response == {"ok": True, "result": {"found": True}}
+
+
+async def test_gemini_realtime_normalizes_usage_metadata_at_turn_completion() -> None:
+    """Map Gemini modalities and thoughts onto the shared usage contract."""
+    provider = FakeGeminiRealtimeSession(
+        [
+            types.LiveServerMessage(
+                usage_metadata=types.UsageMetadata(
+                    prompt_token_count=100,
+                    cached_content_token_count=10,
+                    response_token_count=30,
+                    thoughts_token_count=5,
+                    prompt_tokens_details=[
+                        types.ModalityTokenCount(
+                            modality=types.MediaModality.AUDIO,
+                            token_count=60,
+                        )
+                    ],
+                    response_tokens_details=[
+                        types.ModalityTokenCount(
+                            modality=types.MediaModality.AUDIO,
+                            token_count=20,
+                        )
+                    ],
+                ),
+                server_content=types.LiveServerContent(turn_complete=True),
+            )
+        ]
+    )
+
+    stream = GeminiRealtimeModelSession(provider).receive()  # type: ignore[arg-type]
+    completed = await anext(stream)
+    await stream.aclose()
+    assert isinstance(completed, RealtimeModelTurnCompleted)
+    assert completed.usage.input_tokens == 100
+    assert completed.usage.output_tokens == 35
+    assert completed.usage.reasoning_tokens == 5
+    assert completed.usage.input_audio_tokens == 60
+    assert completed.usage.output_audio_tokens == 20
+
+
+async def test_gemini_realtime_uses_latest_usage_snapshot_once_per_model_turn() -> None:
+    """Treat periodic usage metadata as cumulative snapshots, never as deltas."""
+    provider = FakeGeminiRealtimeSession(
+        [
+            types.LiveServerMessage(
+                usage_metadata=types.UsageMetadata(
+                    prompt_token_count=80,
+                    response_token_count=20,
+                    total_token_count=100,
+                )
+            ),
+            types.LiveServerMessage(
+                usage_metadata=types.UsageMetadata(
+                    prompt_token_count=100,
+                    response_token_count=30,
+                    total_token_count=130,
+                ),
+                tool_call=types.LiveServerToolCall(
+                    function_calls=[
+                        types.FunctionCall(id="call-1", name="lookup", args={"value": 7})
+                    ]
+                ),
+            ),
+            types.LiveServerMessage(
+                server_content=types.LiveServerContent(turn_complete=True),
+            ),
+            types.LiveServerMessage(
+                usage_metadata=types.UsageMetadata(
+                    prompt_token_count=150,
+                    response_token_count=40,
+                    total_token_count=190,
+                ),
+                server_content=types.LiveServerContent(turn_complete=True),
+            ),
+        ]
+    )
+
+    stream = GeminiRealtimeModelSession(provider).receive()  # type: ignore[arg-type]
+    tool_call = await anext(stream)
+    first_completed = await anext(stream)
+    second_completed = await anext(stream)
+    await stream.aclose()
+
+    assert isinstance(tool_call, RealtimeModelToolCall)
+    assert tool_call.usage == ModelUsage()
+    assert isinstance(first_completed, RealtimeModelTurnCompleted)
+    assert first_completed.usage == ModelUsage(input_tokens=100, output_tokens=30)
+    assert isinstance(second_completed, RealtimeModelTurnCompleted)
+    assert second_completed.usage == ModelUsage(input_tokens=150, output_tokens=40)
 
 
 async def test_gemini_recovery_resumes_without_replaying_client_writes() -> None:

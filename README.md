@@ -835,6 +835,7 @@ el entorno sin modificar los archivos versionados.
 | `OPENAI_REALTIME_LANGUAGE_CODE` | inferido | Idioma opcional de la transcripción de entrada. |
 | `OPENAI_REALTIME_REASONING_EFFORT` | inferido | Esfuerzo de razonamiento opcional del modelo realtime. |
 | `WORKER_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente de trabajo. |
+| `MODEL_PRICING` | catálogo de los modelos predeterminados | JSON de tarifas por millón de tokens (`input`, `cached_input`, `output`, `input_audio`, `cached_input_audio`, `output_audio` y `currency`), indexado por nombre de modelo. |
 | `OPENAI_CONNECT_TIMEOUT_SECONDS` | `15` | Timeout de conexión. |
 | `GEMINI_API_KEY` | — | Credencial del adaptador Gemini realtime disponible inicialmente. |
 | `GEMINI_LIVE_API_VERSION` | `v1beta` | Versión de la API Live usada por el SDK. |
@@ -882,7 +883,61 @@ GEMINI_API_KEY=...
 OPENAI_API_KEY=...
 REALTIME_AUDIO_MAX_CHUNK_BYTES=32768
 REALTIME_SESSION_MAX_SECONDS=1800
+MODEL_PRICING='{"mi-modelo":{"input":0.44,"cached_input":0.09,"output":1.76,"currency":"EUR"}}'
 ```
+
+Cada gateway traduce el uso de su SDK a contadores comunes. El núcleo aplica este
+catálogo, agrega las llamadas intermedias de tools y persiste uso y coste con la
+respuesta del turno. Si un modelo no aparece en `MODEL_PRICING`, se conservan sus
+tokens y el coste se expone como no configurado, evitando estimaciones silenciosas.
+
+### Referencia de precios y moneda
+
+El catálogo incluido fue revisado el **2026-07-29** y expresa tarifas por millón
+de tokens en EUR:
+
+- `gpt-5.4`: tarifa retail de Azure OpenAI Global Standard en Sweden Central:
+  `2.193945` EUR entrada, `0.219394` EUR entrada cacheada y `13.163668` EUR salida.
+  Por encima de 272.000 tokens de entrada se activa automáticamente el tier de
+  contexto largo: `4.387889`, `0.438789` y `19.745502` EUR respectivamente.
+- `gemini-3.1-flash-live-preview`: precios oficiales de Google en USD convertidos
+  con la referencia BCE del 2026-07-29 (`1 EUR = 1.1380 USD`): `0.659051` EUR
+  entrada de texto, `2.636204` EUR entrada de audio, `3.954306` EUR salida de
+  texto/pensamiento y `10.544815` EUR salida de audio.
+
+Estas cifras calculan consumo técnico antes de IVA, descuentos contractuales o
+el cambio aplicado en la factura. Si el deployment de Azure es Data Zone en vez
+de Global Standard, sustituye el bloque `gpt-5.4` por las tarifas Data Zone del
+recurso; el endpoint por sí solo no permite descubrir el tipo de deployment.
+
+### Cómo se cuentan los tokens realtime
+
+El contador no estima tokens desde el audio ni desde las transcripciones. El
+gateway usa exclusivamente las métricas que envía el proveedor en cada respuesta:
+
+- Gemini Live entrega periódicamente `usageMetadata`. Dentro de un mismo
+  `model turn` esos mensajes son snapshots acumulativos, no deltas: el gateway
+  conserva únicamente el último snapshot y lo contabiliza una sola vez cuando
+  recibe `turnComplete=true`. `promptTokenCount` es toda la entrada que
+  el modelo procesó para esa petición de generación, incluido el contexto anterior;
+  `promptTokensDetails` separa modalidades como texto y audio.
+  `responseTokenCount` es la salida, `thoughtsTokenCount` el razonamiento facturable
+  y `toolUsePromptTokenCount` la entrada adicional causada por resultados de tools.
+  `totalTokenCount` describe esa petición (`prompt` más las demás categorías
+  facturables), no el acumulado histórico de toda la conexión. El total de sesión
+  se obtiene sumando los snapshots finales de cada `model turn`.
+- `cachedContentTokenCount` es un subconjunto de `promptTokenCount`, no una cantidad
+  adicional. El coste de entrada nueva/no cacheada se calcula como
+  `input_tokens - cached_input_tokens`. El modelo realtime configurado actualmente,
+  `gemini-3.1-flash-live-preview`, no soporta caché, por lo que todo el contexto
+  procesado vuelve a facturarse como entrada en cada turno.
+- OpenAI Realtime entrega el objeto `usage` dentro de `response.done`, con
+  `input_tokens`, `output_tokens`, detalles de texto/audio y `cached_tokens`.
+  Los tokens cacheados también son un subconjunto de la entrada total.
+
+El proveedor no informa cuántos tokens no cacheados pertenecen exclusivamente al
+mensaje nuevo frente al historial previo. Sí informa el total facturable del prompt
+y su parte cacheada, que es lo necesario para calcular el coste real del turno.
 
 Las combinaciones sin adaptador registrado fallan durante la composición, antes de
 aceptar tráfico. Incorporar otro proveedor solo requiere añadir su gateway y registrarlo

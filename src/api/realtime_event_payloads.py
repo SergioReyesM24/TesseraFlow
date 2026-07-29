@@ -1,6 +1,6 @@
 from typing import Any
 
-from api.schemas import ToolCallResponse
+from api.schemas import ToolCallResponse, TurnMetricsResponse
 from domain.realtime import (
     RealtimeActivityEnded,
     RealtimeActivityStarted,
@@ -70,5 +70,10 @@ def realtime_event_payload(event: RealtimeAgentEvent) -> tuple[str, dict[str, An
                 visual_presentation_payload(component)
                 for component in event.result.visual_components
             ],
+            "metrics": (
+                TurnMetricsResponse.from_domain(event.result.metrics).model_dump(mode="json")
+                if event.result.metrics.calls
+                else None
+            ),
         }
     raise TypeError(f"Unsupported realtime JSON event: {type(event).__name__}")

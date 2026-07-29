@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,33 @@ def test_realtime_has_bounded_pcm_and_outbound_queues() -> None:
 
     assert settings.realtime_audio_max_chunk_bytes == 3_200
     assert settings.realtime_outbound_max_audio_bytes == 6_400
+
+
+def test_model_pricing_accepts_a_provider_neutral_json_catalog(monkeypatch: Any) -> None:
+    """Configure arbitrary models without adding provider-specific settings."""
+    monkeypatch.setenv(
+        "MODEL_PRICING",
+        '{"custom-model":{"input":1.25,"output":5,"currency":"EUR"}}',
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.model_pricing["custom-model"].input == Decimal("1.25")
+    assert settings.model_pricing["custom-model"].output == Decimal("5")
+    assert settings.model_pricing["custom-model"].currency == "EUR"
+
+
+def test_active_worker_model_has_reviewed_euro_rates_and_long_context_tier() -> None:
+    """Keep the GPT-5.4 worker priced in the checked-in default catalog."""
+    settings = Settings(_env_file=None)
+
+    rates = settings.model_pricing["gpt-5.4"]
+    assert rates.input == Decimal("2.193945")
+    assert rates.cached_input == Decimal("0.219394")
+    assert rates.output == Decimal("13.163668")
+    assert rates.currency == "EUR"
+    assert rates.tiers[0].min_input_tokens == 272_001
+    assert rates.tiers[0].output == Decimal("19.745502")
 
 
 def test_removed_interactive_and_ambiguous_model_variables_are_ignored(
