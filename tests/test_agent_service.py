@@ -1,7 +1,8 @@
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import ClassVar
 
 import pytest
@@ -16,6 +17,7 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
+from domain.costs import ModelCostCalculator, ModelRates, ModelUsage
 from domain.model import ModelReply
 from domain.tools import (
     ToolCall,
@@ -86,7 +88,7 @@ class StubModelGateway:
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[StubModelSession]:
+    ) -> AsyncGenerator[StubModelSession, None]:
         session = StubModelSession(self.session_replies.popleft())
         self.sessions.append(session)
         self.definitions.append(definition)
@@ -139,7 +141,7 @@ class AudioStubModelGateway:
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[AudioStubModelSession]:
+    ) -> AsyncGenerator[AudioStubModelSession, None]:
         """Yield an isolated session without provider resources."""
         del definition, tools, history
         yield AudioStubModelSession()
@@ -283,6 +285,56 @@ async def test_runs_and_captures_a_tool_call() -> None:
             source="assistant",
         ),
     )
+
+
+async def test_aggregates_tool_round_costs_and_persists_them_on_the_turn() -> None:
+    """Account for every model request hidden inside one logical user turn."""
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(
+                    response_id="resp_1",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_1",
+                            tool_name="sample_tool",
+                            arguments={"result": "5.5"},
+                        ),
+                    ),
+                    usage=ModelUsage(input_tokens=100, output_tokens=10),
+                ),
+                ModelReply(
+                    response_id="resp_2",
+                    text="El resultado es 5.5.",
+                    usage=ModelUsage(input_tokens=50, output_tokens=20),
+                ),
+            ]
+        ]
+    )
+    repository = InMemoryConversationRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([SampleTool()]),
+        repository,
+        cost_calculator=ModelCostCalculator(
+            {"test-model": ModelRates(input=Decimal("1"), output=Decimal("2"))}
+        ),
+    )
+    await repository.create(conversation_key())
+
+    result = await service.run(
+        "Suma 2.5 y 3",
+        agent_definition("sample_tool"),
+        conversation_key(),
+    )
+
+    assert result.metrics.usage == ModelUsage(input_tokens=150, output_tokens=30)
+    assert result.metrics.cost is not None
+    assert result.metrics.cost.amount == Decimal("0.00021")
+    assistant = repository.conversations["conversation-1"].messages[-1]
+    assert isinstance(assistant, ConversationMessage)
+    assert assistant.metrics == result.metrics
 
 
 async def test_returns_tool_errors_to_the_model() -> None:

@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any
@@ -30,10 +30,12 @@ from domain.realtime import (
     RealtimeActivityEnded,
     RealtimeActivityStarted,
     RealtimeAudioDelta,
+    RealtimeAudioInterrupted,
     RealtimeInputTranscriptDelta,
     RealtimeModelActivityEnded,
     RealtimeModelActivityStarted,
     RealtimeModelAudioDelta,
+    RealtimeModelAudioInterrupted,
     RealtimeModelEvent,
     RealtimeModelInputTranscriptDelta,
     RealtimeModelOutputTranscriptDelta,
@@ -189,6 +191,23 @@ class QueueRealtimeModelSession(StubRealtimeModelSession):
             yield event
 
 
+class BlockingProactiveWriteRealtimeModelSession(QueueRealtimeModelSession):
+    """Keep a proactive write in flight while user input arrives concurrently."""
+
+    def __init__(self) -> None:
+        """Expose barriers around provider acceptance of the proactive message."""
+        super().__init__()
+        self.text_write_started = asyncio.Event()
+        self.release_text_write = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        """Accept the text only after the test releases the provider write."""
+        self.text.append(text)
+        self.text_write_started.set()
+        await self.release_text_write.wait()
+        self.text_sent.set()
+
+
 class StubInteractionSubscription:
     """Provide reconciliation waits without carrying durable command data."""
 
@@ -213,7 +232,7 @@ class StubInteractionNotifier:
     async def subscribe_realtime_commands(
         self,
         conversation_id: str,
-    ) -> AsyncIterator[StubInteractionSubscription]:
+    ) -> AsyncGenerator[StubInteractionSubscription, None]:
         """Yield one reconciliation subscription for the requested conversation."""
         self.conversations.append(conversation_id)
         yield StubInteractionSubscription()
@@ -313,7 +332,7 @@ class AlternateRealtimeGateway:
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
         options: RealtimeSessionOptions,
-    ) -> AsyncIterator[StubRealtimeModelSession]:
+    ) -> AsyncGenerator[StubRealtimeModelSession, None]:
         """Open through neutral arguments without provider-specific branching."""
         del definition, tools, history
         self.options.append(options)
@@ -395,6 +414,86 @@ async def test_realtime_session_streams_media_executes_tools_and_persists_transc
     assert all(not isinstance(item, AudioChunk) for item in turn)
 
 
+async def test_realtime_suppresses_repeated_text_and_audio_after_a_tool_call() -> None:
+    """Do not replay a complete answer that the model repeats after a tool result."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    call = ToolCall(call_id="call-1", tool_name="lookup", arguments={"value": 7})
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelInputTranscriptDelta(text="Consulta"),
+            RealtimeModelOutputTranscriptDelta(text="Respuesta completa."),
+            RealtimeModelAudioDelta(data=b"\x01\x00", mime_type="audio/pcm;rate=24000"),
+            RealtimeModelToolCall(calls=(call,)),
+            RealtimeModelAudioDelta(data=b"\x02\x00", mime_type="audio/pcm;rate=24000"),
+            RealtimeModelOutputTranscriptDelta(text="Respuesta completa!"),
+            RealtimeModelTurnCompleted(response_id="response-2"),
+        ]
+    )
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([LookupTool()]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    assert [event.text for event in events if isinstance(event, RealtimeOutputTranscriptDelta)] == [
+        "Respuesta completa."
+    ]
+    assert [event.data for event in events if isinstance(event, RealtimeAudioDelta)] == [
+        b"\x01\x00"
+    ]
+    assert conversations.saved_turns[0][-1] == ConversationMessage(
+        role="assistant",
+        content="Respuesta completa.",
+    )
+
+
+async def test_realtime_releases_distinct_continuation_after_a_tool_call() -> None:
+    """Keep legitimate post-tool output even when the model spoke before the call."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    call = ToolCall(call_id="call-1", tool_name="lookup", arguments={"value": 7})
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelInputTranscriptDelta(text="Consulta"),
+            RealtimeModelOutputTranscriptDelta(text="Un momento. "),
+            RealtimeModelToolCall(calls=(call,)),
+            RealtimeModelAudioDelta(data=b"\x02\x00", mime_type="audio/pcm;rate=24000"),
+            RealtimeModelOutputTranscriptDelta(text="El resultado es siete."),
+            RealtimeModelTurnCompleted(response_id="response-2"),
+        ]
+    )
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([LookupTool()]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    assert [event.text for event in events if isinstance(event, RealtimeOutputTranscriptDelta)] == [
+        "Un momento. ",
+        "El resultado es siete.",
+    ]
+    assert [event.data for event in events if isinstance(event, RealtimeAudioDelta)] == [
+        b"\x02\x00"
+    ]
+    assert conversations.saved_turns[0][-1] == ConversationMessage(
+        role="assistant",
+        content="Un momento. El resultado es siete.",
+    )
+
+
 async def test_realtime_session_rejects_unbounded_or_misaligned_pcm() -> None:
     """Enforce stream state, byte limits, and complete PCM16 samples."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
@@ -474,6 +573,85 @@ async def test_realtime_session_keeps_continuous_audio_open_across_vad_turns() -
     assert completed[0].turn_id == "turn-1"
     assert completed[1].turn_id != completed[0].turn_id
     assert [turn[0].content for turn in conversations.saved_turns] == ["Primero", "Segundo"]  # type: ignore[union-attr]
+
+
+async def test_late_input_transcript_stays_on_the_turn_that_already_has_output() -> None:
+    """Correlate OpenAI's asynchronous input transcription with its active response."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelOutputTranscriptDelta(text="Respuesta"),
+            RealtimeModelInputTranscriptDelta(text="Pregunta"),
+            RealtimeModelTurnCompleted(response_id="response-1"),
+        ]
+    )
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    assert {event.turn_id for event in events} == {"turn-1"}
+    assert conversations.conversation.messages[-2:] == (
+        ConversationMessage(role="user", content="Pregunta", source="speech_user"),
+        ConversationMessage(role="assistant", content="Respuesta"),
+    )
+
+
+async def test_realtime_barge_in_persists_visible_partial_turn_before_replacing_it() -> None:
+    """Retain the first exchange when new speech interrupts assistant output."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelInputTranscriptDelta(text="Primera pregunta"),
+            RealtimeModelOutputTranscriptDelta(text="Respuesta parcial"),
+            RealtimeModelAudioInterrupted(),
+            RealtimeModelActivityStarted(),
+            RealtimeModelInputTranscriptDelta(text="Segunda pregunta"),
+            RealtimeModelOutputTranscriptDelta(text="Segunda respuesta"),
+            RealtimeModelTurnCompleted(response_id="response-2"),
+        ]
+    )
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    interrupted = next(event for event in events if isinstance(event, RealtimeAudioInterrupted))
+    assert interrupted.turn_id == "turn-1"
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(
+                role="user",
+                content="Primera pregunta",
+                source="speech_user",
+            ),
+            ConversationMessage(role="assistant", content="Respuesta parcial"),
+        ),
+        (
+            ConversationMessage(
+                role="user",
+                content="Segunda pregunta",
+                source="speech_user",
+            ),
+            ConversationMessage(role="assistant", content="Segunda respuesta"),
+        ),
+    ]
 
 
 async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_terminal() -> None:
@@ -595,8 +773,8 @@ async def test_realtime_dispatcher_injects_completion_while_microphone_is_open()
     assert model.text == [command.message]
 
 
-async def test_realtime_vad_activity_requeues_proactive_turn_for_user_speech() -> None:
-    """Let provider-detected speech interrupt a completion without losing it."""
+async def test_realtime_vad_activity_settles_injected_proactive_turn_for_user_speech() -> None:
+    """Persist an accepted completion once when provider-detected speech interrupts it."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
     command = InteractionCommand(
         command_id="a2a-result:job-1",
@@ -610,10 +788,11 @@ async def test_realtime_vad_activity_requeues_proactive_turn_for_user_speech() -
     )
     interactions = StubRealtimeInteractions(command)
     model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
     session = RealtimeAgentSession(
         model,
         ToolRegistry([]),
-        StubConversations(key),
+        conversations,
         key,
         interactions=interactions,  # type: ignore[arg-type]
         notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
@@ -625,17 +804,129 @@ async def test_realtime_vad_activity_requeues_proactive_turn_for_user_speech() -
 
     async with session.lifecycle():
         stream = session.events()
-        activity_event = asyncio.create_task(anext(stream))
+        output_event = asyncio.create_task(anext(stream))
         async with asyncio.timeout(0.5):
             await model.text_sent.wait()
+        await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Resultado parcial"))
+        assert await output_event == RealtimeOutputTranscriptDelta(
+            turn_id="job-1",
+            text="Resultado parcial",
+        )
+        activity_event = asyncio.create_task(anext(stream))
         await model.events_queue.put(RealtimeModelActivityStarted())
         assert await activity_event == RealtimeActivityStarted(turn_id="turn-1")
         await stream.aclose()
 
-    assert interactions.completed == []
-    assert len(interactions.requeued) == 1
-    assert interactions.requeued[0][0] == command.command_id
-    assert interactions.requeued[0][1].startswith("realtime:")
+    assert interactions.completed == [(command.command_id, interactions.claimed_by)]
+    assert interactions.requeued == []
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(role="user", content=command.message, source="worker_agent"),
+            ConversationMessage(role="assistant", content="Resultado parcial"),
+        )
+    ]
+    assert model.text == [command.message]
+
+
+async def test_realtime_transcript_settles_proactive_turn_without_activity_event() -> None:
+    """Separate live speech from an accepted completion even when provider VAD is missing."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+    await session.start_audio("turn-1")
+
+    async with session.lifecycle():
+        stream = session.events()
+        transcript = asyncio.create_task(anext(stream))
+        async with asyncio.timeout(0.5):
+            await model.text_sent.wait()
+        await model.events_queue.put(RealtimeModelInputTranscriptDelta(text="Tú me avisas"))
+        assert await transcript == RealtimeInputTranscriptDelta(
+            turn_id="turn-1",
+            text="Tú me avisas",
+        )
+        await stream.aclose()
+
+    assert interactions.completed == [(command.command_id, interactions.claimed_by)]
+    assert interactions.requeued == []
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(role="user", content=command.message, source="worker_agent"),
+            ConversationMessage(role="assistant", content=""),
+        ),
+        (
+            ConversationMessage(role="user", content="Tú me avisas", source="speech_user"),
+            ConversationMessage(role="assistant", content=""),
+        ),
+    ]
+
+
+async def test_realtime_interruption_waits_for_inflight_proactive_delivery() -> None:
+    """Do not requeue a result accepted while its concurrent interruption is handled."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key,
+        kind="worker_completed",
+        source="worker_agent",
+        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        delivery_mode="realtime",
+        causation_id="job-1",
+    )
+    interactions = StubRealtimeInteractions(command)
+    model = BlockingProactiveWriteRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        interactions=interactions,  # type: ignore[arg-type]
+        notifier=StubInteractionNotifier(),  # type: ignore[arg-type]
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+        command_reconciliation_seconds=0.01,
+    )
+    await session.start_audio("turn-1")
+
+    async with session.lifecycle():
+        stream = session.events()
+        transcript = asyncio.create_task(anext(stream))
+        async with asyncio.timeout(0.5):
+            await model.text_write_started.wait()
+        await model.events_queue.put(RealtimeModelInputTranscriptDelta(text="Continúa conmigo"))
+        model.release_text_write.set()
+        assert await transcript == RealtimeInputTranscriptDelta(
+            turn_id="turn-1",
+            text="Continúa conmigo",
+        )
+        await stream.aclose()
+
+    assert interactions.completed == [(command.command_id, interactions.claimed_by)]
+    assert interactions.requeued == []
     assert model.text == [command.message]
 
 
@@ -747,6 +1038,36 @@ async def test_realtime_disconnect_drains_visible_proactive_turn_before_releasin
                 content="El trabajo ha terminado",
                 source="assistant",
             ),
+        )
+    ]
+
+
+async def test_realtime_disconnect_persists_visible_user_turn_without_terminal() -> None:
+    """Save the user input and visible assistant prefix when its socket disappears."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = QueueRealtimeModelSession()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    async with session.lifecycle():
+        await session.send_text("turn-1", "Pregunta")
+        stream = session.events()
+        visible_output = asyncio.create_task(anext(stream))
+        await model.events_queue.put(RealtimeModelOutputTranscriptDelta(text="Respuesta parcial"))
+        assert isinstance(await visible_output, RealtimeOutputTranscriptDelta)
+        await stream.aclose()
+
+    assert conversations.saved_turns == [
+        (
+            ConversationMessage(role="user", content="Pregunta", source="text_user"),
+            ConversationMessage(role="assistant", content="Respuesta parcial"),
         )
     ]
 
@@ -957,10 +1278,13 @@ async def test_realtime_service_accepts_an_alternate_provider_and_rejects_capabi
         )
     )
 
-    async with service.open_session(definition, key, supported):
-        pass
+    async with service.open_session(definition, key, supported) as session:
+        await session.start_audio("turn-alternate")
+        await session.send_audio(b"\x00\x00")
+        await session.end_audio()
 
     assert gateway.options == [supported]
+    assert gateway.model.audio == [AudioChunk(data=b"\x00\x00", mime_type="audio/pcm;rate=8000")]
     assert service.capabilities.recovery_mode == "restart"
     with pytest.raises(RealtimeUnsupportedOptionError, match="Barge-in"):
         async with service.open_session(

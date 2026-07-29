@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -99,7 +99,7 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
             await connection.close()
 
     @asynccontextmanager
-    async def subscribe_commands(self) -> AsyncIterator[NotificationSubscription]:
+    async def subscribe_commands(self) -> AsyncGenerator[NotificationSubscription, None]:
         """Register one bounded-lifetime observer for runnable commands."""
         subscription = _NotificationSubscription()
         self._command_subscribers.add(subscription)
@@ -109,7 +109,7 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
             self._command_subscribers.discard(subscription)
 
     @asynccontextmanager
-    async def subscribe_jobs(self) -> AsyncIterator[NotificationSubscription]:
+    async def subscribe_jobs(self) -> AsyncGenerator[NotificationSubscription, None]:
         """Register one observer that wakes when an A2A job may be runnable."""
         subscription = _NotificationSubscription()
         self._a2a_job_subscribers.add(subscription)
@@ -122,7 +122,7 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
     async def subscribe_realtime_commands(
         self,
         conversation_id: str,
-    ) -> AsyncIterator[NotificationSubscription]:
+    ) -> AsyncGenerator[NotificationSubscription, None]:
         """Observe realtime inbox changes for one live conversation."""
         subscription = _NotificationSubscription()
         subscribers = self._realtime_command_subscribers[conversation_id]
@@ -140,7 +140,7 @@ class PostgresInteractionNotifier(InteractionNotifier, A2AJobNotifier):
         conversation_id: str,
         *,
         command_id: str | None = None,
-    ) -> AsyncIterator[NotificationSubscription]:
+    ) -> AsyncGenerator[NotificationSubscription, None]:
         """Register one output observer and remove its routing state on disconnect."""
         subscription = _NotificationSubscription()
         subscribers = (

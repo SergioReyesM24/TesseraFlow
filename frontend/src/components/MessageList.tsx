@@ -1,5 +1,6 @@
-import { Bot, Check, LoaderCircle, Wrench, X } from 'lucide-react'
+import { Bot, Check, CircleDollarSign, LoaderCircle, Wrench, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
+import { formatModelCost } from '../lib/costs'
 import type { ConversationMessage } from '../types'
 import { VisualPresentation } from './VisualPresentation'
 
@@ -29,6 +30,23 @@ function ToolRow({ message }: { message: ConversationMessage }) {
           {tool.durationMs !== undefined && <small>{Math.round(tool.durationMs)} ms</small>}
         </div>
       ))}
+    </div>
+  )
+}
+
+/** Show the turn-level cost while keeping token and request detail inspectable. */
+function CostRow({ message }: { message: ConversationMessage }) {
+  const metrics = message.metrics
+  if (!metrics) return null
+  const cost = metrics.cost ? formatModelCost(metrics.cost) : 'Tarifa no configurada'
+  return (
+    <div
+      className="cost-row"
+      title={`${metrics.usage.uncached_input_tokens.toLocaleString('es-ES')} entrada no cacheada · ${metrics.usage.cached_input_tokens.toLocaleString('es-ES')} entrada cacheada · ${metrics.usage.output_tokens.toLocaleString('es-ES')} salida · ${metrics.calls.length} llamadas`}
+    >
+      <CircleDollarSign size={14} aria-hidden="true" />
+      <span>{cost}</span>
+      <small>{metrics.usage.total_tokens.toLocaleString('es-ES')} tokens</small>
     </div>
   )
 }
@@ -80,6 +98,7 @@ export function MessageList({
                 <VisualPresentation key={visual.componentId} presentation={visual} />
               ))}
               <ToolRow message={message} />
+              {message.role === 'assistant' && <CostRow message={message} />}
               {message.status === 'error' && <small className="message-error">Error</small>}
             </div>
           </article>

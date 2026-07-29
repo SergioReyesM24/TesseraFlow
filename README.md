@@ -88,8 +88,8 @@ crudo fuera de la persistencia.
 
 - Python 3.11 o superior.
 - PostgreSQL y Redis accesibles.
-- Una API key de Gemini para la capa interactiva.
-- Una API key de OpenAI para el worker.
+- Una API key de Gemini para el STS predeterminado, o de OpenAI para `gpt-realtime-2.1`.
+- Una API key de OpenAI para los agentes textuales.
 
 ### Instalación
 
@@ -129,8 +129,9 @@ La API queda disponible en `http://127.0.0.1:8000` y la documentación interacti
 
 El directorio `frontend/` contiene una interfaz React + TypeScript para los dos
 WebSockets. El modo **Texto** consume `/v1/agent/ws` como un chat persistente; el modo
-**Voz** usa `/v1/agent/realtime`, captura el micrófono como PCM16 mono a 16 kHz, reproduce
-la respuesta PCM16 a 24 kHz y muestra las transcripciones de ambos interlocutores. El
+**Voz** usa `/v1/agent/realtime`, captura el micrófono como PCM16 mono a la frecuencia
+negociada por el adaptador (16 kHz con Gemini, 24 kHz con OpenAI), reproduce la respuesta
+PCM16 conforme llega y muestra las transcripciones de ambos interlocutores. El
 modo **Historial técnico** consulta por `session_uid` los registros canónicos, agrupados
 por `turn_id`, y muestra los argumentos y resultados de cada tool call. Primero enumera
 únicamente las conversaciones principales del usuario. Al seleccionar una, consulta su
@@ -199,8 +200,8 @@ socket.onopen = () => socket.send(JSON.stringify({
 ```
 
 Para micrófono bidireccional usa el endpoint realtime, que siempre está compuesto. Con el
-adaptador Gemini actual, los frames binarios cliente → servidor son PCM16 mono little-endian
-a 16 kHz; los frames binarios servidor → cliente son PCM16 mono a 24 kHz:
+adaptador seleccionado anuncia ambos formatos en `realtime_ready`: Gemini recibe PCM16
+mono little-endian a 16 kHz y OpenAI a 24 kHz; ambos emiten PCM16 mono a 24 kHz:
 
 ```javascript
 const realtime = new WebSocket(
@@ -257,14 +258,15 @@ flowchart LR
     Worker --> Tools[Tools operativas]
     Interactive --> InteractiveService[AgentService]
     InteractiveService --> InteractiveGateway[ModelGateway]
-    InteractiveGateway --> Gemini[Gemini Live API]
+    InteractiveGateway --> OpenAI[OpenAI APIs]
     RealtimeAPI --> RealtimeService[RealtimeAgentService]
     RealtimeService --> RealtimeGateway[RealtimeModelGateway]
-    RealtimeGateway --> Gemini
+    RealtimeGateway --> Gemini[Gemini Live API]
+    RealtimeGateway --> OpenAIRealtime[OpenAI Realtime API]
     RealtimeService --> Protocol
     Worker --> WorkerService[AgentService]
     WorkerService --> WorkerGateway[ModelGateway]
-    WorkerGateway --> OpenAI[OpenAI Responses API]
+    WorkerGateway --> OpenAI
     Coordinator --> Outbox[(Interaction outbox)]
     Outbox --> API
     InteractiveService --> Repository[ConversationRepository]
@@ -277,7 +279,7 @@ flowchart LR
     classDef core fill:#e8f5e9,stroke:#198754,color:#102a13
     classDef adapter fill:#eef4ff,stroke:#3776ab,color:#10253f
     class Coordinator,Interactive,InteractiveService,RealtimeService,Protocol,Worker,WorkerService,Repository core
-    class API,RealtimeAPI,Inbox,Outbox,InteractiveGateway,RealtimeGateway,WorkerGateway,Gemini,OpenAI,Tools,Jobs,Cached,PostgreSQL,Redis adapter
+    class API,RealtimeAPI,Inbox,Outbox,InteractiveGateway,RealtimeGateway,WorkerGateway,Gemini,OpenAI,OpenAIRealtime,Tools,Jobs,Cached,PostgreSQL,Redis adapter
 ```
 
 La dirección de dependencias siempre apunta hacia el núcleo:
@@ -592,7 +594,7 @@ El protocolo público utiliza eventos neutrales al proveedor:
 | Evento | Significado |
 | --- | --- |
 | `connected` | Confirma la conexión e informa `connection_id` y `session_uid`. |
-| `audio_delta` | PCM16 mono codificado en base64; Gemini lo produce a 24 kHz. |
+| `audio_delta` | PCM16 mono codificado en base64 a la frecuencia anunciada. |
 | `audio_interrupted` | Obliga a vaciar el buffer de reproducción pendiente. |
 | `text_delta` | Fragmento incremental del texto. |
 | `tool_started` | Una tool validada está a punto de ejecutarse. |
@@ -674,7 +676,7 @@ ws://127.0.0.1:8000/v1/agent/realtime?session_uid=<uuid>&user_id=<owner>
 
 Después de `connected` y `realtime_ready`, el cliente abre la captura con
 `{"type":"audio_start","turn_id":"<uuid>"}`, envía frames binarios PCM16 y la pausa
-con `{"type":"audio_end"}`. El adaptador actual usa VAD, de modo que un mismo flujo puede
+con `{"type":"audio_end"}`. El adaptador seleccionado usa VAD, de modo que un mismo flujo puede
 producir varios `turn_completed`. Los turnos posteriores reciben un `turn_id` generado por
 el servidor. También se admite `{"type":"text","turn_id":"<uuid>","text":"..."}` como
 degradación textual dentro de la misma sesión.
@@ -823,12 +825,17 @@ el entorno sin modificar los archivos versionados.
 | --- | --- | --- |
 | `TEXT_AGENT_PROVIDER` | `openai` | Proveedor turn-based de `/v1/agent/ws` y SSE. |
 | `TEXT_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente textual. |
-| `REALTIME_AGENT_PROVIDER` | `gemini` | Adaptador STS de `/v1/agent/realtime`. |
-| `REALTIME_AGENT_MODEL` | `gemini-3.1-flash-live-preview` | Modelo del agente realtime. |
+| `REALTIME_AGENT_PROVIDER` | `gemini` | Adaptador STS de `/v1/agent/realtime`; admite `gemini` u `openai`. |
+| `REALTIME_AGENT_MODEL` | `gemini-3.1-flash-live-preview` | Modelo realtime; con OpenAI usa `gpt-realtime-2.1`. |
 | `WORKER_PROVIDER` | `openai` | Proveedor del agente de trabajo pesado. |
 | `OPENAI_API_KEY` | — | Credencial de OpenAI. |
 | `OPENAI_BASE_URL` | — | Base URL alternativa compatible. |
+| `OPENAI_REALTIME_VOICE_NAME` | `marin` | Voz del adaptador OpenAI Realtime. |
+| `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | Transcripción auxiliar del audio de entrada. |
+| `OPENAI_REALTIME_LANGUAGE_CODE` | inferido | Idioma opcional de la transcripción de entrada. |
+| `OPENAI_REALTIME_REASONING_EFFORT` | inferido | Esfuerzo de razonamiento opcional del modelo realtime. |
 | `WORKER_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente de trabajo. |
+| `MODEL_PRICING` | catálogo de los modelos predeterminados | JSON de tarifas por millón de tokens (`input`, `cached_input`, `output`, `input_audio`, `cached_input_audio`, `output_audio` y `currency`), indexado por nombre de modelo. |
 | `OPENAI_CONNECT_TIMEOUT_SECONDS` | `15` | Timeout de conexión. |
 | `GEMINI_API_KEY` | — | Credencial del adaptador Gemini realtime disponible inicialmente. |
 | `GEMINI_LIVE_API_VERSION` | `v1beta` | Versión de la API Live usada por el SDK. |
@@ -876,11 +883,73 @@ GEMINI_API_KEY=...
 OPENAI_API_KEY=...
 REALTIME_AUDIO_MAX_CHUNK_BYTES=32768
 REALTIME_SESSION_MAX_SECONDS=1800
+MODEL_PRICING='{"mi-modelo":{"input":0.44,"cached_input":0.09,"output":1.76,"currency":"EUR"}}'
 ```
+
+Cada gateway traduce el uso de su SDK a contadores comunes. El núcleo aplica este
+catálogo, agrega las llamadas intermedias de tools y persiste uso y coste con la
+respuesta del turno. Si un modelo no aparece en `MODEL_PRICING`, se conservan sus
+tokens y el coste se expone como no configurado, evitando estimaciones silenciosas.
+
+### Referencia de precios y moneda
+
+El catálogo incluido fue revisado el **2026-07-29** y expresa tarifas por millón
+de tokens en EUR:
+
+- `gpt-5.4`: tarifa retail de Azure OpenAI Global Standard en Sweden Central:
+  `2.193945` EUR entrada, `0.219394` EUR entrada cacheada y `13.163668` EUR salida.
+  Por encima de 272.000 tokens de entrada se activa automáticamente el tier de
+  contexto largo: `4.387889`, `0.438789` y `19.745502` EUR respectivamente.
+- `gemini-3.1-flash-live-preview`: precios oficiales de Google en USD convertidos
+  con la referencia BCE del 2026-07-29 (`1 EUR = 1.1380 USD`): `0.659051` EUR
+  entrada de texto, `2.636204` EUR entrada de audio, `3.954306` EUR salida de
+  texto/pensamiento y `10.544815` EUR salida de audio.
+
+Estas cifras calculan consumo técnico antes de IVA, descuentos contractuales o
+el cambio aplicado en la factura. Si el deployment de Azure es Data Zone en vez
+de Global Standard, sustituye el bloque `gpt-5.4` por las tarifas Data Zone del
+recurso; el endpoint por sí solo no permite descubrir el tipo de deployment.
+
+### Cómo se cuentan los tokens realtime
+
+El contador no estima tokens desde el audio ni desde las transcripciones. El
+gateway usa exclusivamente las métricas que envía el proveedor en cada respuesta:
+
+- Gemini Live entrega periódicamente `usageMetadata`. Dentro de un mismo
+  `model turn` esos mensajes son snapshots acumulativos, no deltas: el gateway
+  conserva únicamente el último snapshot y lo contabiliza una sola vez cuando
+  recibe `turnComplete=true`. `promptTokenCount` es toda la entrada que
+  el modelo procesó para esa petición de generación, incluido el contexto anterior;
+  `promptTokensDetails` separa modalidades como texto y audio.
+  `responseTokenCount` es la salida, `thoughtsTokenCount` el razonamiento facturable
+  y `toolUsePromptTokenCount` la entrada adicional causada por resultados de tools.
+  `totalTokenCount` describe esa petición (`prompt` más las demás categorías
+  facturables), no el acumulado histórico de toda la conexión. El total de sesión
+  se obtiene sumando los snapshots finales de cada `model turn`.
+- `cachedContentTokenCount` es un subconjunto de `promptTokenCount`, no una cantidad
+  adicional. El coste de entrada nueva/no cacheada se calcula como
+  `input_tokens - cached_input_tokens`. El modelo realtime configurado actualmente,
+  `gemini-3.1-flash-live-preview`, no soporta caché, por lo que todo el contexto
+  procesado vuelve a facturarse como entrada en cada turno.
+- OpenAI Realtime entrega el objeto `usage` dentro de `response.done`, con
+  `input_tokens`, `output_tokens`, detalles de texto/audio y `cached_tokens`.
+  Los tokens cacheados también son un subconjunto de la entrada total.
+
+El proveedor no informa cuántos tokens no cacheados pertenecen exclusivamente al
+mensaje nuevo frente al historial previo. Sí informa el total facturable del prompt
+y su parte cacheada, que es lo necesario para calcular el coste real del turno.
 
 Las combinaciones sin adaptador registrado fallan durante la composición, antes de
 aceptar tráfico. Incorporar otro proveedor solo requiere añadir su gateway y registrarlo
 en `infrastructure/model_runtime.py`; `bootstrap.py` y el núcleo no cambian.
+
+Para seleccionar OpenAI STS:
+
+```dotenv
+REALTIME_AGENT_PROVIDER=openai
+REALTIME_AGENT_MODEL=gpt-realtime-2.1
+OPENAI_REALTIME_VOICE_NAME=marin
+```
 
 Consulta [.env.example](.env.example) para ver una configuración completa.
 

@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -23,6 +23,7 @@ from application.tools import (
 )
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationItem, ConversationKey, ConversationMessage
+from domain.costs import ModelCallMetrics, ModelCostCalculator, ModelUsage, TurnMetrics
 from domain.interactions import InteractionCommand, InteractionSource
 from domain.realtime import (
     AudioChunk,
@@ -58,6 +59,8 @@ from domain.tools import ToolCallRecord, ToolResult
 from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
+
+MAX_DEFERRED_REALTIME_AUDIO_BYTES = 8 * 1024 * 1024
 
 
 class RealtimeSessionStateError(RuntimeError):
@@ -122,6 +125,7 @@ class RealtimeAgentService:
         outbound_enqueue_timeout_seconds: float,
         proactive_turn_timeout_seconds: float,
         command_reconciliation_seconds: float,
+        cost_calculator: ModelCostCalculator | None = None,
     ) -> None:
         """Bind application ports, authorized tools, and bounded session limits."""
         self._model_gateway = model_gateway
@@ -137,6 +141,7 @@ class RealtimeAgentService:
         self._outbound_enqueue_timeout_seconds = outbound_enqueue_timeout_seconds
         self._proactive_turn_timeout_seconds = proactive_turn_timeout_seconds
         self._command_reconciliation_seconds = command_reconciliation_seconds
+        self._cost_calculator = cost_calculator or ModelCostCalculator()
 
     @property
     def capabilities(self) -> RealtimeSessionCapabilities:
@@ -162,7 +167,7 @@ class RealtimeAgentService:
         definition: AgentDefinition,
         conversation_key: ConversationKey,
         options: RealtimeSessionOptions,
-    ) -> AsyncIterator["RealtimeAgentSession"]:
+    ) -> AsyncGenerator["RealtimeAgentSession", None]:
         """Load retained history and own all connection-local background tasks."""
         if options.activity.detection not in self.capabilities.activity_detection_modes:
             raise RealtimeUnsupportedOptionError(
@@ -186,9 +191,12 @@ class RealtimeAgentService:
                     selected_tools,
                     self._conversations,
                     conversation_key,
+                    model=definition.model,
+                    cost_calculator=self._cost_calculator,
                     interactions=self._interactions,
                     notifier=self._notifier,
                     activity_detection=options.activity.detection,
+                    input_audio_mime_type=self.capabilities.input_audio_mime_type,
                     max_audio_chunk_bytes=self._max_audio_chunk_bytes,
                     max_tool_rounds=self._max_tool_rounds,
                     outbound_max_messages=self._outbound_max_messages,
@@ -211,11 +219,14 @@ class RealtimeAgentSession:
         conversations: ConversationRepository,
         conversation_key: ConversationKey,
         *,
+        model: str = "unknown",
+        cost_calculator: ModelCostCalculator | None = None,
         max_audio_chunk_bytes: int,
         max_tool_rounds: int,
         interactions: InteractionRepository | None = None,
         notifier: InteractionNotifier | None = None,
         activity_detection: Literal["automatic", "explicit"] = "automatic",
+        input_audio_mime_type: str = "audio/pcm;rate=16000",
         outbound_max_messages: int = 128,
         outbound_max_audio_bytes: int = 131_072,
         outbound_enqueue_timeout_seconds: float = 5.0,
@@ -227,9 +238,12 @@ class RealtimeAgentSession:
         self._tools = tools
         self._conversations = conversations
         self._conversation_key = conversation_key
+        self._model = model
+        self._cost_calculator = cost_calculator or ModelCostCalculator()
         self._interactions = interactions
         self._notifier = notifier
         self._activity_detection = activity_detection
+        self._input_audio_mime_type = input_audio_mime_type
         self._max_audio_chunk_bytes = max_audio_chunk_bytes
         self._max_tool_rounds = max_tool_rounds
         self._outbound_enqueue_timeout_seconds = outbound_enqueue_timeout_seconds
@@ -254,6 +268,9 @@ class RealtimeAgentSession:
         self._command_done = asyncio.Event()
         self._active_command: InteractionCommand | None = None
         self._active_command_deadline: float | None = None
+        self._active_command_injected = False
+        self._active_command_delivery_done = asyncio.Event()
+        self._active_command_delivery_done.set()
         self._turn_id: str | None = None
         self._activity_turn_id: str | None = None
         self._pending_audio_turn_id: str | None = None
@@ -264,9 +281,14 @@ class RealtimeAgentSession:
         self._turn_has_output = False
         self._input_parts: list[str] = []
         self._output_parts: list[str] = []
+        self._pre_tool_output: str | None = None
+        self._deferred_output_parts: list[str] = []
+        self._deferred_output_events: list[RealtimeOutputTranscriptDelta | RealtimeAudioDelta] = []
+        self._deferred_audio_bytes = 0
         self._turn_items: list[ConversationItem] = []
         self._records: list[ToolCallRecord] = []
         self._visual_components: list[VisualPresentation] = []
+        self._model_calls: list[ModelCallMetrics] = []
         self._tool_rounds = 0
 
     @property
@@ -275,7 +297,7 @@ class RealtimeAgentSession:
         return self._connection_state
 
     @asynccontextmanager
-    async def lifecycle(self) -> AsyncIterator[None]:
+    async def lifecycle(self) -> AsyncGenerator[None, None]:
         """Own writer and durable dispatcher tasks for the socket lifetime."""
         self._lifecycle_active = True
         self._closing = False
@@ -313,7 +335,11 @@ class RealtimeAgentSession:
             )
         if len(data) % 2:
             raise RealtimeAudioChunkError("PCM16 audio chunks must contain complete samples")
-        await self._enqueue("audio", AudioChunk(data=data), audio_bytes=len(data))
+        await self._enqueue(
+            "audio",
+            AudioChunk(data=data, mime_type=self._input_audio_mime_type),
+            audio_bytes=len(data),
+        )
 
     async def end_audio(self) -> None:
         """Pause capture and enqueue the provider-specific stream boundary."""
@@ -388,32 +414,57 @@ class RealtimeAgentSession:
     async def _handle_model_event(self, event: object) -> AsyncIterator[RealtimeAgentEvent]:
         """Translate one provider-neutral event and advance connection-local state."""
         if isinstance(event, RealtimeModelInputTranscriptDelta):
-            await self._activate_audio_turn_for_input()
+            # OpenAI input transcription is asynchronous and may arrive after output
+            # has already started. In that case it still belongs to the active turn.
+            if self._turn_id is None or self._active_command is not None:
+                await self._activate_audio_turn_for_input()
             turn_id = self._require_turn_id()
             self._input_parts.append(event.text)
             self._turn_has_input = True
             yield RealtimeInputTranscriptDelta(turn_id=turn_id, text=event.text)
         elif isinstance(event, RealtimeModelOutputTranscriptDelta):
             turn_id = self._ensure_turn_id()
-            self._output_parts.append(event.text)
             self._turn_has_output = True
-            yield RealtimeOutputTranscriptDelta(turn_id=turn_id, text=event.text)
+            transcript_event = RealtimeOutputTranscriptDelta(turn_id=turn_id, text=event.text)
+            if self._pre_tool_output is not None:
+                self._deferred_output_parts.append(event.text)
+                self._deferred_output_events.append(transcript_event)
+            else:
+                self._output_parts.append(event.text)
+                yield transcript_event
         elif isinstance(event, RealtimeModelAudioDelta):
             turn_id = self._ensure_turn_id()
             self._turn_has_output = True
-            yield RealtimeAudioDelta(
+            audio_event = RealtimeAudioDelta(
                 turn_id=turn_id,
                 data=event.data,
                 mime_type=event.mime_type,
             )
+            if self._pre_tool_output is not None:
+                self._deferred_output_events.append(audio_event)
+                self._deferred_audio_bytes += len(event.data)
+                if self._deferred_audio_bytes > MAX_DEFERRED_REALTIME_AUDIO_BYTES:
+                    logger.warning(
+                        "realtime_tool_continuation_buffer_exceeded",
+                        turn_id=turn_id,
+                        audio_bytes=self._deferred_audio_bytes,
+                    )
+                    for deferred in self._release_deferred_output(deduplicate=False):
+                        yield deferred
+            else:
+                yield audio_event
         elif isinstance(event, RealtimeModelAudioInterrupted):
-            await self._activate_audio_turn_for_input()
-            yield RealtimeAudioInterrupted(turn_id=self._ensure_turn_id())
+            interrupted_turn_id = await self._activate_audio_turn_for_input()
+            yield RealtimeAudioInterrupted(turn_id=interrupted_turn_id or self._ensure_turn_id())
         elif isinstance(event, RealtimeModelToolCall):
+            self._capture_metrics(event.usage)
             async for tool_event in self._handle_tools(self._ensure_turn_id(), event):
                 yield tool_event
         elif isinstance(event, RealtimeModelTurnCompleted):
             turn_id = self._ensure_turn_id()
+            self._capture_metrics(event.usage)
+            for deferred in self._release_deferred_output(deduplicate=True):
+                yield deferred
             yield await self._complete_turn(turn_id, event.response_id)
         elif isinstance(event, RealtimeModelActivityStarted):
             await self._activate_audio_turn_for_input()
@@ -441,6 +492,10 @@ class RealtimeAgentSession:
         event: RealtimeModelToolCall,
     ) -> AsyncIterator[RealtimeAgentEvent]:
         """Execute one tool batch and enqueue results through the single writer."""
+        if self._pre_tool_output is None:
+            emitted = "".join(self._output_parts).strip()
+            if emitted:
+                self._pre_tool_output = emitted
         self._tool_rounds += 1
         if self._tool_rounds > self._max_tool_rounds:
             raise RealtimeToolRoundsExceededError(
@@ -470,24 +525,66 @@ class RealtimeAgentSession:
             yield RealtimeVisualComponent(turn_id=turn_id, presentation=presentation)
         await self._enqueue("tool_results", execution.results)
 
+    def _release_deferred_output(
+        self,
+        *,
+        deduplicate: bool,
+    ) -> tuple[RealtimeOutputTranscriptDelta | RealtimeAudioDelta, ...]:
+        """Release a post-tool continuation unless it repeats prior spoken output."""
+        if self._pre_tool_output is None:
+            return ()
+        continuation = "".join(self._deferred_output_parts).strip()
+        duplicate = (
+            deduplicate
+            and bool(continuation)
+            and self._normalized_spoken_text(continuation)
+            == self._normalized_spoken_text(self._pre_tool_output)
+        )
+        events = () if duplicate else tuple(self._deferred_output_events)
+        if duplicate:
+            logger.info(
+                "realtime_duplicate_tool_continuation_suppressed",
+                turn_id=self._turn_id,
+                audio_bytes=self._deferred_audio_bytes,
+            )
+        else:
+            self._output_parts.extend(self._deferred_output_parts)
+        self._pre_tool_output = None
+        self._deferred_output_parts = []
+        self._deferred_output_events = []
+        self._deferred_audio_bytes = 0
+        return events
+
+    @staticmethod
+    def _normalized_spoken_text(value: str) -> str:
+        """Compare spoken copies independently of whitespace and punctuation."""
+        return "".join(character for character in value.casefold() if character.isalnum())
+
     async def _complete_turn(self, turn_id: str, response_id: str) -> RealtimeTurnCompleted:
         """Persist one real provider turn before confirming proactive delivery."""
         answer = "".join(self._output_parts).strip()
         user_text = "".join(self._input_parts).strip()
         source = self._source
         active_command = self._active_command
+        metrics = TurnMetrics(calls=tuple(self._model_calls))
         result = AgentResult(
             answer=answer,
             response_id=response_id,
             conversation_id=self._conversation_key.conversation_id,
             tool_calls=tuple(self._records),
             visual_components=tuple(self._visual_components),
+            metrics=metrics,
         )
         if user_text:
             turn = (
                 ConversationMessage(role="user", content=user_text, source=source),
                 *self._turn_items,
-                ConversationMessage(role="assistant", content=answer, source="assistant"),
+                ConversationMessage(
+                    role="assistant",
+                    content=answer,
+                    source="assistant",
+                    metrics=metrics if metrics.calls else None,
+                ),
             )
             await self._persist_turn(turn, turn_id=turn_id)
         if active_command is not None and active_command.request_id == turn_id:
@@ -495,10 +592,21 @@ class RealtimeAgentSession:
             await self._interactions.complete(active_command.command_id, self._worker_id)
             self._active_command = None
             self._active_command_deadline = None
+            self._active_command_injected = False
+            self._active_command_delivery_done.set()
             self._command_done.set()
         self._turn_id = None
         self._reset_turn_buffers()
         self._refresh_idle()
+        logger.info(
+            "realtime_turn_completed",
+            response_id=response_id,
+            turn_id=turn_id,
+            input_tokens=metrics.usage.input_tokens,
+            output_tokens=metrics.usage.output_tokens,
+            cost_amount=str(metrics.cost.amount) if metrics.cost is not None else None,
+            cost_currency=metrics.cost.currency if metrics.cost is not None else None,
+        )
         return RealtimeTurnCompleted(
             turn_id=turn_id,
             result=result,
@@ -506,6 +614,43 @@ class RealtimeAgentSession:
             job_id=active_command.request_id if active_command is not None else None,
             causation_id=active_command.causation_id if active_command is not None else None,
         )
+
+    async def _persist_interrupted_user_turn(self) -> str | None:
+        """Persist the client-visible prefix of a user turn before discarding it."""
+        turn_id = self._turn_id
+        if turn_id is None or self._source == "worker_agent":
+            return None
+        answer = "".join(self._output_parts).strip()
+        user_text = "".join(self._input_parts).strip()
+        metrics = TurnMetrics(calls=tuple(self._model_calls))
+        if user_text:
+            turn = (
+                ConversationMessage(role="user", content=user_text, source=self._source),
+                *self._turn_items,
+                ConversationMessage(
+                    role="assistant",
+                    content=answer,
+                    source="assistant",
+                    metrics=metrics if metrics.calls else None,
+                ),
+            )
+            await self._persist_turn(turn, turn_id=turn_id)
+        self._turn_id = None
+        self._reset_turn_buffers()
+        self._refresh_idle()
+        logger.info(
+            "realtime_turn_interrupted",
+            turn_id=turn_id,
+            persisted=bool(user_text),
+            input_tokens=metrics.usage.input_tokens,
+            output_tokens=metrics.usage.output_tokens,
+        )
+        return turn_id
+
+    def _capture_metrics(self, usage: ModelUsage) -> None:
+        """Accumulate each billable realtime response inside its logical turn."""
+        if usage.total_tokens:
+            self._model_calls.append(self._cost_calculator.metrics(self._model, usage))
 
     async def _persist_turn(
         self,
@@ -555,6 +700,8 @@ class RealtimeAgentSession:
                 self._active_command_deadline = (
                     asyncio.get_running_loop().time() + self._proactive_turn_timeout_seconds
                 )
+                self._active_command_injected = False
+                self._active_command_delivery_done.clear()
                 self._command_done.clear()
                 if self._closing:
                     await self._requeue_active_command()
@@ -567,6 +714,8 @@ class RealtimeAgentSession:
                 self._input_parts.append(command.message)
                 try:
                     await self._enqueue("a2a_completion", command.message)
+                    if self._active_command is None:
+                        continue
                     remaining = self._active_command_time_remaining()
                     if remaining <= 0:
                         raise TimeoutError
@@ -675,9 +824,18 @@ class RealtimeAgentSession:
             await self._model_session.start_activity()
         elif kind == "activity_end":
             await self._model_session.end_activity()
-        elif kind in {"text", "a2a_completion"}:
+        elif kind == "text":
             assert isinstance(payload, str)
             await self._model_session.send_text(payload)
+        elif kind == "a2a_completion":
+            assert isinstance(payload, str)
+            try:
+                await self._model_session.send_text(payload)
+                command = self._active_command
+                if command is not None and command.message == payload:
+                    self._active_command_injected = True
+            finally:
+                self._active_command_delivery_done.set()
         elif kind == "close":
             return
         else:
@@ -699,13 +857,16 @@ class RealtimeAgentSession:
         try:
             await self._drain_visible_proactive_turn()
         finally:
-            await self._requeue_active_command()
-            if self._dispatcher_task is not None:
-                self._dispatcher_task.cancel()
-                await asyncio.gather(self._dispatcher_task, return_exceptions=True)
-            await self._stop_writer()
-            self._dispatcher_task = None
-            self._writer_task = None
+            try:
+                await self._requeue_active_command()
+                await self._persist_interrupted_user_turn()
+            finally:
+                if self._dispatcher_task is not None:
+                    self._dispatcher_task.cancel()
+                    await asyncio.gather(self._dispatcher_task, return_exceptions=True)
+                await self._stop_writer()
+                self._dispatcher_task = None
+                self._writer_task = None
 
     async def _drain_visible_proactive_turn(self) -> None:
         """Finish a response already exposed to the client before closing its session."""
@@ -763,6 +924,8 @@ class RealtimeAgentSession:
             return
         self._active_command = None
         self._active_command_deadline = None
+        self._active_command_injected = False
+        self._active_command_delivery_done.set()
         self._command_done.set()
         try:
             await asyncio.shield(self._interactions.requeue(command.command_id, self._worker_id))
@@ -772,6 +935,57 @@ class RealtimeAgentSession:
                 command_id=command.command_id,
                 error_type=type(exc).__name__,
             )
+
+    async def _settle_active_command_for_user_interruption(self) -> str | None:
+        """Acknowledge an injected result instead of scheduling the same notice again."""
+        command = self._active_command
+        if command is None:
+            return None
+        turn_id = command.request_id
+        if not self._active_command_delivery_done.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._active_command_delivery_done.wait(),
+                    timeout=self._outbound_enqueue_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                raise RealtimeBackpressureError(
+                    "Realtime proactive delivery did not finish before interruption"
+                ) from exc
+            if self._active_command is None:
+                return turn_id
+        if not self._active_command_injected:
+            await self._requeue_active_command()
+            return turn_id
+        assert self._interactions is not None
+        metrics = TurnMetrics(calls=tuple(self._model_calls))
+        turn = (
+            ConversationMessage(role="user", content=command.message, source="worker_agent"),
+            *self._turn_items,
+            ConversationMessage(
+                role="assistant",
+                content="".join(self._output_parts).strip(),
+                source="assistant",
+                metrics=metrics if metrics.calls else None,
+            ),
+        )
+        await self._persist_turn(turn, turn_id=turn_id)
+        await self._interactions.complete(command.command_id, self._worker_id)
+        self._active_command = None
+        self._active_command_deadline = None
+        self._active_command_injected = False
+        self._active_command_delivery_done.set()
+        self._command_done.set()
+        self._turn_id = None
+        self._reset_turn_buffers()
+        self._refresh_idle()
+        logger.info(
+            "realtime_proactive_turn_interrupted",
+            command_id=command.command_id,
+            turn_id=turn_id,
+            persisted=True,
+        )
+        return turn_id
 
     def _active_command_time_remaining(self) -> float:
         """Return the bounded time left for the current proactive model turn."""
@@ -789,7 +1003,7 @@ class RealtimeAgentSession:
         source: InteractionSource,
         preserve_pending_audio: bool = False,
     ) -> None:
-        """Start a logical turn and discard any response superseded by barge-in."""
+        """Start a logical turn after its predecessor has been durably settled."""
         if not turn_id:
             raise RealtimeSessionStateError("turn_id cannot be empty")
         self._turn_id = turn_id
@@ -799,24 +1013,37 @@ class RealtimeAgentSession:
         self._reset_turn_buffers()
         self._refresh_idle()
 
-    async def _activate_audio_turn_for_input(self) -> None:
-        """Let provider activity supersede a proactive turn and correlate speech."""
+    async def _activate_audio_turn_for_input(self) -> str | None:
+        """Supersede an active turn, retaining any user response already exposed."""
+        interrupted_turn_id: str | None = None
         if self._pending_audio_turn_id is not None:
-            await self._requeue_active_command()
+            if self._active_command is not None:
+                interrupted_turn_id = await self._settle_active_command_for_user_interruption()
+            else:
+                interrupted_turn_id = await self._persist_interrupted_user_turn()
             self._begin_turn(self._pending_audio_turn_id, source="speech_user")
         elif self._active_command is not None:
-            await self._requeue_active_command()
+            interrupted_turn_id = await self._settle_active_command_for_user_interruption()
             self._begin_turn(str(uuid4()), source="speech_user")
-        elif self._turn_id is None or self._turn_has_output:
+        elif self._turn_id is None:
             self._begin_turn(str(uuid4()), source="speech_user")
+        elif self._turn_has_output:
+            interrupted_turn_id = await self._persist_interrupted_user_turn()
+            self._begin_turn(str(uuid4()), source="speech_user")
+        return interrupted_turn_id
 
     def _reset_turn_buffers(self) -> None:
         """Discard connection-local transcript and audit buffers between turns."""
         self._input_parts = []
         self._output_parts = []
+        self._pre_tool_output = None
+        self._deferred_output_parts = []
+        self._deferred_output_events = []
+        self._deferred_audio_bytes = 0
         self._turn_items = []
         self._records = []
         self._visual_components = []
+        self._model_calls = []
         self._tool_rounds = 0
         self._turn_has_input = False
         self._turn_has_output = False
@@ -831,7 +1058,8 @@ class RealtimeAgentSession:
     def _ensure_turn_id(self) -> str:
         """Create a server turn ID for provider output lacking explicit input."""
         if self._turn_id is None:
-            self._begin_turn(str(uuid4()), source="speech_user")
+            turn_id = self._pending_audio_turn_id or str(uuid4())
+            self._begin_turn(turn_id, source="speech_user")
         return self._require_turn_id()
 
     def _require_turn_id(self) -> str:

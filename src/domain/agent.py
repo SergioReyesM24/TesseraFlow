@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from domain.costs import TurnMetrics
 from domain.tools import ToolCallRecord
 from domain.visuals import VisualPresentation
 
@@ -22,3 +23,4 @@ class AgentResult:
     conversation_id: str
     tool_calls: tuple[ToolCallRecord, ...] = field(default_factory=tuple)
     visual_components: tuple[VisualPresentation, ...] = field(default_factory=tuple)
+    metrics: TurnMetrics = TurnMetrics()

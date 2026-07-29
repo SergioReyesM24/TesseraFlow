@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { websocketUrl } from '../lib/api'
 import { base64ToArrayBuffer, PcmPlayer } from '../lib/audio'
+import { parseTurnMetrics } from '../lib/costs'
 import { mergeVisual, parseVisualPresentation } from '../lib/visuals'
 import type {
   ConnectionState,
@@ -121,6 +122,7 @@ export function useAgentSocket(options: AgentSocketOptions): AgentSocketControll
             ...message,
             content: typeof data.answer === 'string' ? data.answer : message.content,
             status: 'complete',
+            metrics: parseTurnMetrics(data.metrics),
           })),
         )
       } else if (event.type === 'error') {

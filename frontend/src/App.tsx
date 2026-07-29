@@ -317,7 +317,9 @@ function Workspace({
                   <span className="record-ring" />
                 </button>
                 <span className="voice-hint">
-                  {voice.recording ? 'Pulsa para terminar tu turno' : 'PCM16 · 16 kHz'}
+                  {voice.recording
+                    ? 'Pulsa para terminar tu turno'
+                    : `PCM16 · ${voice.inputSampleRate / 1000} kHz`}
                 </span>
               </div>
 

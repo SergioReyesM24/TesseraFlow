@@ -19,8 +19,10 @@ from application.realtime import RealtimeAgentService
 from application.tools import ToolRegistry
 from config import Settings
 from domain.agent import AgentDefinition
+from domain.costs import ModelCostCalculator, ModelRates, ModelRateTier
 from infrastructure.gemini_realtime_gateway import GeminiRealtimeGateway
 from infrastructure.openai_gateway import OpenAIResponsesGateway
+from infrastructure.openai_realtime_gateway import OpenAIRealtimeGateway
 
 AsyncCloser = Callable[[], Awaitable[None]]
 
@@ -59,15 +61,17 @@ def build_model_runtime(
     """Compose independent text, realtime, and worker provider roles."""
     _validate_selection(settings)
     closers: list[AsyncCloser] = []
+    openai_client: AsyncOpenAI | None = None
     openai_gateway: OpenAIResponsesGateway | None = None
+    openai_realtime_gateway: OpenAIRealtimeGateway | None = None
     gemini_client: genai.Client | None = None
     gemini_realtime_gateway: GeminiRealtimeGateway | None = None
 
-    def get_openai_gateway() -> OpenAIResponsesGateway:
-        """Create one shared OpenAI client lazily for text-compatible roles."""
-        nonlocal openai_gateway
-        if openai_gateway is None:
-            client = AsyncOpenAI(
+    def get_openai_client() -> AsyncOpenAI:
+        """Create the process-shared client used by registered OpenAI adapters."""
+        nonlocal openai_client
+        if openai_client is None:
+            openai_client = AsyncOpenAI(
                 api_key=settings.openai_api_key or "missing-api-key",
                 base_url=settings.openai_base_url,
                 timeout=httpx.Timeout(
@@ -77,9 +81,28 @@ def build_model_runtime(
                     pool=600.0,
                 ),
             )
-            closers.append(client.close)
-            openai_gateway = OpenAIResponsesGateway(client)
+            closers.append(openai_client.close)
+        return openai_client
+
+    def get_openai_gateway() -> OpenAIResponsesGateway:
+        """Create the Responses adapter lazily for text-compatible roles."""
+        nonlocal openai_gateway
+        if openai_gateway is None:
+            openai_gateway = OpenAIResponsesGateway(get_openai_client())
         return openai_gateway
+
+    def get_openai_realtime_gateway() -> OpenAIRealtimeGateway:
+        """Create the official OpenAI speech-to-speech Realtime adapter lazily."""
+        nonlocal openai_realtime_gateway
+        if openai_realtime_gateway is None:
+            openai_realtime_gateway = OpenAIRealtimeGateway(
+                get_openai_client(),
+                voice_name=settings.openai_realtime_voice_name,
+                transcription_model=settings.openai_realtime_transcription_model,
+                input_language_code=settings.openai_realtime_language_code,
+                reasoning_effort=settings.openai_realtime_reasoning_effort,
+            )
+        return openai_realtime_gateway
 
     def get_gemini_client() -> genai.Client:
         """Create the process-shared client used by registered Gemini adapters."""
@@ -114,10 +137,37 @@ def build_model_runtime(
     }
     realtime_gateways: dict[str, Callable[[], RealtimeModelGateway]] = {
         "gemini": get_gemini_realtime_gateway,
+        "openai": get_openai_realtime_gateway,
     }
     text_gateway = text_gateways[settings.text_agent_provider]()
     worker_gateway = worker_gateways[settings.worker_provider]()
     realtime_gateway = realtime_gateways[settings.realtime_agent_provider]()
+    cost_calculator = ModelCostCalculator(
+        {
+            model: ModelRates(
+                input=rates.input,
+                output=rates.output,
+                cached_input=rates.cached_input,
+                cached_input_audio=rates.cached_input_audio,
+                input_audio=rates.input_audio,
+                output_audio=rates.output_audio,
+                currency=rates.currency,
+                tiers=tuple(
+                    ModelRateTier(
+                        min_input_tokens=tier.min_input_tokens,
+                        input=tier.input,
+                        output=tier.output,
+                        cached_input=tier.cached_input,
+                        cached_input_audio=tier.cached_input_audio,
+                        input_audio=tier.input_audio,
+                        output_audio=tier.output_audio,
+                    )
+                    for tier in rates.tiers
+                ),
+            )
+            for model, rates in settings.model_pricing.items()
+        }
+    )
 
     text_definition = AgentDefinition(
         model=settings.text_agent_model,
@@ -139,12 +189,14 @@ def build_model_runtime(
         tools=interactive_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
+        cost_calculator=cost_calculator,
     )
     worker_agent_service = AgentService(
         model_gateway=worker_gateway,
         tools=worker_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
+        cost_calculator=cost_calculator,
     )
     realtime_agent_service = RealtimeAgentService(
         model_gateway=realtime_gateway,
@@ -160,6 +212,7 @@ def build_model_runtime(
         outbound_enqueue_timeout_seconds=settings.realtime_outbound_enqueue_timeout_seconds,
         proactive_turn_timeout_seconds=settings.realtime_proactive_turn_timeout_seconds,
         command_reconciliation_seconds=settings.realtime_command_reconciliation_seconds,
+        cost_calculator=cost_calculator,
     )
     return ModelRuntime(
         text_agent=TurnInteractionAgent(text_agent_service, text_definition),
@@ -180,7 +233,7 @@ def _validate_selection(settings: Settings) -> None:
     """Reject roles lacking a concrete provider adapter at composition time."""
     if settings.text_agent_provider != "openai":
         raise ValueError(f"Unsupported text agent provider: {settings.text_agent_provider}")
-    if settings.realtime_agent_provider != "gemini":
+    if settings.realtime_agent_provider not in {"gemini", "openai"}:
         raise ValueError(f"Unsupported realtime agent provider: {settings.realtime_agent_provider}")
     if settings.worker_provider != "openai":
         raise ValueError(f"Unsupported worker provider: {settings.worker_provider}")

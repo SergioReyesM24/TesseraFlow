@@ -1,7 +1,8 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ from domain.conversations import (
     ConversationMessage,
     ConversationSummary,
 )
+from domain.costs import ModelCallMetrics, ModelCost, ModelUsage, TurnMetrics
 from domain.interactions import InteractionCommand, InteractionOutput
 from domain.realtime import (
     RealtimeAgentEvent,
@@ -104,6 +106,18 @@ class StubConversationCoordinator:
                 answer="Hola, ¿en qué puedo ayudarte?",
                 response_id="resp_stream",
                 conversation_id=command.conversation.conversation_id,
+                metrics=TurnMetrics(
+                    calls=(
+                        ModelCallMetrics(
+                            model="test-model",
+                            usage=ModelUsage(input_tokens=100, output_tokens=20),
+                            cost=ModelCost(
+                                amount=Decimal("0.000065"),
+                                currency="USD",
+                            ),
+                        ),
+                    )
+                ),
             )
         )
         return (
@@ -308,6 +322,23 @@ class StubRealtimeSession:
                     answer="Respuesta",
                     response_id="realtime-response",
                     conversation_id=SESSION_UID,
+                    metrics=TurnMetrics(
+                        calls=(
+                            ModelCallMetrics(
+                                model="realtime-model",
+                                usage=ModelUsage(
+                                    input_tokens=200,
+                                    output_tokens=40,
+                                    input_audio_tokens=150,
+                                    output_audio_tokens=30,
+                                ),
+                                cost=ModelCost(
+                                    amount=Decimal("0.001"),
+                                    currency="USD",
+                                ),
+                            ),
+                        )
+                    ),
                 ),
                 source="text_user",
             )
@@ -343,7 +374,7 @@ class StubRealtimeService:
         definition: AgentDefinition,
         conversation_key: ConversationKey,
         options: RealtimeSessionOptions | None = None,
-    ) -> AsyncIterator[StubRealtimeSession]:
+    ) -> AsyncGenerator[StubRealtimeSession, None]:
         """Validate route composition and yield the transport double."""
         assert definition.model == "realtime-model"
         assert conversation_key == ConversationKey(
@@ -552,6 +583,11 @@ def test_agent_websocket_streams_correlated_json_events() -> None:
     assert completed["request_id"] == REQUEST_UID
     assert completed["data"]["answer"] == "Hola, ¿en qué puedo ayudarte?"
     assert completed["data"]["session_uid"] == SESSION_UID
+    assert completed["data"]["metrics"]["cost"] == {
+        "amount": 0.000065,
+        "currency": "USD",
+    }
+    assert completed["data"]["metrics"]["usage"]["total_tokens"] == 120
     assert second_delta["request_id"] == SECOND_REQUEST_UID
     assert second_delta["data"] == {"text": "Hola"}
     assert second_completed["type"] == "completed"
@@ -663,6 +699,7 @@ def test_realtime_websocket_bridges_binary_pcm_and_semantic_events() -> None:
     assert completed["type"] == "turn_completed"
     assert completed["data"]["turn_id"] == SECOND_REQUEST_UID
     assert completed["data"]["answer"] == "Respuesta"
+    assert completed["data"]["metrics"]["cost"]["amount"] == 0.001
 
 
 def test_realtime_websocket_is_always_composed() -> None:

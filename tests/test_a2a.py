@@ -1,6 +1,6 @@
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from uuid import UUID
@@ -111,7 +111,7 @@ class InMemoryA2AJobNotifier:
         self.subscribed = asyncio.Event()
 
     @asynccontextmanager
-    async def subscribe_jobs(self) -> AsyncIterator[InMemoryA2ASubscription]:
+    async def subscribe_jobs(self) -> AsyncGenerator[InMemoryA2ASubscription, None]:
         """Register one worker subscription for its task lifetime."""
         subscription = InMemoryA2ASubscription()
         self.subscriptions.add(subscription)
@@ -297,7 +297,7 @@ class StubModelGateway:
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[StubModelSession]:
+    ) -> AsyncGenerator[StubModelSession, None]:
         """Record the worker context before creating its isolated session."""
         del definition, tools
         self.histories.append(history)

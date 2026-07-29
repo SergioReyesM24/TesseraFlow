@@ -16,6 +16,36 @@ export interface ConversationMessage {
   status?: 'streaming' | 'complete' | 'error'
   tools?: ToolActivity[]
   visuals?: VisualPresentation[]
+  metrics?: TurnMetrics
+}
+
+export interface ModelUsage {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cached_input_tokens: number
+  uncached_input_tokens: number
+  cached_input_audio_tokens: number
+  reasoning_tokens: number
+  input_audio_tokens: number
+  output_audio_tokens: number
+}
+
+export interface ModelCost {
+  amount: number
+  currency: string
+}
+
+export interface ModelCallMetrics {
+  model: string
+  usage: ModelUsage
+  cost: ModelCost | null
+}
+
+export interface TurnMetrics {
+  usage: ModelUsage
+  cost: ModelCost | null
+  calls: ModelCallMetrics[]
 }
 
 export interface ChartPoint {
@@ -99,6 +129,7 @@ export interface ConversationMessageHistoryPayload {
   role: 'user' | 'assistant'
   content: string
   source: 'text_user' | 'speech_user' | 'worker_agent' | 'assistant'
+  metrics?: TurnMetrics | null
 }
 
 export interface ToolCallHistoryPayload {

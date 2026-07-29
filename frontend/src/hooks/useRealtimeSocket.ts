@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { websocketUrl } from '../lib/api'
 import { MicrophoneCapture, PcmPlayer } from '../lib/audio'
 import { mergeVisual, parseVisualPresentation } from '../lib/visuals'
+import { parseTurnMetrics } from '../lib/costs'
 import type {
   ConnectionState,
   ConversationMessage,
@@ -22,6 +23,7 @@ interface RealtimeSocketController {
   error: string | null
   ready: boolean
   recording: boolean
+  inputSampleRate: number
   activateAudio: () => Promise<void>
   startRecording: () => Promise<void>
   stopRecording: () => Promise<void>
@@ -53,6 +55,21 @@ function mergeTool(tools: ToolActivity[] | undefined, incoming: ToolActivity): T
     : [...current, incoming]
 }
 
+/** Close transcript bubbles whose realtime turn can no longer receive deltas. */
+export function completeStreamingMessages(
+  current: ConversationMessage[],
+  exceptTurnId?: string,
+): ConversationMessage[] {
+  const exceptIds = exceptTurnId
+    ? new Set([`voice-user-${exceptTurnId}`, `voice-assistant-${exceptTurnId}`])
+    : null
+  return current.map((message) =>
+    message.status === 'streaming' && !exceptIds?.has(message.id)
+      ? { ...message, status: 'complete' }
+      : message,
+  )
+}
+
 /** Manage microphone capture, PCM playback and semantic realtime events. */
 export function useRealtimeSocket(
   options: RealtimeSocketOptions,
@@ -63,9 +80,11 @@ export function useRealtimeSocket(
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [recording, setRecording] = useState(false)
+  const [inputSampleRate, setInputSampleRate] = useState(16_000)
   const socketRef = useRef<WebSocket | null>(null)
   const currentTurnRef = useRef<string | null>(null)
   const activityModeRef = useRef<'automatic' | 'explicit'>('automatic')
+  const inputSampleRateRef = useRef(16_000)
   const outputSampleRateRef = useRef(24_000)
   const readyRef = useRef(false)
   const [capture] = useState(() => new MicrophoneCapture())
@@ -81,6 +100,13 @@ export function useRealtimeSocket(
       }
       if (event.type === 'realtime_ready') {
         activityModeRef.current = data.activity_detection === 'explicit' ? 'explicit' : 'automatic'
+        if (typeof data.input_audio === 'string') {
+          const rate = /(?:^|;)rate=(\d+)(?:;|$)/.exec(data.input_audio)?.[1]
+          if (rate) {
+            inputSampleRateRef.current = Number(rate)
+            setInputSampleRate(Number(rate))
+          }
+        }
         if (typeof data.output_audio === 'string') {
           const rate = /(?:^|;)rate=(\d+)(?:;|$)/.exec(data.output_audio)?.[1]
           if (rate) outputSampleRateRef.current = Number(rate)
@@ -148,6 +174,7 @@ export function useRealtimeSocket(
             ...message,
             content: typeof data.answer === 'string' ? data.answer : message.content,
             status: 'complete',
+            metrics: parseTurnMetrics(data.metrics),
           }))
           if (data.source === 'worker_agent') return withAssistant
           return updateTurnMessage(withAssistant, turnId, 'user', (message) => ({
@@ -158,6 +185,15 @@ export function useRealtimeSocket(
         if (currentTurnRef.current === turnId) currentTurnRef.current = null
       } else if (event.type === 'audio_interrupted') {
         player.clear()
+        setMessages((current) =>
+          updateTurnMessage(current, turnId, 'assistant', (message) => ({
+            ...message,
+            status: 'complete',
+          })),
+        )
+        if (currentTurnRef.current === turnId) currentTurnRef.current = null
+      } else if (event.type === 'activity_started') {
+        setMessages((current) => completeStreamingMessages(current, turnId))
       } else if (event.type === 'reconnecting') {
         readyRef.current = false
         void capture.stop()
@@ -243,6 +279,7 @@ export function useRealtimeSocket(
         void capture.stop()
         setRecording(false)
         setReady(false)
+        setMessages((current) => completeStreamingMessages(current))
         if (disposed) return
         setConnection('disconnected')
         if (closeEvent.code === 1008) {
@@ -288,7 +325,7 @@ export function useRealtimeSocket(
         if (readyRef.current && activeSocket?.readyState === WebSocket.OPEN) {
           activeSocket.send(chunk)
         }
-      })
+      }, inputSampleRateRef.current)
       const turnId = crypto.randomUUID()
       currentTurnRef.current = turnId
       socket.send(JSON.stringify({ type: 'audio_start', turn_id: turnId }))
@@ -345,6 +382,7 @@ export function useRealtimeSocket(
     error,
     ready: enabled && ready,
     recording: enabled && recording,
+    inputSampleRate,
     activateAudio,
     startRecording,
     stopRecording,

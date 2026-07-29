@@ -46,11 +46,19 @@ class FakeOutputItem:
 
 
 class FakeResponse:
-    def __init__(self, response_id: str, text: str, output: list[FakeOutputItem]) -> None:
+    def __init__(
+        self,
+        response_id: str,
+        text: str,
+        output: list[FakeOutputItem],
+        *,
+        usage: object | None = None,
+    ) -> None:
         self.id = response_id
         self.output_text = text
         self.output = output
         self._request_id = f"request_{response_id}"
+        self.usage = usage
 
 
 class FakeResponsesResource:
@@ -183,6 +191,28 @@ async def test_gateway_creates_isolated_sessions_with_a_shared_client() -> None:
 
     assert resource.requests[0]["input"] == [{"role": "user", "content": "Mensaje A"}]
     assert resource.requests[1]["input"] == [{"role": "user", "content": "Mensaje B"}]
+
+
+async def test_openai_usage_is_normalized_without_leaking_sdk_types() -> None:
+    """Map cache and reasoning details onto the shared model usage contract."""
+    usage = SimpleNamespace(
+        input_tokens=1_000,
+        output_tokens=120,
+        input_tokens_details=SimpleNamespace(cached_tokens=400),
+        output_tokens_details=SimpleNamespace(reasoning_tokens=20),
+    )
+    resource = FakeResponsesResource(
+        [FakeResponse("resp_usage", "Respuesta", [], usage=usage)]
+    )
+    client = SimpleNamespace(responses=resource)
+
+    async with OpenAIResponsesGateway(client).open_session(definition(), (), ()) as session:
+        reply = await session.send_message("Hola")
+
+    assert reply.usage.input_tokens == 1_000
+    assert reply.usage.output_tokens == 120
+    assert reply.usage.cached_input_tokens == 400
+    assert reply.usage.reasoning_tokens == 20
 
 
 async def test_openai_stream_normalizes_deltas_and_continues_after_a_tool() -> None:
