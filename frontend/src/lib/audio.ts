@@ -87,7 +87,7 @@ export class PcmPlayer {
   }
 }
 
-/** Capture microphone audio and deliver resampled PCM16 chunks at 16 kHz. */
+/** Capture microphone audio and deliver resampled PCM16 chunks at a negotiated rate. */
 export class MicrophoneCapture {
   private context: AudioContext | null = null
   private stream: MediaStream | null = null
@@ -96,7 +96,10 @@ export class MicrophoneCapture {
   private silentGain: GainNode | null = null
 
   /** Request microphone access and begin producing transferable PCM chunks. */
-  async start(onChunk: (chunk: ArrayBuffer) => void): Promise<void> {
+  async start(
+    onChunk: (chunk: ArrayBuffer) => void,
+    targetSampleRate = 16_000,
+  ): Promise<void> {
     if (this.stream) return
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -112,7 +115,7 @@ export class MicrophoneCapture {
       await context.audioWorklet.addModule('/pcm-capture.worklet.js')
       const source = context.createMediaStreamSource(stream)
       const worklet = new AudioWorkletNode(context, 'pcm-capture-processor', {
-        processorOptions: { targetSampleRate: 16_000 },
+        processorOptions: { targetSampleRate },
       })
       const silentGain = context.createGain()
       silentGain.gain.value = 0

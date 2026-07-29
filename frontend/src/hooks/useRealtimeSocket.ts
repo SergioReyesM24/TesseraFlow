@@ -22,6 +22,7 @@ interface RealtimeSocketController {
   error: string | null
   ready: boolean
   recording: boolean
+  inputSampleRate: number
   activateAudio: () => Promise<void>
   startRecording: () => Promise<void>
   stopRecording: () => Promise<void>
@@ -63,9 +64,11 @@ export function useRealtimeSocket(
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [recording, setRecording] = useState(false)
+  const [inputSampleRate, setInputSampleRate] = useState(16_000)
   const socketRef = useRef<WebSocket | null>(null)
   const currentTurnRef = useRef<string | null>(null)
   const activityModeRef = useRef<'automatic' | 'explicit'>('automatic')
+  const inputSampleRateRef = useRef(16_000)
   const outputSampleRateRef = useRef(24_000)
   const readyRef = useRef(false)
   const [capture] = useState(() => new MicrophoneCapture())
@@ -81,6 +84,13 @@ export function useRealtimeSocket(
       }
       if (event.type === 'realtime_ready') {
         activityModeRef.current = data.activity_detection === 'explicit' ? 'explicit' : 'automatic'
+        if (typeof data.input_audio === 'string') {
+          const rate = /(?:^|;)rate=(\d+)(?:;|$)/.exec(data.input_audio)?.[1]
+          if (rate) {
+            inputSampleRateRef.current = Number(rate)
+            setInputSampleRate(Number(rate))
+          }
+        }
         if (typeof data.output_audio === 'string') {
           const rate = /(?:^|;)rate=(\d+)(?:;|$)/.exec(data.output_audio)?.[1]
           if (rate) outputSampleRateRef.current = Number(rate)
@@ -288,7 +298,7 @@ export function useRealtimeSocket(
         if (readyRef.current && activeSocket?.readyState === WebSocket.OPEN) {
           activeSocket.send(chunk)
         }
-      })
+      }, inputSampleRateRef.current)
       const turnId = crypto.randomUUID()
       currentTurnRef.current = turnId
       socket.send(JSON.stringify({ type: 'audio_start', turn_id: turnId }))
@@ -345,6 +355,7 @@ export function useRealtimeSocket(
     error,
     ready: enabled && ready,
     recording: enabled && recording,
+    inputSampleRate,
     activateAudio,
     startRecording,
     stopRecording,

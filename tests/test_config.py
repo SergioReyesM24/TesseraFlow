@@ -70,6 +70,8 @@ def test_endpoint_and_worker_models_have_independent_provider_settings() -> None
     assert settings.worker_agent_model == "worker-model"
     assert settings.gemini_api_key == "gemini-key"
     assert settings.openai_api_key == "openai-key"
+    assert settings.openai_realtime_voice_name == "marin"
+    assert settings.openai_realtime_transcription_model == "gpt-4o-mini-transcribe"
 
 
 def test_realtime_has_bounded_pcm_and_outbound_queues() -> None:

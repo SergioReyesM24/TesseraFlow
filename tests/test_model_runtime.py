@@ -131,6 +131,37 @@ async def test_runtime_composes_independent_text_realtime_and_worker_roles(
     assert FakeGeminiClient.instances[0].aio.closed is True
 
 
+async def test_runtime_registers_openai_realtime_on_the_shared_openai_client(
+    monkeypatch: Any,
+) -> None:
+    """Select OpenAI STS without constructing Gemini or a duplicate OpenAI client."""
+    FakeOpenAIClient.instances = []
+    FakeGeminiClient.instances = []
+    monkeypatch.setattr(runtime_module, "AsyncOpenAI", FakeOpenAIClient)
+    monkeypatch.setattr(runtime_module.genai, "Client", FakeGeminiClient)
+    settings = Settings(
+        realtime_agent_provider="openai",
+        realtime_agent_model="gpt-realtime-2.1",
+        openai_api_key="test-key",
+    )
+
+    runtime = build_model_runtime(
+        settings,
+        conversations=StubConversations(),
+        interactive_tools=empty_tools(),
+        worker_tools=empty_tools(),
+    )
+
+    assert runtime.realtime_agent_provider == "openai"
+    assert runtime.realtime_definition.model == "gpt-realtime-2.1"
+    assert runtime.realtime_agent_service.capabilities.input_audio_mime_type.endswith(
+        "rate=24000"
+    )
+    assert len(FakeOpenAIClient.instances) == 1
+    assert FakeGeminiClient.instances == []
+    await runtime.close()
+
+
 def test_runtime_rejects_unregistered_role_provider() -> None:
     """Fail at composition without provider checks leaking into the core."""
     settings = Settings(

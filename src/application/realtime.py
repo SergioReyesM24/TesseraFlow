@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -162,7 +162,7 @@ class RealtimeAgentService:
         definition: AgentDefinition,
         conversation_key: ConversationKey,
         options: RealtimeSessionOptions,
-    ) -> AsyncIterator["RealtimeAgentSession"]:
+    ) -> AsyncGenerator["RealtimeAgentSession", None]:
         """Load retained history and own all connection-local background tasks."""
         if options.activity.detection not in self.capabilities.activity_detection_modes:
             raise RealtimeUnsupportedOptionError(
@@ -189,6 +189,7 @@ class RealtimeAgentService:
                     interactions=self._interactions,
                     notifier=self._notifier,
                     activity_detection=options.activity.detection,
+                    input_audio_mime_type=self.capabilities.input_audio_mime_type,
                     max_audio_chunk_bytes=self._max_audio_chunk_bytes,
                     max_tool_rounds=self._max_tool_rounds,
                     outbound_max_messages=self._outbound_max_messages,
@@ -216,6 +217,7 @@ class RealtimeAgentSession:
         interactions: InteractionRepository | None = None,
         notifier: InteractionNotifier | None = None,
         activity_detection: Literal["automatic", "explicit"] = "automatic",
+        input_audio_mime_type: str = "audio/pcm;rate=16000",
         outbound_max_messages: int = 128,
         outbound_max_audio_bytes: int = 131_072,
         outbound_enqueue_timeout_seconds: float = 5.0,
@@ -230,6 +232,7 @@ class RealtimeAgentSession:
         self._interactions = interactions
         self._notifier = notifier
         self._activity_detection = activity_detection
+        self._input_audio_mime_type = input_audio_mime_type
         self._max_audio_chunk_bytes = max_audio_chunk_bytes
         self._max_tool_rounds = max_tool_rounds
         self._outbound_enqueue_timeout_seconds = outbound_enqueue_timeout_seconds
@@ -275,7 +278,7 @@ class RealtimeAgentSession:
         return self._connection_state
 
     @asynccontextmanager
-    async def lifecycle(self) -> AsyncIterator[None]:
+    async def lifecycle(self) -> AsyncGenerator[None, None]:
         """Own writer and durable dispatcher tasks for the socket lifetime."""
         self._lifecycle_active = True
         self._closing = False
@@ -313,7 +316,11 @@ class RealtimeAgentSession:
             )
         if len(data) % 2:
             raise RealtimeAudioChunkError("PCM16 audio chunks must contain complete samples")
-        await self._enqueue("audio", AudioChunk(data=data), audio_bytes=len(data))
+        await self._enqueue(
+            "audio",
+            AudioChunk(data=data, mime_type=self._input_audio_mime_type),
+            audio_bytes=len(data),
+        )
 
     async def end_audio(self) -> None:
         """Pause capture and enqueue the provider-specific stream boundary."""
@@ -388,7 +395,10 @@ class RealtimeAgentSession:
     async def _handle_model_event(self, event: object) -> AsyncIterator[RealtimeAgentEvent]:
         """Translate one provider-neutral event and advance connection-local state."""
         if isinstance(event, RealtimeModelInputTranscriptDelta):
-            await self._activate_audio_turn_for_input()
+            # OpenAI input transcription is asynchronous and may arrive after output
+            # has already started. In that case it still belongs to the active turn.
+            if self._turn_id is None:
+                await self._activate_audio_turn_for_input()
             turn_id = self._require_turn_id()
             self._input_parts.append(event.text)
             self._turn_has_input = True
@@ -831,7 +841,8 @@ class RealtimeAgentSession:
     def _ensure_turn_id(self) -> str:
         """Create a server turn ID for provider output lacking explicit input."""
         if self._turn_id is None:
-            self._begin_turn(str(uuid4()), source="speech_user")
+            turn_id = self._pending_audio_turn_id or str(uuid4())
+            self._begin_turn(turn_id, source="speech_user")
         return self._require_turn_id()
 
     def _require_turn_id(self) -> str:

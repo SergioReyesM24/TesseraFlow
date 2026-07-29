@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from uuid import UUID
@@ -61,7 +61,7 @@ class InMemoryInteractionNotifier:
         """Match the production lifecycle without external resources."""
 
     @asynccontextmanager
-    async def subscribe_commands(self) -> AsyncIterator[InMemorySubscription]:
+    async def subscribe_commands(self) -> AsyncGenerator[InMemorySubscription, None]:
         """Register one command observer for its task lifetime."""
         subscription = InMemorySubscription()
         self.command_subscriptions.add(subscription)
@@ -79,7 +79,7 @@ class InMemoryInteractionNotifier:
         conversation_id: str,
         *,
         command_id: str | None = None,
-    ) -> AsyncIterator[InMemorySubscription]:
+    ) -> AsyncGenerator[InMemorySubscription, None]:
         """Register one command- or conversation-scoped output observer."""
         key = (conversation_id, command_id)
         subscription = InMemorySubscription()

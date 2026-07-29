@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     worker_provider: str = "openai"
     openai_api_key: str = Field(default="", repr=False)
     openai_base_url: str | None = None
+    openai_realtime_voice_name: str = "marin"
+    openai_realtime_transcription_model: str = "gpt-4o-mini-transcribe"
+    openai_realtime_language_code: str | None = None
+    openai_realtime_reasoning_effort: str | None = None
     worker_agent_model: str = "gpt-5-mini"
     openai_connect_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     gemini_api_key: str = Field(default="", repr=False)

@@ -1,6 +1,6 @@
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import ClassVar
 
@@ -86,7 +86,7 @@ class StubModelGateway:
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[StubModelSession]:
+    ) -> AsyncGenerator[StubModelSession, None]:
         session = StubModelSession(self.session_replies.popleft())
         self.sessions.append(session)
         self.definitions.append(definition)
@@ -139,7 +139,7 @@ class AudioStubModelGateway:
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[AudioStubModelSession]:
+    ) -> AsyncGenerator[AudioStubModelSession, None]:
         """Yield an isolated session without provider resources."""
         del definition, tools, history
         yield AudioStubModelSession()

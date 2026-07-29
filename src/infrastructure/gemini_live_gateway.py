@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 from uuid import uuid4
@@ -53,7 +53,7 @@ class GeminiLiveGateway(ModelGateway):
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[ModelSession]:
+    ) -> AsyncGenerator[ModelSession, None]:
         """Translate setup, prefill retained history, and close the live connection."""
         config = types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],

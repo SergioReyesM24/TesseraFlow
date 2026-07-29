@@ -1,5 +1,5 @@
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -43,7 +43,7 @@ class OpenAIResponsesGateway(ModelGateway):
         definition: AgentDefinition,
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
-    ) -> AsyncIterator[ModelSession]:
+    ) -> AsyncGenerator[ModelSession, None]:
         """Yield a request-scoped session that translates neutral contracts."""
         yield OpenAIModelSession(self._client, definition, tools, history)
 

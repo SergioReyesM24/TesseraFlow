@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import structlog
@@ -18,7 +18,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     logger = structlog.get_logger(__name__)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         """Create shared resources on startup and close them during shutdown."""
         container = await build_container(settings)
         app.state.container = container

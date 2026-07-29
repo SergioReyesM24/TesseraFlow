@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any
@@ -213,7 +213,7 @@ class StubInteractionNotifier:
     async def subscribe_realtime_commands(
         self,
         conversation_id: str,
-    ) -> AsyncIterator[StubInteractionSubscription]:
+    ) -> AsyncGenerator[StubInteractionSubscription, None]:
         """Yield one reconciliation subscription for the requested conversation."""
         self.conversations.append(conversation_id)
         yield StubInteractionSubscription()
@@ -313,7 +313,7 @@ class AlternateRealtimeGateway:
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
         options: RealtimeSessionOptions,
-    ) -> AsyncIterator[StubRealtimeModelSession]:
+    ) -> AsyncGenerator[StubRealtimeModelSession, None]:
         """Open through neutral arguments without provider-specific branching."""
         del definition, tools, history
         self.options.append(options)
@@ -474,6 +474,36 @@ async def test_realtime_session_keeps_continuous_audio_open_across_vad_turns() -
     assert completed[0].turn_id == "turn-1"
     assert completed[1].turn_id != completed[0].turn_id
     assert [turn[0].content for turn in conversations.saved_turns] == ["Primero", "Segundo"]  # type: ignore[union-attr]
+
+
+async def test_late_input_transcript_stays_on_the_turn_that_already_has_output() -> None:
+    """Correlate OpenAI's asynchronous input transcription with its active response."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelOutputTranscriptDelta(text="Respuesta"),
+            RealtimeModelInputTranscriptDelta(text="Pregunta"),
+            RealtimeModelTurnCompleted(response_id="response-1"),
+        ]
+    )
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=2,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    assert {event.turn_id for event in events} == {"turn-1"}
+    assert conversations.conversation.messages[-2:] == (
+        ConversationMessage(role="user", content="Pregunta", source="speech_user"),
+        ConversationMessage(role="assistant", content="Respuesta"),
+    )
 
 
 async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_terminal() -> None:
@@ -957,10 +987,15 @@ async def test_realtime_service_accepts_an_alternate_provider_and_rejects_capabi
         )
     )
 
-    async with service.open_session(definition, key, supported):
-        pass
+    async with service.open_session(definition, key, supported) as session:
+        await session.start_audio("turn-alternate")
+        await session.send_audio(b"\x00\x00")
+        await session.end_audio()
 
     assert gateway.options == [supported]
+    assert gateway.model.audio == [
+        AudioChunk(data=b"\x00\x00", mime_type="audio/pcm;rate=8000")
+    ]
     assert service.capabilities.recovery_mode == "restart"
     with pytest.raises(RealtimeUnsupportedOptionError, match="Barge-in"):
         async with service.open_session(

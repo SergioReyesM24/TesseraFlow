@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, cast
 from uuid import uuid4
@@ -76,7 +76,7 @@ class GeminiRealtimeGateway(RealtimeModelGateway):
         tools: tuple[ToolSpec, ...],
         history: tuple[ConversationItem, ...],
         options: RealtimeSessionOptions,
-    ) -> AsyncIterator[RealtimeModelSession]:
+    ) -> AsyncGenerator[RealtimeModelSession, None]:
         """Connect a recoverable session and keep SDK lifecycle in infrastructure."""
         config = self._config(definition, tools, options, handle=None)
         session = GeminiRealtimeModelSession(

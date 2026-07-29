@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -343,7 +343,7 @@ class StubRealtimeService:
         definition: AgentDefinition,
         conversation_key: ConversationKey,
         options: RealtimeSessionOptions | None = None,
-    ) -> AsyncIterator[StubRealtimeSession]:
+    ) -> AsyncGenerator[StubRealtimeSession, None]:
         """Validate route composition and yield the transport double."""
         assert definition.model == "realtime-model"
         assert conversation_key == ConversationKey(
