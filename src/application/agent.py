@@ -139,6 +139,8 @@ class AgentService:
             tool_call_count=len(records),
             input_tokens=metrics.usage.input_tokens,
             output_tokens=metrics.usage.output_tokens,
+            cached_input_tokens=metrics.usage.cached_input_tokens,
+            total_tokens=metrics.usage.total_tokens,
             cost_amount=str(metrics.cost.amount) if metrics.cost is not None else None,
             cost_currency=metrics.cost.currency if metrics.cost is not None else None,
         )
@@ -258,6 +260,8 @@ class AgentService:
                         tool_call_count=len(records),
                         input_tokens=metrics.usage.input_tokens,
                         output_tokens=metrics.usage.output_tokens,
+                        cached_input_tokens=metrics.usage.cached_input_tokens,
+                        total_tokens=metrics.usage.total_tokens,
                         cost_amount=(
                             str(metrics.cost.amount) if metrics.cost is not None else None
                         ),

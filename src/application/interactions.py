@@ -2,11 +2,14 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
+from dataclasses import replace
 
 import structlog
 
 from application.agent import AgentService
 from application.ports import InteractionNotifier, InteractionRepository, InteractiveAgent
+from application.tools import extend_visual_components
+from domain.a2a import visual_components_from_completion_message
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey
 from domain.interactions import (
@@ -21,7 +24,9 @@ from domain.turn_events import (
     AgentAudioInterrupted,
     AgentStreamCompleted,
     AgentStreamFailed,
+    AgentVisualComponent,
 )
+from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
 
@@ -40,6 +45,14 @@ class TurnInteractionAgent:
 
     async def stream(self, command: InteractionCommand) -> AsyncIterator[InteractionEmission]:
         """Tag audio and non-audio events while preserving input provenance."""
+        raw_inherited_visuals = (
+            visual_components_from_completion_message(command.message)
+            if command.kind == "worker_completed"
+            else ()
+        )
+        inherited_visual_list: list[VisualPresentation] = []
+        extend_visual_components(inherited_visual_list, raw_inherited_visuals)
+        inherited_visuals = tuple(inherited_visual_list)
         with structlog.contextvars.bound_contextvars(
             conversation_id=command.conversation.conversation_id,
             request_id=command.request_id,
@@ -53,7 +66,21 @@ class TurnInteractionAgent:
                 turn_id=command.request_id,
             )
             async with aclosing(events):
+                for presentation in inherited_visuals:
+                    yield InteractionEmission(
+                        modality="text",
+                        event=AgentVisualComponent(presentation=presentation),
+                    )
                 async for event in events:
+                    if isinstance(event, AgentStreamCompleted) and inherited_visuals:
+                        combined = list(inherited_visuals)
+                        extend_visual_components(combined, event.result.visual_components)
+                        event = AgentStreamCompleted(
+                            result=replace(
+                                event.result,
+                                visual_components=tuple(combined),
+                            )
+                        )
                     if isinstance(event, AgentAudioDelta | AgentAudioInterrupted):
                         yield InteractionEmission(modality="audio", event=event)
                     else:

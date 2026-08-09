@@ -21,6 +21,7 @@ from infrastructure.postgres_conversations import (
     SELECT_CONVERSATION_GROUP,
     SELECT_CONVERSATION_HISTORY,
     SELECT_CONVERSATION_SUMMARIES,
+    SELECT_DAILY_TOKEN_USAGE,
     SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
     UPDATE_CONVERSATION,
@@ -50,6 +51,7 @@ class FakePostgresConnection:
         self.conversations: dict[str, dict[str, object]] = {}
         self.items: dict[str, list[dict[str, object]]] = {}
         self.group_rows: dict[str, list[dict[str, object]]] = {}
+        self.daily_usage_rows: list[dict[str, object]] = []
 
     def transaction(self) -> FakeTransaction:
         """Create a no-op transaction boundary."""
@@ -68,12 +70,15 @@ class FakePostgresConnection:
         """Return compacted context or a bounded technical history page."""
         if query == SELECT_CONVERSATION_GROUP:
             return self.group_rows.get(conversation_id, [])
+        if query == SELECT_DAILY_TOKEN_USAGE:
+            return self.daily_usage_rows
         if query == SELECT_CONVERSATION_SUMMARIES:
             offset, limit = args
             rows = [
                 {"id": item_id, **row}
                 for item_id, row in self.conversations.items()
                 if row["user_id"] == conversation_id
+                and bool(self.items.get(item_id))
             ]
             rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
             return rows[offset : offset + limit]
@@ -259,11 +264,22 @@ async def test_postgres_creates_an_empty_session_before_its_first_turn() -> None
 
 
 async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
-    """Order session headers by update time and expose a bounded next page."""
+    """Exclude empty sessions before paginating the user's conversation headers."""
     pool = FakePostgresPool()
     store = repository(pool)
-    await store.create(key())
-    await store.create(key(conversation_id="conv-2"))
+    first_conversation = await store.create(key())
+    await store.save_turn(
+        first_conversation,
+        tool_turn("Primera conversación"),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    await store.create(key(conversation_id="conv-empty"))
+    second_conversation = await store.create(key(conversation_id="conv-2"))
+    await store.save_turn(
+        second_conversation,
+        tool_turn("Segunda conversación"),
+        turn_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
     await store.create(key(conversation_id="foreign", user_id="user-2"))
 
     first = await store.list_sessions("user-1", offset=0, limit=1)
@@ -273,7 +289,41 @@ async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
     assert first.has_more is True
     assert [item.key.conversation_id for item in second.sessions] == ["conv-1"]
     assert second.has_more is False
+    assert "FROM conversation_items AS item" in SELECT_CONVERSATION_SUMMARIES
+    assert "item.item_type = 'message'" in SELECT_CONVERSATION_SUMMARIES
     assert "NOT EXISTS" in SELECT_CONVERSATION_SUMMARIES
+
+
+async def test_postgres_maps_global_daily_token_usage() -> None:
+    """Return normalized zero-safe usage rows across all owner conversations."""
+    pool = FakePostgresPool()
+    pool.connection.daily_usage_rows = [
+        {
+            "usage_date": "21-07-2026",
+            "input_tokens": 1_000,
+            "output_tokens": 200,
+            "cached_input_tokens": 400,
+            "cached_input_audio_tokens": 10,
+            "reasoning_tokens": 50,
+            "input_audio_tokens": 100,
+            "output_audio_tokens": 20,
+            "turn_count": 3,
+            "model_call_count": 5,
+        }
+    ]
+
+    usage = await repository(pool).load_daily_token_usage("user-1", days=30)
+
+    assert len(usage) == 1
+    assert usage[0].usage.input_tokens == 1_000
+    assert usage[0].usage.output_tokens == 200
+    assert usage[0].usage.cached_input_tokens == 400
+    assert usage[0].day == "21-07-2026"
+    assert usage[0].turn_count == 3
+    assert usage[0].model_call_count == 5
+    assert "conversation.user_id = $1" in SELECT_DAILY_TOKEN_USAGE
+    assert "jsonb_array_elements" in SELECT_DAILY_TOKEN_USAGE
+    assert "model_call.value #>> '{usage,input_tokens}'" in SELECT_DAILY_TOKEN_USAGE
 
 
 async def test_postgres_groups_multiple_worker_threads_without_merging_histories() -> None:
@@ -495,6 +545,7 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "DROP CONSTRAINT IF EXISTS a2a_threads_distinct_conversations_check" in combined_sql
     assert "validate_a2a_conversation_correlation" in combined_sql
     assert "NEW.user_id <> parent_user_id" in combined_sql
+    assert "conversation_items_assistant_usage_idx" in combined_sql
     assert any(args == ("001_conversations.sql",) for _, args in pool.connection.statements)
     assert any(args == ("002_a2a_jobs.sql",) for _, args in pool.connection.statements)
     assert any(

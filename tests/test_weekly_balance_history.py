@@ -1,4 +1,5 @@
-from application.tools import ToolExecutionContext
+from application.tools import ToolExecutionContext, ToolExecutionOutput
+from domain.visuals import ChartComponent
 from tools.weekly_balance_history import (
     MOCK_WEEKLY_BALANCES,
     WeeklyBalanceHistoryArguments,
@@ -22,10 +23,11 @@ async def test_returns_deterministic_mock_balances_after_two_second_delay() -> N
     )
 
     assert delays == [2.0]
-    assert result == {
+    assert isinstance(result, ToolExecutionOutput)
+    assert result.value == {
         "data_source": "mock",
         "account_id": "mock-account-001",
-        "currency": "EUR",
+        "currency": "€",
         "period": "weekly",
         "weekly_balances": [
             {
@@ -36,6 +38,11 @@ async def test_returns_deterministic_mock_balances_after_two_second_delay() -> N
             for week_start, week_end, closing_balance in MOCK_WEEKLY_BALANCES
         ],
     }
+    assert len(result.visual_components) == 1
+    visual = result.visual_components[0]
+    assert visual.component_id == "weekly-balance-history"
+    assert isinstance(visual.component, ChartComponent)
+    assert visual.component.series[0].points[-1].y == 13275.65
 
 
 def test_declares_a_closed_empty_argument_schema() -> None:

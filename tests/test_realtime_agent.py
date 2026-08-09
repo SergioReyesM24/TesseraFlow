@@ -16,6 +16,7 @@ from application.realtime import (
     RealtimeUnsupportedOptionError,
 )
 from application.tools import AgentTool, ToolArguments, ToolExecutionContext, ToolRegistry
+from domain.a2a import A2ACompletionMessage
 from domain.agent import AgentDefinition
 from domain.conversations import (
     Conversation,
@@ -51,8 +52,10 @@ from domain.realtime import (
     RealtimeToolCompleted,
     RealtimeToolStarted,
     RealtimeTurnCompleted,
+    RealtimeVisualComponent,
 )
 from domain.tools import ToolCall, ToolResult, ToolSpec
+from domain.visuals import Metric, MetricGroupComponent, VisualPresentation
 
 
 class LookupArguments(ToolArguments):
@@ -657,13 +660,28 @@ async def test_realtime_barge_in_persists_visible_partial_turn_before_replacing_
 async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_terminal() -> None:
     """Use the active STS session, never the turn-based agent, for realtime jobs."""
     key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    presentation = VisualPresentation(
+        component_id="worker-summary",
+        fallback_text="Saldo actual 100 €.",
+        component=MetricGroupComponent(
+            kind="metric_group",
+            title="Resumen",
+            metrics=(Metric(label="Saldo", value="100", unit="€"),),
+        ),
+    )
     command = InteractionCommand(
         command_id="a2a-result:job-1",
         request_id="job-1",
         conversation=key,
         kind="worker_completed",
         source="worker_agent",
-        message='{"protocol":"tesseraflow.a2a.result","job_id":"job-1"}',
+        message=A2ACompletionMessage(
+            job_id="job-1",
+            thread_id="thread-1",
+            status="completed",
+            answer="Saldo actual 100 €.",
+            visual_components=(presentation,),
+        ).serialize(),
         delivery_mode="realtime",
         causation_id="job-1",
     )
@@ -693,10 +711,12 @@ async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_ter
             RealtimeModelOutputTranscriptDelta(text="El trabajo ha terminado")
         )
         await model.events_queue.put(RealtimeModelTurnCompleted(response_id="realtime-1"))
-        output = await first_event
+        visual = await first_event
+        output = await anext(stream)
         terminal = await anext(stream)
         await stream.aclose()
 
+    assert visual == RealtimeVisualComponent(turn_id="job-1", presentation=presentation)
     assert isinstance(output, RealtimeOutputTranscriptDelta)
     assert terminal == RealtimeTurnCompleted(
         turn_id="job-1",
@@ -706,6 +726,7 @@ async def test_realtime_dispatcher_injects_and_confirms_worker_completion_on_ter
         causation_id="job-1",
     )
     assert terminal.result.answer == "El trabajo ha terminado"
+    assert terminal.result.visual_components == (presentation,)
     assert len(interactions.completed) == 1
     assert notifier.conversations == ["conversation-1"]
     assert model.text == [command.message]

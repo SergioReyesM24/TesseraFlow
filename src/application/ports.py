@@ -11,6 +11,7 @@ from domain.conversations import (
     ConversationItem,
     ConversationKey,
     ConversationListPage,
+    DailyTokenUsage,
 )
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
@@ -171,7 +172,7 @@ class ConversationHistoryRepository(Protocol):
         offset: int,
         limit: int,
     ) -> ConversationListPage:
-        """List a bounded page of the user's persisted conversation headers."""
+        """List a bounded page of the user's non-empty conversation headers."""
         ...
 
     async def load_history(
@@ -186,6 +187,15 @@ class ConversationHistoryRepository(Protocol):
 
     async def load_group(self, key: ConversationKey) -> ConversationGroup | None:
         """Project one root chat and its isolated worker conversations."""
+        ...
+
+    async def load_daily_token_usage(
+        self,
+        user_id: str,
+        *,
+        days: int,
+    ) -> tuple[DailyTokenUsage, ...]:
+        """Aggregate model usage across every conversation owned by a user."""
         ...
 
 

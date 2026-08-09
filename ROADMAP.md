@@ -6,9 +6,10 @@ aislamiento entre usuarios y la separación entre dominio, aplicación y adaptad
 
 ## Evolución de componentes visuales
 
-El catálogo v1 actual ya publica eventos neutrales `visual_component`, valida gráficas
-`line`/`bar` y grupos de métricas, conserva un fallback textual y funciona en los
-transportes WebSocket y SSE. Las siguientes extensiones continúan fuera de alcance:
+El catálogo v1 actual ya permite que cualquier tool adjunte un output visual, publica
+eventos neutrales `visual_component`, valida gráficas `line`/`bar`, grupos de métricas y
+movimientos, conserva un fallback textual y funciona en WebSocket, realtime y SSE. Las
+siguientes extensiones continúan fuera de alcance:
 
 - Añadir tablas y avisos solo cuando exista un caso de producto que justifique cada
   semántica, manteniendo límites de filas, columnas y contenido.

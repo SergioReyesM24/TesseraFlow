@@ -45,10 +45,9 @@ export function parseTurnMetrics(value: unknown): TurnMetrics | undefined {
 
 /** Format tiny per-turn amounts without rounding them down to a misleading zero. */
 export function formatModelCost(cost: ModelCost): string {
-  const currency = cost.currency === 'EUR' ? '€' : cost.currency
-  if (cost.amount > 0 && cost.amount < 0.000001) return `< 0,000001 ${currency}`
+  if (cost.amount > 0 && cost.amount < 0.000001) return `< 0,000001 ${cost.currency}`
   return `${new Intl.NumberFormat('es-ES', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 6,
-  }).format(cost.amount)} ${currency}`
+  }).format(cost.amount)} ${cost.currency}`
 }

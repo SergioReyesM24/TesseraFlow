@@ -22,6 +22,8 @@ from api.schemas import (
     ConversationListResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    DailyTokenUsageReportResponse,
+    DailyTokenUsageResponse,
     StreamAgentRequest,
 )
 from api.sse import encode_agent_stream
@@ -98,6 +100,27 @@ async def create_session(
 
 
 @router.get(
+    "/v1/metrics/tokens/daily",
+    response_model=DailyTokenUsageReportResponse,
+    tags=["agent"],
+)
+async def get_daily_token_usage(
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    service: Annotated[
+        ConversationHistoryService,
+        Depends(get_conversation_history_service),
+    ],
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> DailyTokenUsageReportResponse:
+    """Return global UTC token consumption per day for one owner."""
+    usage = await service.load_daily_token_usage(user_id, days=days)
+    return DailyTokenUsageReportResponse(
+        user_id=user_id,
+        days=[DailyTokenUsageResponse.from_domain(day) for day in usage],
+    )
+
+
+@router.get(
     "/v1/sessions",
     response_model=ConversationListResponse,
     tags=["agent"],
@@ -111,7 +134,7 @@ async def list_sessions(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> ConversationListResponse:
-    """List persisted sessions so technical clients can select one for inspection."""
+    """List persisted sessions containing messages for technical inspection."""
     page = await service.list_sessions(user_id, offset=offset, limit=limit)
     return ConversationListResponse.from_page(page, user_id=user_id, offset=offset)
 

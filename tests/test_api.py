@@ -28,6 +28,7 @@ from domain.conversations import (
     ConversationListPage,
     ConversationMessage,
     ConversationSummary,
+    DailyTokenUsage,
 )
 from domain.costs import ModelCallMetrics, ModelCost, ModelUsage, TurnMetrics
 from domain.interactions import InteractionCommand, InteractionOutput
@@ -201,6 +202,28 @@ class StubConversationHistoryService:
                 ),
             ),
             has_more=False,
+        )
+
+    async def load_daily_token_usage(
+        self,
+        user_id: str,
+        *,
+        days: int,
+    ) -> tuple[DailyTokenUsage, ...]:
+        """Return deterministic global usage for the requested window."""
+        assert user_id == "user-1"
+        assert days == 30
+        return (
+            DailyTokenUsage(
+                day="22-07-2026",
+                usage=ModelUsage(
+                    input_tokens=1_000,
+                    output_tokens=200,
+                    cached_input_tokens=400,
+                ),
+                turn_count=3,
+                model_call_count=5,
+            ),
         )
 
     async def load_group(self, key: ConversationKey) -> ConversationGroup:
@@ -499,9 +522,9 @@ async def test_session_list_exposes_clickable_conversation_summaries() -> None:
                 "status": "active",
                 "version": 1,
                 "last_sequence": 4,
-                "created_at": "2026-07-22T10:00:00Z",
-                "updated_at": "2026-07-22T10:00:00Z",
-                "last_message_at": "2026-07-22T10:00:00Z",
+                "created_at": "22-07-2026T10:00:00Z",
+                "updated_at": "22-07-2026T10:00:00Z",
+                "last_message_at": "22-07-2026T10:00:00Z",
                 "correlation": {
                     "conversation_id": SESSION_UID,
                     "root_conversation_id": SESSION_UID,
@@ -513,6 +536,41 @@ async def test_session_list_exposes_clickable_conversation_summaries() -> None:
         ],
         "has_more": False,
         "next_offset": None,
+    }
+
+
+async def test_daily_token_metrics_are_global_and_normalized() -> None:
+    """Expose daily owner-wide usage independently from a selected session."""
+    async with AsyncClient(
+        transport=ASGITransport(app=build_test_app()), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/v1/metrics/tokens/daily",
+            params={"user_id": "user-1", "days": 30},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user-1",
+        "timezone": "UTC",
+        "days": [
+            {
+                "date": "22-07-2026",
+                "usage": {
+                    "input_tokens": 1_000,
+                    "output_tokens": 200,
+                    "total_tokens": 1_200,
+                    "cached_input_tokens": 400,
+                    "uncached_input_tokens": 600,
+                    "cached_input_audio_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "input_audio_tokens": 0,
+                    "output_audio_tokens": 0,
+                },
+                "turn_count": 3,
+                "model_call_count": 5,
+            }
+        ],
     }
 
 

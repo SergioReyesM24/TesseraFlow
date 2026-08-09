@@ -48,6 +48,19 @@ export interface TurnMetrics {
   calls: ModelCallMetrics[]
 }
 
+export interface DailyTokenUsage {
+  date: string
+  usage: ModelUsage
+  turn_count: number
+  model_call_count: number
+}
+
+export interface DailyTokenUsageReport {
+  user_id: string
+  timezone: 'UTC'
+  days: DailyTokenUsage[]
+}
+
 export interface ChartPoint {
   x: string
   y: number

@@ -1,4 +1,5 @@
-from application.tools import ToolExecutionContext
+from application.tools import ToolExecutionContext, ToolExecutionOutput
+from domain.visuals import TransactionListComponent
 from tools.recent_transactions import (
     BASE_SAVINGS,
     RECENT_TRANSACTIONS,
@@ -23,30 +24,37 @@ async def test_returns_categorized_transactions_after_five_second_delay() -> Non
     )
 
     assert delays == [5.0]
-    assert result["currency"] == "EUR"
-    assert result["base_savings"] == float(BASE_SAVINGS)
-    assert result["current_savings"] == 12109.16
-    assert result["total_income"] == 2450.0
-    assert result["total_expenses"] == 340.84
-    assert result["net_change"] == 2109.16
-    assert len(result["transactions"]) == len(RECENT_TRANSACTIONS)
-    assert result["transactions"][0] == {
+    assert isinstance(result, ToolExecutionOutput)
+    value = result.value
+    assert value["currency"] == "€"
+    assert value["base_savings"] == float(BASE_SAVINGS)
+    assert value["current_savings"] == 12109.16
+    assert value["total_income"] == 2450.0
+    assert value["total_expenses"] == 340.84
+    assert value["net_change"] == 2109.16
+    assert len(value["transactions"]) == len(RECENT_TRANSACTIONS)
+    assert value["transactions"][0] == {
         "transaction_id": "txn-20260722-001",
-        "booked_at": "2026-07-22T20:14:00+02:00",
+        "booked_at": "22-07-2026 20:14:00+02:00",
         "merchant": "La Tagliatella",
         "category": "comida",
         "transaction_type": "expense",
         "amount": 38.6,
         "balance_after": 12109.16,
     }
-    assert result["transactions"][-1]["balance_after"] == 9954.01
+    assert value["transactions"][-1]["balance_after"] == 9954.01
     assert {"comida", "gasolina"} <= {
-        transaction["category"] for transaction in result["transactions"]
+        transaction["category"] for transaction in value["transactions"]
     }
-    assert {transaction["transaction_type"] for transaction in result["transactions"]} == {
+    assert {transaction["transaction_type"] for transaction in value["transactions"]} == {
         "income",
         "expense",
     }
+    assert len(result.visual_components) == 1
+    visual = result.visual_components[0]
+    assert visual.component_id == "recent-transactions"
+    assert isinstance(visual.component, TransactionListComponent)
+    assert visual.component.current_savings == 12109.16
 
 
 def test_declares_a_closed_empty_schema_without_fixture_labels() -> None:

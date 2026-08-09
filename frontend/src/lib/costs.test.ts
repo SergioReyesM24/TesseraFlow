@@ -45,6 +45,6 @@ describe('turn cost metrics', () => {
   })
 
   it('formats configured euro costs with the euro symbol', () => {
-    expect(formatModelCost({ amount: 0.0012, currency: 'EUR' })).toBe('0,0012 €')
+    expect(formatModelCost({ amount: 0.0012, currency: '€' })).toBe('0,0012 €')
   })
 })

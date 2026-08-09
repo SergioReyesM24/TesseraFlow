@@ -622,9 +622,15 @@ compatibilidad. Los nuevos clientes deben usar el WebSocket.
 
 ### Componentes visuales
 
-El agente interactivo puede complementar —nunca sustituir— su respuesta textual mediante
-la tool `present_visual`. El backend valida un catálogo deliberadamente pequeño y publica
-un evento neutral al framework:
+Los componentes visuales son un output de aplicación independiente del modelo. Cualquier
+tool puede devolver `ToolExecutionOutput(value=..., visual_components=(...))`: `value`
+continúa hacia el modelo como resultado normal y el executor captura cada presentación,
+la valida y publica directamente un evento neutral al frontend. No hace falta una segunda
+tool call a `present_visual`.
+
+El envelope público es general y versionado (`schema`, `version`, `component_id`,
+`fallback_text`, `component`). El catálogo de componentes dentro del envelope sigue siendo
+semántico y cerrado para que el frontend nunca ejecute markup o configuración arbitraria:
 
 ```json
 {
@@ -634,20 +640,20 @@ un evento neutral al framework:
     "schema": "tesseraflow.visual",
     "version": 1,
     "component_id": "weekly-balance",
-    "fallback_text": "El saldo termina el periodo en 13.275,65 EUR.",
+    "fallback_text": "El saldo termina el periodo en 13.275,65 €.",
     "component": {
       "kind": "chart",
       "title": "Saldo semanal",
       "subtitle": "Últimas dos semanas",
       "chart_type": "line",
       "x_axis": {"label": "Semana"},
-      "y_axis": {"label": "Saldo", "unit": "EUR"},
+      "y_axis": {"label": "Saldo", "unit": "€"},
       "series": [
         {
           "name": "Saldo al cierre",
           "points": [
-            {"x": "2026-07-12", "y": 13450.0},
-            {"x": "2026-07-19", "y": 13275.65}
+            {"x": "12-07-2026", "y": 13450.0},
+            {"x": "19-07-2026", "y": 13275.65}
           ]
         }
       ]
@@ -665,6 +671,12 @@ HTML, CSS, JavaScript, callbacks ni nombres de componentes React. Tanto el WebSo
 textual como el realtime exponen el mismo evento, y el SSE de compatibilidad utiliza el
 mismo codec. Un cliente que no soporte el tipo o la versión debe mostrar `fallback_text`;
 la respuesta textual completa sigue llegando normalmente.
+
+Las presentaciones viajan también en los resultados A2A: si una tool del worker genera una,
+el backend la incorpora al comando de finalización y la emite en los canales textual y
+realtime antes de la respuesta del agente principal. `present_visual` se conserva para que
+el usuario pueda pedir otro formato; al reutilizar `component_id`, el nuevo componente
+reemplaza al anterior en lugar de duplicarlo.
 
 ### WebSocket speech-to-speech
 
@@ -711,7 +723,7 @@ reencola sin guardar una respuesta parcial.
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check sin consultar dependencias externas. |
 | `POST` | `/v1/sessions` | Crea una sesión vacía y devuelve su `session_uid`. |
-| `GET` | `/v1/sessions` | Lista de forma paginada las sesiones pertenecientes al `user_id`. |
+| `GET` | `/v1/sessions` | Lista de forma paginada las sesiones con mensajes pertenecientes al `user_id`. |
 | `GET` | `/v1/sessions/{session_uid}/history` | Lee el historial técnico canónico con mensajes, tool calls, resultados y metadatos de orden. |
 | `GET` | `/v1/sessions/{session_uid}/group` | Agrupa la conversación principal y sus sesiones internas, threads y jobs sin unir historiales. |
 | `WS` | `/v1/agent/ws` | Acceso durable por turnos a la doble capa mediante frames JSON. |
@@ -745,9 +757,9 @@ curl \
 
 | Tool | Capacidad |
 | --- | --- |
-| `weekly_balance_history` | Espera 2 segundos y devuelve ocho semanas de saldos mock en EUR. |
-| `send_mock_bizum_to_mom` | Simula un Bizum en EUR al destinatario fijo `Mamá`. |
-| `recent_transactions` | Espera 5 segundos y devuelve los diez últimos movimientos categorizados en EUR. |
+| `weekly_balance_history` | Espera 2 segundos y devuelve ocho semanas de saldos mock en €. |
+| `send_mock_bizum_to_mom` | Simula un Bizum en € al destinatario fijo `Mamá`. |
+| `recent_transactions` | Espera 5 segundos y devuelve los diez últimos movimientos categorizados en €. |
 
 `weekly_balance_history` solo está registrada en el worker. Para probar el recorrido
 completo de la doble capa, pide al agente interactivo «devuelve mi historial de saldo
@@ -883,7 +895,7 @@ GEMINI_API_KEY=...
 OPENAI_API_KEY=...
 REALTIME_AUDIO_MAX_CHUNK_BYTES=32768
 REALTIME_SESSION_MAX_SECONDS=1800
-MODEL_PRICING='{"mi-modelo":{"input":0.44,"cached_input":0.09,"output":1.76,"currency":"EUR"}}'
+MODEL_PRICING='{"mi-modelo":{"input":0.44,"cached_input":0.09,"output":1.76,"currency":"€"}}'
 ```
 
 Cada gateway traduce el uso de su SDK a contadores comunes. El núcleo aplica este
@@ -893,17 +905,17 @@ tokens y el coste se expone como no configurado, evitando estimaciones silencios
 
 ### Referencia de precios y moneda
 
-El catálogo incluido fue revisado el **2026-07-29** y expresa tarifas por millón
-de tokens en EUR:
+El catálogo incluido fue revisado el **29-07-2026** y expresa tarifas por millón
+de tokens en €:
 
 - `gpt-5.4`: tarifa retail de Azure OpenAI Global Standard en Sweden Central:
-  `2.193945` EUR entrada, `0.219394` EUR entrada cacheada y `13.163668` EUR salida.
+  `2.193945` € entrada, `0.219394` € entrada cacheada y `13.163668` € salida.
   Por encima de 272.000 tokens de entrada se activa automáticamente el tier de
-  contexto largo: `4.387889`, `0.438789` y `19.745502` EUR respectivamente.
+  contexto largo: `4.387889`, `0.438789` y `19.745502` € respectivamente.
 - `gemini-3.1-flash-live-preview`: precios oficiales de Google en USD convertidos
-  con la referencia BCE del 2026-07-29 (`1 EUR = 1.1380 USD`): `0.659051` EUR
-  entrada de texto, `2.636204` EUR entrada de audio, `3.954306` EUR salida de
-  texto/pensamiento y `10.544815` EUR salida de audio.
+  con la referencia BCE del 29-07-2026 (`1 € = 1.1380 USD`): `0.659051` €
+  entrada de texto, `2.636204` € entrada de audio, `3.954306` € salida de
+  texto/pensamiento y `10.544815` € salida de audio.
 
 Estas cifras calculan consumo técnico antes de IVA, descuentos contractuales o
 el cambio aplicado en la factura. Si el deployment de Azure es Data Zone en vez

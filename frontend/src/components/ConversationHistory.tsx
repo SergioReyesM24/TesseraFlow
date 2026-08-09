@@ -10,6 +10,7 @@ import {
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import {
   listConversationSessions,
+  loadDailyTokenUsage,
   loadConversationGroup,
   loadConversationHistory,
 } from '../lib/api'
@@ -18,8 +19,14 @@ import type {
   ConversationHistoryItem,
   ConversationHistoryResponse,
   ConversationListResponse,
+  DailyTokenUsageReport,
+  VisualPresentation as VisualPresentationData,
 } from '../types'
 import { formatModelCost } from '../lib/costs'
+import { formatTimestamp } from '../lib/dates'
+import { DailyTokenAnalytics } from './DailyTokenAnalytics'
+import { TokenUsage } from './TokenUsage'
+import { VisualPresentation } from './VisualPresentation'
 
 interface ConversationHistoryProps {
   apiBaseUrl: string
@@ -27,34 +34,105 @@ interface ConversationHistoryProps {
   activeSessionUid: string
 }
 
-/** Format persisted timestamps in the browser locale while preserving precision. */
-function formatTimestamp(value: string | null): string {
-  if (!value) return '—'
-  return new Intl.DateTimeFormat('es-ES', {
-    dateStyle: 'short',
-    timeStyle: 'medium',
-  }).format(new Date(value))
-}
-
 /** Render arbitrary JSON tool inputs and outputs without losing nested structure. */
 function JsonBlock({ value }: { value: unknown }) {
   return <pre className="history-json">{JSON.stringify(value, null, 2)}</pre>
 }
 
+interface HistoryRecordProps {
+  record: ConversationHistoryItem
+  toolResult?: ConversationHistoryItem
+}
+
 /** Present one canonical row according to its discriminated domain payload. */
-function HistoryRecord({ record }: { record: ConversationHistoryItem }) {
+export function HistoryRecord({ record, toolResult }: HistoryRecordProps) {
   const { payload } = record
-  const label =
-    payload.type === 'message'
-      ? payload.role === 'user'
-        ? 'Mensaje de entrada'
-        : 'Respuesta del asistente'
-      : payload.type === 'tool_call'
-        ? 'Tool call'
-        : 'Respuesta de tool'
+  if (payload.type === 'tool_call') {
+    const resultPayload =
+      toolResult?.payload.type === 'tool_result' ? toolResult.payload : null
+    return (
+      <article className="history-record history-record-tool_call">
+        <details className="history-tool-call">
+          <summary>
+            <span className="history-tool-call-icon" aria-hidden="true">
+              <Wrench size={14} />
+            </span>
+            <strong>{payload.tool_name}</strong>
+            <ChevronDown className="history-tool-call-chevron" size={14} aria-hidden="true" />
+          </summary>
+          <div className="history-tool-call-detail">
+            <dl>
+              <div>
+                <dt>Call ID</dt>
+                <dd><code>{payload.call_id}</code></dd>
+              </div>
+              <div>
+                <dt>Secuencia</dt>
+                <dd>#{record.sequence}</dd>
+              </div>
+              <div>
+                <dt>Fecha</dt>
+                <dd>{formatTimestamp(record.created_at)}</dd>
+              </div>
+            </dl>
+            <span>Argumentos</span>
+            <JsonBlock value={payload.arguments} />
+            {resultPayload && (
+              <div className="history-tool-response">
+                <div>
+                  <span>Respuesta</span>
+                  <span className={`history-result-state ${resultPayload.error ? 'is-error' : ''}`}>
+                    {resultPayload.error ? 'error' : 'success'}
+                  </span>
+                </div>
+                <JsonBlock value={resultPayload.error ?? resultPayload.output} />
+              </div>
+            )}
+          </div>
+        </details>
+      </article>
+    )
+  }
+
+  if (payload.type === 'tool_result') {
+    return (
+      <article className="history-record history-record-tool_result">
+        <details className="history-tool-call history-orphan-tool-result">
+          <summary>
+            <span className="history-tool-call-icon" aria-hidden="true">
+              <Wrench size={14} />
+            </span>
+            <strong>Respuesta de herramienta</strong>
+            <ChevronDown className="history-tool-call-chevron" size={14} aria-hidden="true" />
+          </summary>
+          <div className="history-tool-call-detail">
+            <dl>
+              <div>
+                <dt>Call ID</dt>
+                <dd><code>{payload.call_id}</code></dd>
+              </div>
+              <div>
+                <dt>Secuencia</dt>
+                <dd>#{record.sequence}</dd>
+              </div>
+              <div>
+                <dt>Estado</dt>
+                <dd>{payload.error ? 'Error' : 'Success'}</dd>
+              </div>
+            </dl>
+            <span>Respuesta</span>
+            <JsonBlock value={payload.error ?? payload.output} />
+          </div>
+        </details>
+      </article>
+    )
+  }
+
+  const label = payload.role === 'user' ? 'Mensaje de entrada' : 'Respuesta del asistente'
+  const alignmentClass = ` history-record-message-${payload.role}`
 
   return (
-    <article className={`history-record history-record-${payload.type}`}>
+    <article className={`history-record history-record-${payload.type}${alignmentClass}`}>
       <div className="history-record-rail" aria-hidden="true">
         {payload.type === 'message' ? <MessageSquare size={15} /> : <Wrench size={15} />}
       </div>
@@ -62,52 +140,48 @@ function HistoryRecord({ record }: { record: ConversationHistoryItem }) {
         <header>
           <div>
             <span className="history-record-type">{label}</span>
-            {payload.type === 'message' ? (
-              <span className="history-record-detail">{payload.source}</span>
-            ) : (
-              <code>{payload.call_id}</code>
-            )}
+            <span className="history-record-detail">{payload.source}</span>
           </div>
           <span className="history-sequence">#{record.sequence}</span>
         </header>
 
-        {payload.type === 'message' && (
-          <>
-            <p className="history-message-content">{payload.content || 'Respuesta vacía'}</p>
-            {payload.metrics && (
-              <div className="history-cost-summary">
-                <strong>
-                  {payload.metrics.cost
-                    ? formatModelCost(payload.metrics.cost)
-                    : 'Tarifa no configurada'}
-                </strong>
-                <span>{payload.metrics.usage.total_tokens.toLocaleString('es-ES')} tokens</span>
-                <span>{payload.metrics.calls.length} llamadas al modelo</span>
-              </div>
-            )}
-          </>
-        )}
-        {payload.type === 'tool_call' && (
-          <div className="history-tool-content">
-            <strong>{payload.tool_name}</strong>
-            <span>arguments</span>
-            <JsonBlock value={payload.arguments} />
-          </div>
-        )}
-        {payload.type === 'tool_result' && (
-          <div className="history-tool-content">
-            <span className={`history-result-state ${payload.error ? 'is-error' : ''}`}>
-              {payload.error ? 'error' : 'success'}
-            </span>
-            <span>{payload.error ? 'error' : 'output'}</span>
-            <JsonBlock value={payload.error ?? payload.output} />
-          </div>
+        <p className="history-message-content">{payload.content || 'Respuesta vacía'}</p>
+        {payload.metrics && (
+          <TokenUsage
+            usage={payload.metrics.usage}
+            cost={payload.metrics.cost}
+            calls={payload.metrics.calls.length}
+            compact
+          />
         )}
 
         <footer>{formatTimestamp(record.created_at)}</footer>
       </div>
     </article>
   )
+}
+
+/** Pair tool responses with their call so both details share one disclosure. */
+function TurnRecords({ records }: { records: ConversationHistoryItem[] }) {
+  const toolResults = new Map<string, ConversationHistoryItem>()
+  const toolCallIds = new Set<string>()
+  for (const record of records) {
+    if (record.payload.type === 'tool_call') toolCallIds.add(record.payload.call_id)
+    if (record.payload.type === 'tool_result') {
+      toolResults.set(record.payload.call_id, record)
+    }
+  }
+
+  return records.map((record) => {
+    if (record.payload.type === 'tool_result' && toolCallIds.has(record.payload.call_id)) {
+      return null
+    }
+    const result =
+      record.payload.type === 'tool_call'
+        ? toolResults.get(record.payload.call_id)
+        : undefined
+    return <HistoryRecord key={record.sequence} record={record} toolResult={result} />
+  })
 }
 
 /** Inspect canonical PostgreSQL history by session identifier. */
@@ -131,6 +205,35 @@ export function ConversationHistory({
   const [listLoading, setListLoading] = useState(true)
   const [listLoadingMore, setListLoadingMore] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
+  const [dailyRange, setDailyRange] = useState(30)
+  const [dailyUsage, setDailyUsage] = useState<DailyTokenUsageReport | null>(null)
+  const [dailyUsageLoading, setDailyUsageLoading] = useState(true)
+  const [dailyUsageError, setDailyUsageError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void loadDailyTokenUsage(apiBaseUrl, userId, dailyRange, controller.signal)
+      .then(setDailyUsage)
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return
+        setDailyUsageError(
+          reason instanceof Error
+            ? reason.message
+            : 'No se pudieron cargar las métricas globales.',
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDailyUsageLoading(false)
+      })
+    return () => controller.abort()
+  }, [apiBaseUrl, dailyRange, userId])
+
+  /** Keep the previous report visible while the selected global window refreshes. */
+  const selectDailyRange = (days: number) => {
+    setDailyUsageLoading(true)
+    setDailyUsageError(null)
+    setDailyRange(days)
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -214,6 +317,9 @@ export function ConversationHistory({
 
   const loadedAccounting = useMemo(() => {
     let tokens = 0
+    let inputTokens = 0
+    let outputTokens = 0
+    let cachedInputTokens = 0
     let calls = 0
     let amount = 0
     let currency: string | null = null
@@ -224,6 +330,9 @@ export function ConversationHistory({
       if (!metrics) continue
       metricTurns += 1
       tokens += metrics.usage.total_tokens
+      inputTokens += metrics.usage.input_tokens
+      outputTokens += metrics.usage.output_tokens
+      cachedInputTokens += metrics.usage.cached_input_tokens
       calls += metrics.calls.length
       if (!metrics.cost) {
         fullyPriced = false
@@ -235,11 +344,67 @@ export function ConversationHistory({
     }
     return {
       tokens,
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
       calls,
+      cacheRatio: inputTokens ? Math.round((cachedInputTokens / inputTokens) * 100) : 0,
       cost:
         metricTurns > 0 && fullyPriced && currency ? { amount, currency } : null,
     }
   }, [history])
+
+  const tokenChart = useMemo<VisualPresentationData | null>(() => {
+    const measuredTurns = turns.flatMap(([turnId, records], turnIndex) => {
+      const usages = records.flatMap((record) => {
+        const payload = record.payload
+        return payload.type === 'message' && payload.metrics ? [payload.metrics.usage] : []
+      })
+      if (usages.length === 0) return []
+      return [
+        {
+          turnId,
+          label: `Turno ${turnIndex + 1}`,
+          input: usages.reduce((total, usage) => total + usage.input_tokens, 0),
+          output: usages.reduce((total, usage) => total + usage.output_tokens, 0),
+          cached: usages.reduce((total, usage) => total + usage.cached_input_tokens, 0),
+        },
+      ]
+    })
+    if (measuredTurns.length === 0) return null
+
+    return {
+      componentId: `technical-token-usage-${selectedConversationUid}`,
+      fallbackText: measuredTurns
+        .map(
+          (turn) =>
+            `${turn.label}: ${turn.input} entrada, ${turn.output} salida, ${turn.cached} en caché`,
+        )
+        .join('. '),
+      component: {
+        kind: 'chart',
+        title: 'Consumo de tokens por turno',
+        subtitle: `${measuredTurns.length} ${measuredTurns.length === 1 ? 'turno medido' : 'turnos medidos'} en la página cargada`,
+        chart_type: 'bar',
+        x_axis: { label: 'Turnos técnicos cargados' },
+        y_axis: { label: 'Tokens', unit: null },
+        series: [
+          {
+            name: 'Entrada total',
+            points: measuredTurns.map((turn) => ({ x: turn.label, y: turn.input })),
+          },
+          {
+            name: 'Salida',
+            points: measuredTurns.map((turn) => ({ x: turn.label, y: turn.output })),
+          },
+          {
+            name: 'Entrada en caché',
+            points: measuredTurns.map((turn) => ({ x: turn.label, y: turn.cached })),
+          },
+        ],
+      },
+    }
+  }, [selectedConversationUid, turns])
 
   /** Inspect the requested UUID or refresh when it is already selected. */
   const submit = (event: FormEvent) => {
@@ -356,6 +521,16 @@ export function ConversationHistory({
       </div>
 
       <div className="history-scroll">
+        <DailyTokenAnalytics
+          report={dailyUsage}
+          rangeDays={dailyRange}
+          loading={dailyUsageLoading}
+          error={dailyUsageError}
+          onRangeChange={selectDailyRange}
+        />
+        <div className="history-section-divider" role="separator">
+          <span>Historial de conversaciones</span>
+        </div>
         <div className="history-browser">
           <aside className="history-session-browser" aria-label="Sesiones del usuario">
             <header>
@@ -496,8 +671,28 @@ export function ConversationHistory({
                     <div><dt>Creada</dt><dd>{formatTimestamp(history.created_at)}</dd></div>
                     <div><dt>Último mensaje</dt><dd>{formatTimestamp(history.last_message_at)}</dd></div>
                     <div>
-                      <dt>Tokens cargados</dt>
+                      <dt>Tokens totales</dt>
                       <dd>{loadedAccounting.tokens.toLocaleString('es-ES')}</dd>
+                    </div>
+                    <div>
+                      <dt>Entrada</dt>
+                      <dd>{loadedAccounting.inputTokens.toLocaleString('es-ES')}</dd>
+                    </div>
+                    <div>
+                      <dt>Salida</dt>
+                      <dd>{loadedAccounting.outputTokens.toLocaleString('es-ES')}</dd>
+                    </div>
+                    <div>
+                      <dt>En caché</dt>
+                      <dd>{loadedAccounting.cachedInputTokens.toLocaleString('es-ES')}</dd>
+                    </div>
+                    <div>
+                      <dt>Reutilización</dt>
+                      <dd>{loadedAccounting.cacheRatio}% de la entrada</dd>
+                    </div>
+                    <div>
+                      <dt>Llamadas al modelo</dt>
+                      <dd>{loadedAccounting.calls.toLocaleString('es-ES')}</dd>
                     </div>
                     <div>
                       <dt>Coste cargado</dt>
@@ -511,6 +706,12 @@ export function ConversationHistory({
                     </div>
                   </dl>
                 </div>
+
+                {tokenChart && (
+                  <section className="history-token-chart" aria-label="Analítica de tokens">
+                    <VisualPresentation presentation={tokenChart} />
+                  </section>
+                )}
 
                 {turns.length === 0 ? (
                   <div className="history-empty">
@@ -528,9 +729,7 @@ export function ConversationHistory({
                           <small>{records.length} registros</small>
                         </header>
                         <div className="history-records">
-                          {records.map((record) => (
-                            <HistoryRecord key={record.sequence} record={record} />
-                          ))}
+                          <TurnRecords records={records} />
                         </div>
                       </section>
                     ))}

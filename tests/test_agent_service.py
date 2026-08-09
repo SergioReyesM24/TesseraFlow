@@ -40,6 +40,7 @@ from domain.turn_events import (
 )
 from tools.present_visual import PresentVisualTool
 from tools.registry import build_tool_registry
+from tools.weekly_balance_history import WeeklyBalanceHistoryTool
 
 
 class StubModelSession:
@@ -493,6 +494,59 @@ async def test_streams_visual_component_before_terminal_text_result() -> None:
     assert isinstance(events[3], AgentTextDelta)
     assert isinstance(events[4], AgentStreamCompleted)
     assert events[4].result.visual_components == (events[2].presentation,)
+
+
+async def test_streams_visual_declared_by_a_backend_tool_without_present_visual() -> None:
+    """Route a tool-owned presentation directly while returning its data to the model."""
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(
+                    response_id="resp_lookup",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_lookup",
+                            tool_name="weekly_balance_history",
+                            arguments={},
+                        ),
+                    ),
+                ),
+                ModelReply(response_id="resp_done", text="Aquí tienes el historial."),
+            ]
+        ]
+    )
+    repository = InMemoryConversationRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([WeeklyBalanceHistoryTool(sleeper=no_sleep)]),
+        repository,
+    )
+    await repository.create(conversation_key())
+
+    events = [
+        event
+        async for event in service.stream(
+            "Muéstrame el historial",
+            agent_definition("weekly_balance_history"),
+            conversation_key(),
+        )
+    ]
+
+    assert isinstance(events[0], AgentToolStarted)
+    assert isinstance(events[1], AgentToolCompleted)
+    assert isinstance(events[2], AgentVisualComponent)
+    assert events[2].presentation.component_id == "weekly-balance-history"
+    assert isinstance(events[3], AgentTextDelta)
+    assert isinstance(events[4], AgentStreamCompleted)
+    assert events[4].result.visual_components == (events[2].presentation,)
+    model_result = gateway.sessions[0].tool_result_batches[0][0].output
+    assert model_result["currency"] == "€"
+    assert "visual_components" not in model_result
 
 
 def test_tool_specs_are_provider_neutral_and_closed() -> None:

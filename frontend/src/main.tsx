@@ -1,5 +1,7 @@
 import { createRoot } from 'react-dom/client'
+import '@fontsource-variable/manrope'
 import App from './App'
+import './theme.css'
 import './styles.css'
 
 const root = document.getElementById('root')

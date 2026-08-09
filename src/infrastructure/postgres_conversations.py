@@ -26,7 +26,9 @@ from domain.conversations import (
     ConversationListPage,
     ConversationMessage,
     ConversationSummary,
+    DailyTokenUsage,
 )
+from domain.costs import ModelUsage
 from domain.tools import ToolCall, ToolResult
 from infrastructure.conversation_codec import (
     decode_conversation_item,
@@ -62,6 +64,12 @@ SELECT conversation.id, conversation.user_id, conversation.title, conversation.s
        NULL::TEXT AS thread_id
 FROM conversations AS conversation
 WHERE conversation.user_id = $1
+  AND EXISTS (
+      SELECT 1
+      FROM conversation_items AS item
+      WHERE item.conversation_id = conversation.id
+        AND item.item_type = 'message'
+  )
   AND NOT EXISTS (
       SELECT 1
       FROM a2a_threads AS relation
@@ -129,6 +137,63 @@ WHERE conversation_id = $1
   AND sequence > $2
 ORDER BY sequence
 LIMIT $3
+"""
+
+SELECT_DAILY_TOKEN_USAGE = """
+WITH requested_days AS (
+    SELECT (
+        (NOW() AT TIME ZONE 'UTC')::date - day_offset.value
+    )::date AS usage_date
+    FROM generate_series($2::int - 1, 0, -1) AS day_offset(value)
+), daily_usage AS (
+    SELECT (item.created_at AT TIME ZONE 'UTC')::date AS usage_date,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,input_tokens}')::bigint
+           ), 0) AS input_tokens,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,output_tokens}')::bigint
+           ), 0) AS output_tokens,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,cached_input_tokens}')::bigint
+           ), 0) AS cached_input_tokens,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,cached_input_audio_tokens}')::bigint
+           ), 0) AS cached_input_audio_tokens,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,reasoning_tokens}')::bigint
+           ), 0) AS reasoning_tokens,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,input_audio_tokens}')::bigint
+           ), 0) AS input_audio_tokens,
+           COALESCE(SUM(
+               (model_call.value #>> '{usage,output_audio_tokens}')::bigint
+           ), 0) AS output_audio_tokens,
+           COUNT(DISTINCT item.id) AS turn_count,
+           COUNT(*) AS model_call_count
+    FROM conversation_items AS item
+    JOIN conversations AS conversation ON conversation.id = item.conversation_id
+    CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
+        item.payload #> '{metrics,calls}', '[]'::jsonb
+    )) AS model_call(value)
+    WHERE conversation.user_id = $1
+      AND item.item_type = 'message'
+      AND item.role = 'assistant'
+      AND item.created_at >= ((NOW() AT TIME ZONE 'UTC')::date - ($2::int - 1)) AT TIME ZONE 'UTC'
+    GROUP BY 1
+)
+SELECT TO_CHAR(day.usage_date, 'DD-MM-YYYY') AS usage_date,
+       COALESCE(usage.input_tokens, 0) AS input_tokens,
+       COALESCE(usage.output_tokens, 0) AS output_tokens,
+       COALESCE(usage.cached_input_tokens, 0) AS cached_input_tokens,
+       COALESCE(usage.cached_input_audio_tokens, 0) AS cached_input_audio_tokens,
+       COALESCE(usage.reasoning_tokens, 0) AS reasoning_tokens,
+       COALESCE(usage.input_audio_tokens, 0) AS input_audio_tokens,
+       COALESCE(usage.output_audio_tokens, 0) AS output_audio_tokens,
+       COALESCE(usage.turn_count, 0) AS turn_count,
+       COALESCE(usage.model_call_count, 0) AS model_call_count
+FROM requested_days AS day
+LEFT JOIN daily_usage AS usage USING (usage_date)
+ORDER BY day.usage_date
 """
 
 INSERT_CONVERSATION = """
@@ -215,7 +280,7 @@ class PostgresConversationRepository(ConversationRepository):
         offset: int,
         limit: int,
     ) -> ConversationListPage:
-        """List owner-scoped conversation headers in latest-update order."""
+        """List non-empty owner-scoped conversation headers in latest-update order."""
         if offset < 0:
             raise ValueError("offset cannot be negative")
         if limit < 1:
@@ -365,6 +430,40 @@ class PostgresConversationRepository(ConversationRepository):
         except (KeyError, TypeError, ValueError) as exc:
             raise InvalidPostgresConversationDataError(
                 "Conversation correlation data is invalid"
+            ) from exc
+
+    async def load_daily_token_usage(
+        self,
+        user_id: str,
+        *,
+        days: int,
+    ) -> tuple[DailyTokenUsage, ...]:
+        """Aggregate UTC usage across root and worker conversations for one owner."""
+        if days < 1:
+            raise ValueError("days must be positive")
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(SELECT_DAILY_TOKEN_USAGE, user_id, days)
+        try:
+            return tuple(
+                DailyTokenUsage(
+                    day=cast(str, row["usage_date"]),
+                    usage=ModelUsage(
+                        input_tokens=int(row["input_tokens"]),
+                        output_tokens=int(row["output_tokens"]),
+                        cached_input_tokens=int(row["cached_input_tokens"]),
+                        cached_input_audio_tokens=int(row["cached_input_audio_tokens"]),
+                        reasoning_tokens=int(row["reasoning_tokens"]),
+                        input_audio_tokens=int(row["input_audio_tokens"]),
+                        output_audio_tokens=int(row["output_audio_tokens"]),
+                    ),
+                    turn_count=int(row["turn_count"]),
+                    model_call_count=int(row["model_call_count"]),
+                )
+                for row in rows
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidPostgresConversationDataError(
+                "Daily token usage data is invalid"
             ) from exc
 
     async def save_turn(

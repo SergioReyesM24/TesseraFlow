@@ -17,7 +17,7 @@ class MockBizumArguments(ToolArguments):
         gt=0,
         max_digits=10,
         decimal_places=2,
-        description="Positive EUR amount to send to the fixed mock recipient Mamá",
+        description="Positive € amount to send to the fixed mock recipient Mamá",
     )
 
 
@@ -26,7 +26,7 @@ class MockBizumTool(AgentTool[MockBizumArguments]):
 
     name = "send_mock_bizum_to_mom"
     description = (
-        "Simulates sending a Bizum payment in EUR to the fixed recipient Mamá. This is a "
+        "Simulates sending a Bizum payment in € to the fixed recipient Mamá. This is a "
         "mock operation with no real financial effect. Requires the amount and returns a "
         "synthetic receipt."
     )
@@ -49,5 +49,5 @@ class MockBizumTool(AgentTool[MockBizumArguments]):
             "operation_id": str(self._uid_factory()),
             "recipient": MOCK_BIZUM_RECIPIENT,
             "amount": str(arguments.amount),
-            "currency": "EUR",
+            "currency": "€",
         }

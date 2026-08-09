@@ -4,6 +4,7 @@ import {
   listConversationSessions,
   loadConversationGroup,
   loadConversationHistory,
+  loadDailyTokenUsage,
   normalizeBaseUrl,
 } from './api'
 
@@ -32,9 +33,9 @@ describe('API URL composition', () => {
       status: 'active',
       version: 1,
       last_sequence: 4,
-      created_at: '2026-07-22T10:00:00Z',
-      updated_at: '2026-07-22T10:01:00Z',
-      last_message_at: '2026-07-22T10:01:00Z',
+      created_at: '22-07-2026T10:00:00Z',
+      updated_at: '22-07-2026T10:01:00Z',
+      last_message_at: '22-07-2026T10:01:00Z',
       items: [],
       has_more: false,
       next_after_sequence: null,
@@ -108,6 +109,25 @@ describe('API URL composition', () => {
     ).resolves.toEqual(payload)
     expect(fetchMock).toHaveBeenCalledWith(
       'http://api.test/v1/sessions/main-1/group?user_id=user-1',
+      { signal: undefined },
+    )
+
+    vi.unstubAllGlobals()
+  })
+
+  it('loads global daily token metrics for the selected period', async () => {
+    const payload = { user_id: 'user-1', timezone: 'UTC', days: [] }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(loadDailyTokenUsage('http://api.test/', 'user-1', 90)).resolves.toEqual(
+      payload,
+    )
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/metrics/tokens/daily?user_id=user-1&days=90',
       { signal: undefined },
     )
 

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { formatDate } from '../lib/dates'
 import type {
   ChartVisualComponent,
   MetricGroupVisualComponent,
@@ -6,7 +7,14 @@ import type {
   VisualPresentation as VisualPresentationData,
 } from '../types'
 
-const CHART_COLORS = ['#377b63', '#b26a3d', '#5579a6', '#9a5f8c', '#7d843a', '#845d47']
+const CHART_COLORS = [
+  'var(--chart-1)',
+  'var(--chart-2)',
+  'var(--chart-3)',
+  'var(--chart-4)',
+  'var(--chart-5)',
+  'var(--chart-6)',
+]
 const WIDTH = 640
 const HEIGHT = 260
 const PADDING = { top: 18, right: 18, bottom: 42, left: 58 }
@@ -87,7 +95,7 @@ function TransactionList({ component }: { component: TransactionListVisualCompon
                 <span className={isIncome ? 'income' : 'expense'}>
                   {isIncome ? 'Ingreso' : 'Gasto'}
                 </span>
-                <time>{transaction.booked_at.slice(0, 10)}</time>
+                <time>{formatDate(transaction.booked_at.slice(0, 10))}</time>
               </div>
               <div className="transaction-merchant" role="cell">
                 <strong>{transaction.merchant}</strong>
@@ -179,6 +187,10 @@ function Chart({
   const plotHeight = HEIGHT - PADDING.top - PADDING.bottom
   const x = (label: string) => {
     const index = Math.max(0, labels.indexOf(label))
+    if (component.chart_type === 'bar') {
+      const bandWidth = plotWidth / Math.max(labels.length, 1)
+      return PADDING.left + bandWidth * (index + 0.5)
+    }
     return PADDING.left + (labels.length === 1 ? plotWidth / 2 : (index / (labels.length - 1)) * plotWidth)
   }
   const y = (value: number) => PADDING.top + ((maximum - value) / valueRange) * plotHeight
@@ -222,7 +234,7 @@ function Chart({
                         points={points}
                         fill="none"
                         stroke={color}
-                        strokeWidth="3"
+                        strokeWidth="1.5"
                         strokeLinejoin="round"
                         pathLength={1}
                         style={{ animationDelay: `${100 + seriesIndex * 100}ms` }}
@@ -244,7 +256,7 @@ function Chart({
                             key={tooltip.key}
                             cx={tooltip.x}
                             cy={tooltip.y}
-                            r="5"
+                            r="3"
                             fill={color}
                             style={{
                               animationDelay: `${240 + sequenceIndex * 75 + seriesIndex * 35}ms`,
@@ -327,7 +339,7 @@ function Chart({
               if (index % interval !== 0 && index !== labels.length - 1) return null
               return (
                 <text className="chart-x-label" key={label} x={x(label)} y={HEIGHT - 18} textAnchor="middle">
-                  {shorten(label)}
+                  {shorten(formatDate(label))}
                 </text>
               )
             })}
@@ -341,7 +353,7 @@ function Chart({
               }}
               role="status"
             >
-              <span>{activeTooltip.xValue}</span>
+              <span>{formatDate(activeTooltip.xValue)}</span>
               <strong>{activeTooltip.yValue}</strong>
             </div>
           )}
