@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, TypeAlias
 
-from domain.costs import TurnMetrics
+from domain.costs import ModelUsage, TurnMetrics
 from domain.tools import ToolCall, ToolResult
 
 
@@ -125,6 +125,21 @@ class ConversationListPage:
 
     sessions: tuple[ConversationSummary, ...]
     has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DailyTokenUsage:
+    """Owner-global model consumption aggregated into one UTC calendar day."""
+
+    day: str
+    usage: ModelUsage
+    turn_count: int
+    model_call_count: int
+
+    def __post_init__(self) -> None:
+        """Reject invalid aggregate counters at the domain boundary."""
+        if self.turn_count < 0 or self.model_call_count < 0:
+            raise ValueError("Daily usage counters cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)

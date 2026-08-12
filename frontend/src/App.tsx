@@ -1,9 +1,13 @@
 import {
   AudioLines,
+  Bot,
   ChevronDown,
   Database,
+  LoaderCircle,
   MessageCircle,
   Mic,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Settings,
   SlidersHorizontal,
@@ -16,10 +20,13 @@ import { Composer } from './components/Composer'
 import { ConversationHistory } from './components/ConversationHistory'
 import { MessageList } from './components/MessageList'
 import { StatusPill } from './components/StatusPill'
+import { VisualPresentation } from './components/VisualPresentation'
 import { useAgentSocket } from './hooks/useAgentSocket'
 import { useRealtimeSocket } from './hooks/useRealtimeSocket'
 import { createSession } from './lib/api'
-import type { Mode } from './types'
+import type { Mode, VisualPresentation as VisualPresentationData } from './types'
+
+const VISUAL_GENERATION_DELAY_MS = 1050
 
 interface WorkspaceProps {
   apiBaseUrl: string
@@ -37,6 +44,11 @@ interface SettingsDialogProps {
   userId: string
   onClose: () => void
   onSave: (apiBaseUrl: string, userId: string) => void
+}
+
+interface VisualInspectorProps {
+  presentation: VisualPresentationData
+  onClose: () => void
 }
 
 /** Create a device-local anonymous owner identifier for the unauthenticated demo API. */
@@ -118,6 +130,68 @@ function SettingsDialog({
   )
 }
 
+/** Grow a visual result out of an assistant-style message before revealing its contents. */
+function VisualInspector({ presentation, onClose }: VisualInspectorProps) {
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const [isReady, setIsReady] = useState(prefersReducedMotion)
+
+  useEffect(() => {
+    if (prefersReducedMotion) return
+
+    const timer = window.setTimeout(() => setIsReady(true), VISUAL_GENERATION_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [prefersReducedMotion, presentation.componentId])
+
+  return (
+    <aside
+      className={`visual-inspector ${isReady ? 'is-ready' : 'is-generating'}`}
+      aria-label="Componente visual del agente"
+      aria-busy={!isReady}
+    >
+      <header className="visual-inspector-header">
+        <div className="visual-assistant-message" aria-live="polite">
+          <span className="visual-assistant-avatar" aria-hidden="true">
+            <Bot size={16} />
+          </span>
+          <span className="visual-assistant-copy">
+            <span>TesseraFlow</span>
+            <strong>
+              {isReady ? 'He preparado esta vista para ti' : 'Generando componente visual…'}
+            </strong>
+          </span>
+          {!isReady && <LoaderCircle className="spin" size={15} aria-hidden="true" />}
+        </div>
+        <button
+          className="icon-button"
+          type="button"
+          onClick={onClose}
+          aria-label="Cerrar vista visual"
+        >
+          <X size={19} />
+        </button>
+      </header>
+      <div className="visual-inspector-content">
+        {isReady ? (
+          <div className="visual-generated-content">
+            <VisualPresentation presentation={presentation} />
+          </div>
+        ) : (
+          <div className="visual-generating-placeholder" aria-hidden="true">
+            <span className="visual-skeleton-title" />
+            <span className="visual-skeleton-subtitle" />
+            <div className="visual-skeleton-canvas">
+              <i />
+              <i />
+              <i />
+              <i />
+            </div>
+          </div>
+        )}
+      </div>
+    </aside>
+  )
+}
+
 /** Hold both conversation transports so switching modes preserves visible transcripts. */
 function Workspace({
   apiBaseUrl,
@@ -129,6 +203,11 @@ function Workspace({
   onOpenSettings,
   creatingSession,
 }: WorkspaceProps) {
+  const [navigationPreference, setNavigationPreference] = useState({
+    visualKey: null as string | null,
+    expanded: true,
+  })
+  const [dismissedVisualKey, setDismissedVisualKey] = useState<string | null>(null)
   const text = useAgentSocket({
     apiBaseUrl,
     sessionUid,
@@ -144,6 +223,28 @@ function Workspace({
   const activeConnection =
     mode === 'history' ? 'connected' : mode === 'text' ? text.connection : voice.connection
   const activeError = mode === 'history' ? null : mode === 'text' ? text.error : voice.error
+  const activeMessages = mode === 'text' ? text.messages : mode === 'voice' ? voice.messages : []
+  const latestVisualEntry = (() => {
+    for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
+      const visuals = activeMessages[index].visuals
+      if (visuals?.length) {
+        const presentation = visuals[visuals.length - 1]
+        return {
+          presentation,
+          key: `${activeMessages[index].id}:${presentation.componentId}`,
+        }
+      }
+    }
+    return null
+  })()
+  const latestVisual = latestVisualEntry?.presentation ?? null
+  const latestVisualKey = latestVisualEntry?.key ?? null
+  const activeVisual =
+    latestVisual && latestVisualKey !== dismissedVisualKey ? latestVisual : null
+  const navigationExpanded =
+    !activeVisual ||
+    (navigationPreference.visualKey === latestVisualKey &&
+      navigationPreference.expanded)
 
   /** Enter voice mode while the click still grants browser audio permission. */
   const selectVoiceMode = () => {
@@ -151,8 +252,18 @@ function Workspace({
     onModeChange('voice')
   }
 
+  /** Return a dismissed visual to its original inline message position. */
+  const closeVisual = () => {
+    if (!activeVisual || !latestVisualKey) return
+    setDismissedVisualKey(latestVisualKey)
+  }
+
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell${activeVisual ? ' has-visual' : ''}${
+        navigationExpanded ? ' sidebar-expanded' : ' sidebar-collapsed'
+      }`}
+    >
       <aside className="sidebar">
         <div className="brand-row">
           <div className="brand-mark" aria-hidden="true">T</div>
@@ -161,6 +272,22 @@ function Workspace({
             <span>Agente multimodal</span>
           </div>
         </div>
+
+        <button
+          className="sidebar-collapse-toggle"
+          type="button"
+          aria-label={navigationExpanded ? 'Contraer navegación' : 'Desplegar navegación'}
+          aria-expanded={navigationExpanded}
+          onClick={() =>
+            setNavigationPreference({
+              visualKey: latestVisualKey,
+              expanded: !navigationExpanded,
+            })
+          }
+        >
+          {navigationExpanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+          <span>{navigationExpanded ? 'Contraer' : 'Menú'}</span>
+        </button>
 
         <button
           className="new-chat-button"
@@ -264,6 +391,7 @@ function Workspace({
                 messages={text.messages}
                 emptyTitle="¿En qué puedo ayudarte?"
                 emptyDescription="Pregunta, delega una tarea o continúa un trabajo anterior."
+                showVisuals={!activeVisual}
               >
                 <div className="welcome-mark" aria-hidden="true">
                   <MessageCircle size={28} />
@@ -286,6 +414,7 @@ function Workspace({
                     ? 'Puedes interrumpir la respuesta en cualquier momento.'
                     : 'Una conversación natural, con transcripción y audio en tiempo real.'
                 }
+                showVisuals={!activeVisual}
               >
                 <div className={`voice-orb ${voice.recording ? 'is-listening' : ''}`}>
                   <span />
@@ -332,6 +461,14 @@ function Workspace({
           )}
         </div>
       </main>
+
+      {activeVisual && (
+        <VisualInspector
+          key={latestVisualKey}
+          presentation={activeVisual}
+          onClose={closeVisual}
+        />
+      )}
 
       <div className="mobile-mode-switch" aria-label="Cambiar modo">
         <button

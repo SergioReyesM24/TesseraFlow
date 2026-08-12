@@ -64,7 +64,7 @@ def test_cost_calculator_selects_the_large_context_tier_per_request() -> None:
                 input=Decimal("2"),
                 cached_input=Decimal("0.2"),
                 output=Decimal("10"),
-                currency="EUR",
+                currency="€",
                 tiers=(
                     ModelRateTier(
                         min_input_tokens=101,
@@ -84,4 +84,4 @@ def test_cost_calculator_selects_the_large_context_tier_per_request() -> None:
 
     assert call.cost is not None
     assert call.cost.amount == Decimal("0.00092")
-    assert call.cost.currency == "EUR"
+    assert call.cost.currency == "€"

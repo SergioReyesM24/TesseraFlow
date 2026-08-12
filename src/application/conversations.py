@@ -11,6 +11,7 @@ from domain.conversations import (
     ConversationKey,
     ConversationListPage,
     ConversationMessage,
+    DailyTokenUsage,
 )
 from domain.tools import ToolCall
 
@@ -108,6 +109,17 @@ class ConversationHistoryService:
         if group is None:
             raise ConversationNotFoundError("Conversation session does not exist")
         return group
+
+    async def load_daily_token_usage(
+        self,
+        user_id: str,
+        *,
+        days: int,
+    ) -> tuple[DailyTokenUsage, ...]:
+        """Return UTC daily usage across all owner-scoped conversations."""
+        if days < 1:
+            raise ValueError("days must be positive")
+        return await self._histories.load_daily_token_usage(user_id, days=days)
 
 
 class RecentConversationCompactor:

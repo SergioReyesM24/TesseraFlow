@@ -37,6 +37,9 @@ def test_default_prompts_are_loaded_from_versioned_markdown_files() -> None:
     assert "Do not ask the user" in DEFAULT_AGENT_INSTRUCTIONS
     assert "immediately call" in DEFAULT_AGENT_INSTRUCTIONS
     assert "Voy a consultarlo, dame un momento." in DEFAULT_AGENT_INSTRUCTIONS
+    assert "lateral data panel" in DEFAULT_AGENT_INSTRUCTIONS
+    assert "new or changed visual view" in DEFAULT_AGENT_INSTRUCTIONS
+    assert "textual explanation" in DEFAULT_AGENT_INSTRUCTIONS
 
 
 def test_explicit_settings_can_override_markdown_prompts() -> None:
@@ -90,14 +93,14 @@ def test_model_pricing_accepts_a_provider_neutral_json_catalog(monkeypatch: Any)
     """Configure arbitrary models without adding provider-specific settings."""
     monkeypatch.setenv(
         "MODEL_PRICING",
-        '{"custom-model":{"input":1.25,"output":5,"currency":"EUR"}}',
+        '{"custom-model":{"input":1.25,"output":5,"currency":"€"}}',
     )
 
     settings = Settings(_env_file=None)
 
     assert settings.model_pricing["custom-model"].input == Decimal("1.25")
     assert settings.model_pricing["custom-model"].output == Decimal("5")
-    assert settings.model_pricing["custom-model"].currency == "EUR"
+    assert settings.model_pricing["custom-model"].currency == "€"
 
 
 def test_active_worker_model_has_reviewed_euro_rates_and_long_context_tier() -> None:
@@ -108,7 +111,7 @@ def test_active_worker_model_has_reviewed_euro_rates_and_long_context_tier() -> 
     assert rates.input == Decimal("2.193945")
     assert rates.cached_input == Decimal("0.219394")
     assert rates.output == Decimal("13.163668")
-    assert rates.currency == "EUR"
+    assert rates.currency == "€"
     assert rates.tiers[0].min_input_tokens == 272_001
     assert rates.tiers[0].output == Decimal("19.745502")
 

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from domain.agent import AgentResult
 from domain.conversations import (
@@ -11,10 +11,34 @@ from domain.conversations import (
     ConversationHistoryPage,
     ConversationListPage,
     ConversationMessage,
+    DailyTokenUsage,
 )
 from domain.costs import ModelUsage, TurnMetrics
 from domain.tools import ToolCall, ToolResult
 from domain.visuals import visual_presentation_payload
+
+
+def _format_datetime(value: datetime | None) -> str | None:
+    """Serialize API timestamps with the product-wide DD-MM-YYYY date prefix."""
+    if value is None:
+        return None
+    fraction = f".{value.microsecond:06d}".rstrip("0") if value.microsecond else ""
+    offset = value.strftime("%z")
+    if offset == "+0000":
+        timezone = "Z"
+    elif offset:
+        timezone = f"{offset[:3]}:{offset[3:]}"
+    else:
+        timezone = ""
+    return f"{value:%d-%m-%YT%H:%M:%S}{fraction}{timezone}"
+
+
+class DateFormattedResponse(BaseModel):
+    """Apply the public date format to timestamp fields on response models."""
+
+    @field_serializer("created_at", "updated_at", "last_message_at", check_fields=False)
+    def serialize_datetime(self, value: datetime | None) -> str | None:
+        return _format_datetime(value)
 
 
 class StreamAgentRequest(BaseModel):
@@ -135,6 +159,32 @@ class ModelCostResponse(BaseModel):
 
     amount: float
     currency: str
+
+
+class DailyTokenUsageResponse(BaseModel):
+    """One UTC day of owner-global model consumption."""
+
+    date: str
+    usage: ModelUsageResponse
+    turn_count: int
+    model_call_count: int
+
+    @classmethod
+    def from_domain(cls, value: DailyTokenUsage) -> "DailyTokenUsageResponse":
+        return cls(
+            date=value.day,
+            usage=ModelUsageResponse.from_domain(value.usage),
+            turn_count=value.turn_count,
+            model_call_count=value.model_call_count,
+        )
+
+
+class DailyTokenUsageReportResponse(BaseModel):
+    """Daily usage window across all conversations owned by a user."""
+
+    user_id: str
+    timezone: Literal["UTC"] = "UTC"
+    days: list[DailyTokenUsageResponse]
 
 
 class ModelCallMetricsResponse(BaseModel):
@@ -260,7 +310,7 @@ ConversationHistoryPayload = Annotated[
 ]
 
 
-class ConversationHistoryItemResponse(BaseModel):
+class ConversationHistoryItemResponse(DateFormattedResponse):
     """One ordered PostgreSQL conversation item with its stable turn identifier."""
 
     sequence: int
@@ -269,7 +319,7 @@ class ConversationHistoryItemResponse(BaseModel):
     payload: ConversationHistoryPayload
 
 
-class ConversationSummaryResponse(BaseModel):
+class ConversationSummaryResponse(DateFormattedResponse):
     """Technical metadata for one session in the owner's conversation browser."""
 
     session_uid: UUID
@@ -401,7 +451,7 @@ class ConversationListResponse(BaseModel):
         )
 
 
-class ConversationHistoryResponse(BaseModel):
+class ConversationHistoryResponse(DateFormattedResponse):
     """Paginated technical history for an owner-scoped conversation session."""
 
     session_uid: UUID

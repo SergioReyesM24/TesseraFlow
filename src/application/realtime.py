@@ -21,6 +21,7 @@ from application.tools import (
     ToolRegistry,
     extend_visual_components,
 )
+from domain.a2a import visual_components_from_completion_message
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationItem, ConversationKey, ConversationMessage
 from domain.costs import ModelCallMetrics, ModelCostCalculator, ModelUsage, TurnMetrics
@@ -288,6 +289,8 @@ class RealtimeAgentSession:
         self._turn_items: list[ConversationItem] = []
         self._records: list[ToolCallRecord] = []
         self._visual_components: list[VisualPresentation] = []
+        self._pending_visual_components: list[VisualPresentation] = []
+        self._visual_component_ready = asyncio.Event()
         self._model_calls: list[ModelCallMetrics] = []
         self._tool_rounds = 0
 
@@ -375,34 +378,52 @@ class RealtimeAgentSession:
     async def events(self) -> AsyncIterator[RealtimeAgentEvent]:
         """Normalize model events while monitoring the durable dispatcher task."""
         iterator = self._model_session.receive().__aiter__()
-        while True:
-            receive_task: asyncio.Task[RealtimeModelEvent] = asyncio.create_task(
-                self._next_model_event(iterator)
-            )
-            waiters: set[asyncio.Task[Any]] = {receive_task}
-            if self._dispatcher_task is not None:
-                waiters.add(self._dispatcher_task)
-            try:
+        receive_task: asyncio.Task[RealtimeModelEvent] = asyncio.create_task(
+            self._next_model_event(iterator)
+        )
+        visual_task: asyncio.Task[bool] | None = None
+        try:
+            while True:
+                visual_task = asyncio.create_task(self._visual_component_ready.wait())
+                waiters: set[asyncio.Task[Any]] = {receive_task, visual_task}
+                if self._dispatcher_task is not None:
+                    waiters.add(self._dispatcher_task)
                 done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-            except BaseException:
-                receive_task.cancel()
-                await asyncio.gather(receive_task, return_exceptions=True)
-                raise
-            if self._dispatcher_task is not None and self._dispatcher_task in done:
-                receive_task.cancel()
-                await asyncio.gather(receive_task, return_exceptions=True)
-                exception = self._dispatcher_task.exception()
-                if exception is not None:
-                    raise exception
-                raise RealtimeSessionStateError("Realtime command dispatcher stopped")
-            try:
-                event = receive_task.result()
-            except StopAsyncIteration:
-                if not self._lifecycle_active:
-                    await self._close_tasks()
-                return
-            async for normalized in self._handle_model_event(event):
-                yield normalized
+                if self._dispatcher_task is not None and self._dispatcher_task in done:
+                    exception = self._dispatcher_task.exception()
+                    if exception is not None:
+                        raise exception
+                    raise RealtimeSessionStateError("Realtime command dispatcher stopped")
+                if self._pending_visual_components:
+                    pending = tuple(self._pending_visual_components)
+                    self._pending_visual_components = []
+                    self._visual_component_ready.clear()
+                    for presentation in pending:
+                        yield RealtimeVisualComponent(
+                            turn_id=self._ensure_turn_id(),
+                            presentation=presentation,
+                        )
+                    continue
+                visual_task.cancel()
+                await asyncio.gather(visual_task, return_exceptions=True)
+                visual_task = None
+                try:
+                    event = receive_task.result()
+                except StopAsyncIteration:
+                    if not self._lifecycle_active:
+                        await self._close_tasks()
+                    return
+                async for normalized in self._handle_model_event(event):
+                    yield normalized
+                receive_task = asyncio.create_task(self._next_model_event(iterator))
+        finally:
+            receive_task.cancel()
+            if visual_task is not None:
+                visual_task.cancel()
+            await asyncio.gather(
+                *(task for task in (receive_task, visual_task) if task is not None),
+                return_exceptions=True,
+            )
 
     @staticmethod
     async def _next_model_event(
@@ -413,6 +434,13 @@ class RealtimeAgentSession:
 
     async def _handle_model_event(self, event: object) -> AsyncIterator[RealtimeAgentEvent]:
         """Translate one provider-neutral event and advance connection-local state."""
+        if self._pending_visual_components:
+            turn_id = self._ensure_turn_id()
+            pending = tuple(self._pending_visual_components)
+            self._pending_visual_components = []
+            self._visual_component_ready.clear()
+            for presentation in pending:
+                yield RealtimeVisualComponent(turn_id=turn_id, presentation=presentation)
         if isinstance(event, RealtimeModelInputTranscriptDelta):
             # OpenAI input transcription is asynchronous and may arrive after output
             # has already started. In that case it still belongs to the active turn.
@@ -604,6 +632,8 @@ class RealtimeAgentSession:
             turn_id=turn_id,
             input_tokens=metrics.usage.input_tokens,
             output_tokens=metrics.usage.output_tokens,
+            cached_input_tokens=metrics.usage.cached_input_tokens,
+            total_tokens=metrics.usage.total_tokens,
             cost_amount=str(metrics.cost.amount) if metrics.cost is not None else None,
             cost_currency=metrics.cost.currency if metrics.cost is not None else None,
         )
@@ -644,6 +674,8 @@ class RealtimeAgentSession:
             persisted=bool(user_text),
             input_tokens=metrics.usage.input_tokens,
             output_tokens=metrics.usage.output_tokens,
+            cached_input_tokens=metrics.usage.cached_input_tokens,
+            total_tokens=metrics.usage.total_tokens,
         )
         return turn_id
 
@@ -712,6 +744,16 @@ class RealtimeAgentSession:
                     preserve_pending_audio=self._accepting_audio,
                 )
                 self._input_parts.append(command.message)
+                inherited_visual_list: list[VisualPresentation] = []
+                extend_visual_components(
+                    inherited_visual_list,
+                    visual_components_from_completion_message(command.message),
+                )
+                inherited_visuals = tuple(inherited_visual_list)
+                extend_visual_components(self._visual_components, inherited_visuals)
+                self._pending_visual_components.extend(inherited_visuals)
+                if inherited_visuals:
+                    self._visual_component_ready.set()
                 try:
                     await self._enqueue("a2a_completion", command.message)
                     if self._active_command is None:
@@ -1043,6 +1085,8 @@ class RealtimeAgentSession:
         self._turn_items = []
         self._records = []
         self._visual_components = []
+        self._pending_visual_components = []
+        self._visual_component_ready.clear()
         self._model_calls = []
         self._tool_rounds = 0
         self._turn_has_input = False

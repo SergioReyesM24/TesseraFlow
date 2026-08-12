@@ -47,7 +47,7 @@ async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> No
                 tool_name="present_visual",
                 arguments={
                     "component_id": "weekly-balance",
-                    "fallback_text": "El saldo termina la serie en 13.275,65 EUR.",
+                    "fallback_text": "El saldo termina la serie en 13.275,65 €.",
                     "component": {
                         "kind": "chart",
                         "title": "Saldo semanal",
@@ -55,13 +55,13 @@ async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> No
                         "chart_type": "line",
                         "x_label": "Semana",
                         "y_label": "Saldo",
-                        "y_unit": "EUR",
+                        "y_unit": "€",
                         "series": [
                             {
                                 "name": "Saldo al cierre",
                                 "points": [
-                                    {"x": "2026-07-12", "y": 13450.0},
-                                    {"x": "2026-07-19", "y": 13275.65},
+                                    {"x": "12-07-2026", "y": 13450.0},
+                                    {"x": "19-07-2026", "y": 13275.65},
                                 ],
                             }
                         ],
@@ -130,7 +130,7 @@ async def test_present_visual_supports_bounded_metric_groups() -> None:
                 tool_name="present_visual",
                 arguments={
                     "component_id": "balance-summary",
-                    "fallback_text": "Saldo actual 13.275,65 EUR; variación semanal -1,30%.",
+                    "fallback_text": "Saldo actual 13.275,65 €; variación semanal -1,30%.",
                     "component": {
                         "kind": "metric_group",
                         "title": "Resumen del saldo",
@@ -139,7 +139,7 @@ async def test_present_visual_supports_bounded_metric_groups() -> None:
                             {
                                 "label": "Saldo actual",
                                 "value": "13.275,65",
-                                "unit": "EUR",
+                                "unit": "€",
                                 "detail": None,
                             },
                             {
@@ -173,20 +173,20 @@ async def test_present_visual_supports_transactions_based_on_savings() -> None:
                 arguments={
                     "component_id": "recent-transactions",
                     "fallback_text": (
-                        "El ahorro pasa de 10.000,00 EUR a 12.109,16 EUR tras los movimientos."
+                        "El ahorro pasa de 10.000,00 € a 12.109,16 € tras los movimientos."
                     ),
                     "component": {
                         "kind": "transaction-list",
                         "title": "Últimos movimientos",
                         "subtitle": "Ingresos y gastos sobre el ahorro base",
-                        "currency": "EUR",
+                        "currency": "€",
                         "base_savings": 10000.0,
                         "current_savings": 12109.16,
                         "total_income": 2450.0,
                         "total_expenses": 340.84,
                         "transactions": [
                             {
-                                "booked_at": "2026-07-22T20:14:00+02:00",
+                                "booked_at": "22-07-2026 20:14:00+02:00",
                                 "merchant": "La Tagliatella",
                                 "category": "comida",
                                 "transaction_type": "expense",
@@ -194,7 +194,7 @@ async def test_present_visual_supports_transactions_based_on_savings() -> None:
                                 "balance_after": 12109.16,
                             },
                             {
-                                "booked_at": "2026-07-17T09:00:00+02:00",
+                                "booked_at": "17-07-2026 09:00:00+02:00",
                                 "merchant": "Nómina",
                                 "category": "ingresos",
                                 "transaction_type": "income",
@@ -223,16 +223,56 @@ def test_visual_output_is_limited_per_turn() -> None:
     """Bound the number of cards independently from the model's tool-call count."""
     presentation = VisualPresentation(
         component_id="summary",
-        fallback_text="Saldo actual 100 EUR.",
+        fallback_text="Saldo actual 100 €.",
         component=MetricGroupComponent(
             kind="metric_group",
             title="Resumen",
-            metrics=(Metric(label="Saldo", value="100", unit="EUR"),),
+            metrics=(Metric(label="Saldo", value="100", unit="€"),),
         ),
     )
-    current = [presentation, presentation, presentation]
+    current = [
+        presentation,
+        VisualPresentation(
+            component_id="second",
+            fallback_text=presentation.fallback_text,
+            component=presentation.component,
+        ),
+        VisualPresentation(
+            component_id="third",
+            fallback_text=presentation.fallback_text,
+            component=presentation.component,
+        ),
+    ]
+    incoming = VisualPresentation(
+        component_id="fourth",
+        fallback_text=presentation.fallback_text,
+        component=presentation.component,
+    )
 
     with pytest.raises(VisualComponentLimitError):
-        extend_visual_components(current, (presentation,))
+        extend_visual_components(current, (incoming,))
 
     assert len(current) == 3
+
+
+def test_visual_output_with_the_same_id_replaces_its_format() -> None:
+    """Let present_visual update an automatic component without adding another card."""
+    original = VisualPresentation(
+        component_id="summary",
+        fallback_text="Saldo actual 100 €.",
+        component=MetricGroupComponent(
+            kind="metric_group",
+            title="Resumen",
+            metrics=(Metric(label="Saldo", value="100", unit="€"),),
+        ),
+    )
+    replacement = VisualPresentation(
+        component_id="summary",
+        fallback_text="Saldo actual 100 € en formato actualizado.",
+        component=original.component,
+    )
+    current = [original]
+
+    extend_visual_components(current, (replacement,))
+
+    assert current == [replacement]

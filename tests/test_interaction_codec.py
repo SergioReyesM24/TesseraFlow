@@ -45,12 +45,12 @@ def test_visual_events_round_trip_through_the_durable_json_codec() -> None:
                     ChartSeries(
                         name="Saldo",
                         points=(
-                            ChartPoint(x="2026-07-01", y=100.0),
-                            ChartPoint(x="2026-07-08", y=120.0),
+                            ChartPoint(x="01-07-2026", y=100.0),
+                            ChartPoint(x="08-07-2026", y=120.0),
                         ),
                     ),
                 ),
-                y_unit="EUR",
+                y_unit="€",
             ),
         )
     )
@@ -68,18 +68,18 @@ def test_transaction_visual_round_trips_through_the_durable_json_codec() -> None
     event = AgentVisualComponent(
         presentation=VisualPresentation(
             component_id="transactions",
-            fallback_text="Ahorro actual: 12.109,16 EUR.",
+            fallback_text="Ahorro actual: 12.109,16 €.",
             component=TransactionListComponent(
                 kind="transaction_list",
                 title="Últimos movimientos",
-                currency="EUR",
+                currency="€",
                 base_savings=10000.0,
                 current_savings=12109.16,
                 total_income=2450.0,
                 total_expenses=340.84,
                 transactions=(
                     FinancialTransaction(
-                        booked_at="2026-07-22T20:14:00+02:00",
+                        booked_at="22-07-2026 20:14:00+02:00",
                         merchant="La Tagliatella",
                         category="comida",
                         transaction_type="expense",

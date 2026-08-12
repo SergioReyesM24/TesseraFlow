@@ -5,6 +5,7 @@ from dataclasses import replace
 from uuid import UUID
 
 from application.interactions import ConversationCoordinator, TurnInteractionAgent
+from domain.a2a import A2ACompletionMessage
 from domain.agent import AgentDefinition, AgentResult
 from domain.conversations import ConversationKey
 from domain.interactions import (
@@ -13,7 +14,13 @@ from domain.interactions import (
     InteractionOutput,
     InteractionSource,
 )
-from domain.turn_events import AgentAudioDelta, AgentStreamCompleted, AgentTextDelta
+from domain.turn_events import (
+    AgentAudioDelta,
+    AgentStreamCompleted,
+    AgentTextDelta,
+    AgentVisualComponent,
+)
+from domain.visuals import Metric, MetricGroupComponent, VisualPresentation
 
 
 class InMemorySubscription:
@@ -307,6 +314,45 @@ async def test_turn_adapter_tags_audio_without_provider_branches() -> None:
     emissions = [emission async for emission in adapter.stream(command)]
 
     assert [emission.modality for emission in emissions] == ["audio", "text", "text"]
+
+
+async def test_turn_adapter_forwards_worker_visual_without_a_model_tool_call() -> None:
+    """Publish a backend-produced visual before the primary agent's textual response."""
+    presentation = VisualPresentation(
+        component_id="worker-summary",
+        fallback_text="Saldo actual 100 €.",
+        component=MetricGroupComponent(
+            kind="metric_group",
+            title="Resumen",
+            metrics=(Metric(label="Saldo", value="100", unit="€"),),
+        ),
+    )
+    adapter = TurnInteractionAgent(
+        AudioEventAgentService(),  # type: ignore[arg-type]
+        AgentDefinition(model="audio-model", instructions="Speak", tool_names=()),
+    )
+    command = InteractionCommand(
+        command_id="a2a-result:job-1",
+        request_id="job-1",
+        conversation=key(),
+        kind="worker_completed",
+        source="worker_agent",
+        message=A2ACompletionMessage(
+            job_id="job-1",
+            thread_id="thread-1",
+            status="completed",
+            answer="Saldo actual 100 €.",
+            visual_components=(presentation,),
+        ).serialize(),
+    )
+
+    emissions = [emission async for emission in adapter.stream(command)]
+
+    assert isinstance(emissions[0].event, AgentVisualComponent)
+    assert emissions[0].event.presentation == presentation
+    terminal = emissions[-1].event
+    assert isinstance(terminal, AgentStreamCompleted)
+    assert terminal.result.visual_components == (presentation,)
 
 
 def coordinator(

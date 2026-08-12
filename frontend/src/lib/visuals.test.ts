@@ -7,20 +7,20 @@ describe('visual presentation protocol', () => {
       schema: 'tesseraflow.visual',
       version: 1,
       component_id: 'weekly-balance',
-      fallback_text: 'El saldo termina en 120 EUR.',
+      fallback_text: 'El saldo termina en 120 €.',
       component: {
         kind: 'chart',
         title: 'Saldo semanal',
         subtitle: null,
         chart_type: 'line',
         x_axis: { label: 'Semana' },
-        y_axis: { label: 'Saldo', unit: 'EUR' },
+        y_axis: { label: 'Saldo', unit: '€' },
         series: [
           {
             name: 'Saldo',
             points: [
-              { x: '2026-07-01', y: 100 },
-              { x: '2026-07-08', y: 120 },
+              { x: '01-07-2026', y: 100 },
+              { x: '08-07-2026', y: 120 },
             ],
           },
         ],
@@ -54,19 +54,19 @@ describe('visual presentation protocol', () => {
       schema: 'tesseraflow.visual',
       version: 1,
       component_id: 'recent-transactions',
-      fallback_text: 'El ahorro actual es de 12.109,16 EUR.',
+      fallback_text: 'El ahorro actual es de 12.109,16 €.',
       component: {
         kind: 'transaction_list',
         title: 'Últimos movimientos',
         subtitle: 'Ingresos y gastos sobre el ahorro base',
-        currency: 'EUR',
+        currency: '€',
         base_savings: 10000,
         current_savings: 12109.16,
         total_income: 2450,
         total_expenses: 340.84,
         transactions: [
           {
-            booked_at: '2026-07-22T20:14:00+02:00',
+            booked_at: '22-07-2026 20:14:00+02:00',
             merchant: 'La Tagliatella',
             category: 'comida',
             transaction_type: 'expense',

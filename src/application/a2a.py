@@ -17,6 +17,7 @@ from domain.a2a import (
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationKey, ConversationMessage
 from domain.interactions import InteractionDeliveryMode
+from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
 
@@ -256,7 +257,11 @@ class A2AWorker:
                 self._worker_id,
                 result.answer,
                 result.response_id,
-                self._completion_message(job, answer=result.answer),
+                self._completion_message(
+                    job,
+                    answer=result.answer,
+                    visual_components=result.visual_components,
+                ),
             )
             logger.info("a2a_job_completed", thread_id=job.thread_id, job_id=job.job_id)
 
@@ -266,6 +271,7 @@ class A2AWorker:
         *,
         answer: str | None = None,
         error_code: str | None = None,
+        visual_components: tuple[VisualPresentation, ...] = (),
     ) -> str:
         """Build the trusted-data envelope that wakes the interactive agent."""
         return A2ACompletionMessage(
@@ -274,6 +280,7 @@ class A2AWorker:
             status="completed" if error_code is None else "failed",
             answer=answer,
             error_code=error_code,
+            visual_components=visual_components,
         ).serialize()
 
     async def _requeue_safely(self, job_id: str) -> None:

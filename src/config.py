@@ -45,19 +45,19 @@ class ModelRateSettings(BaseModel):
 
 
 def default_model_pricing() -> dict[str, ModelRateSettings]:
-    """Return EUR reference rates reviewed on 2026-07-29 for project models."""
+    """Return € reference rates reviewed on 29-07-2026 for project models."""
     return {
         "gpt-5-mini": ModelRateSettings(
             input=Decimal("0.219684"),
             cached_input=Decimal("0.021968"),
             output=Decimal("1.757469"),
-            currency="EUR",
+            currency="€",
         ),
         "gpt-5.4": ModelRateSettings(
             input=Decimal("2.193945"),
             cached_input=Decimal("0.219394"),
             output=Decimal("13.163668"),
-            currency="EUR",
+            currency="€",
             tiers=[
                 ModelRateTierSettings(
                     min_input_tokens=272_001,
@@ -72,7 +72,7 @@ def default_model_pricing() -> dict[str, ModelRateSettings]:
             input_audio=Decimal("2.636204"),
             output=Decimal("3.954306"),
             output_audio=Decimal("10.544815"),
-            currency="EUR",
+            currency="€",
         ),
     }
 

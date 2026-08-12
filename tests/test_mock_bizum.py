@@ -24,7 +24,7 @@ async def test_returns_a_synthetic_receipt_for_mom() -> None:
         "operation_id": str(operation_id),
         "recipient": MOCK_BIZUM_RECIPIENT,
         "amount": "25.50",
-        "currency": "EUR",
+        "currency": "€",
     }
 
 

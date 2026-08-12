@@ -28,7 +28,12 @@ ArgumentsT = TypeVar("ArgumentsT", bound=ToolArguments)
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionOutput:
-    """Tool value returned to the model plus optional public presentations."""
+    """Tool value returned to the model plus optional public presentations.
+
+    Any tool may return this envelope. The executor keeps ``value`` as the
+    provider-facing tool result and routes ``visual_components`` directly to
+    application consumers without requiring a second model tool call.
+    """
 
     value: Any
     visual_components: tuple[VisualPresentation, ...] = ()
@@ -51,12 +56,24 @@ def extend_visual_components(
     current: list[VisualPresentation],
     incoming: tuple[VisualPresentation, ...],
 ) -> None:
-    """Append presentations while enforcing the per-turn public output bound."""
-    if len(current) + len(incoming) > MAX_VISUAL_COMPONENTS_PER_TURN:
+    """Upsert presentations by ID while enforcing the per-turn public output bound."""
+    positions = {presentation.component_id: index for index, presentation in enumerate(current)}
+    additions = {
+        presentation.component_id
+        for presentation in incoming
+        if presentation.component_id not in positions
+    }
+    if len(current) + len(additions) > MAX_VISUAL_COMPONENTS_PER_TURN:
         raise VisualComponentLimitError(
             f"Agent turn cannot exceed {MAX_VISUAL_COMPONENTS_PER_TURN} visual components"
         )
-    current.extend(incoming)
+    for presentation in incoming:
+        position = positions.get(presentation.component_id)
+        if position is None:
+            positions[presentation.component_id] = len(current)
+            current.append(presentation)
+        else:
+            current[position] = presentation
 
 
 class ToolExecutionContext(BaseModel):

@@ -2,6 +2,7 @@ import type {
   ConversationGroupResponse,
   ConversationHistoryResponse,
   ConversationListResponse,
+  DailyTokenUsageReport,
   SessionResponse,
 } from '../types'
 
@@ -110,4 +111,23 @@ export async function listConversationSessions(
   }
 
   return (await response.json()) as ConversationListResponse
+}
+
+/** Load owner-global token consumption grouped into UTC calendar days. */
+export async function loadDailyTokenUsage(
+  baseUrl: string,
+  userId: string,
+  days = 30,
+  signal?: AbortSignal,
+): Promise<DailyTokenUsageReport> {
+  const query = new URLSearchParams({ user_id: userId, days: String(days) })
+  const response = await fetch(httpUrl(`/v1/metrics/tokens/daily?${query}`, baseUrl), {
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`No se pudieron cargar las métricas globales (${response.status}).`)
+  }
+
+  return (await response.json()) as DailyTokenUsageReport
 }

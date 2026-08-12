@@ -1,0 +1,155 @@
+/*
+ * TesseraFlow design tokens
+ * -------------------------
+ * Components consume semantic tokens only. To rebrand the product, adjust the
+ * primitive palette here; component styles should not need to change.
+ */
+:root {
+  color-scheme: light;
+
+  /* Brand primitives */
+  --brand-50: #fbf9fd;
+  --brand-100: #f3eff8;
+  --brand-200: #e5dcf0;
+  --brand-300: #d4c3e3;
+  --brand-400: #bca5cf;
+  --brand-500: #9f82b8;
+  --brand-600: #80649a;
+  --brand-700: #684f7e;
+  --brand-800: #524061;
+  --brand-900: #40334b;
+  --brand-950: #251e2b;
+
+  /* Neutral primitives */
+  --neutral-0: #ffffff;
+  --neutral-50: #fbfafc;
+  --neutral-100: #f5f3f6;
+  --neutral-200: #e8e4e9;
+  --neutral-300: #d4ced6;
+  --neutral-400: #aaa2ad;
+  --neutral-500: #746d77;
+  --neutral-600: #5a545d;
+  --neutral-700: #413c44;
+  --neutral-800: #2d292f;
+  --neutral-900: #1f1c21;
+  --neutral-950: #131115;
+
+  /* Supporting primitives */
+  --red-50: #fff7f7;
+  --red-200: #edcccc;
+  --red-600: #ae5d63;
+  --red-700: #88464c;
+  --amber-50: #fffaf0;
+  --amber-200: #eadbb9;
+  --amber-600: #967239;
+  --blue-50: #f4f8fb;
+  --blue-200: #cadbe8;
+  --blue-600: #5f7f9e;
+  --sage-50: #f4f8f5;
+  --sage-200: #cbdccf;
+  --sage-600: #5c7664;
+
+  /* Semantic color roles */
+  --color-brand: var(--brand-600);
+  --color-brand-hover: var(--brand-700);
+  --color-brand-active: var(--brand-800);
+  --color-brand-subtle: var(--brand-50);
+  --color-brand-muted: var(--brand-100);
+  --color-brand-border: var(--brand-200);
+  --color-brand-contrast: var(--neutral-0);
+
+  --color-canvas: var(--neutral-100);
+  --color-surface: var(--neutral-0);
+  --color-surface-subtle: var(--neutral-50);
+  --color-surface-muted: var(--neutral-100);
+  --color-surface-raised: var(--neutral-0);
+  --color-surface-overlay: rgb(13 21 17 / 58%);
+  --color-surface-glass: rgb(255 255 255 / 94%);
+  --color-surface-glass-strong: rgb(255 255 255 / 97%);
+
+  --color-text: var(--neutral-900);
+  --color-text-secondary: var(--neutral-600);
+  --color-text-tertiary: var(--neutral-500);
+  --color-text-placeholder: var(--neutral-400);
+  --color-text-inverse: var(--neutral-50);
+  --color-text-inverse-muted: var(--neutral-400);
+
+  --color-border-subtle: var(--neutral-100);
+  --color-border: var(--neutral-200);
+  --color-border-strong: var(--neutral-300);
+  --color-focus: var(--brand-500);
+  --color-focus-ring: rgb(128 100 154 / 20%);
+
+  --color-success: var(--sage-600);
+  --color-success-soft: var(--sage-50);
+  --color-success-border: var(--sage-200);
+  --color-warning: var(--amber-600);
+  --color-warning-soft: var(--amber-50);
+  --color-warning-border: var(--amber-200);
+  --color-danger: var(--red-600);
+  --color-danger-strong: var(--red-700);
+  --color-danger-soft: var(--red-50);
+  --color-danger-border: var(--red-200);
+  --color-info: var(--blue-600);
+  --color-info-soft: var(--blue-50);
+  --color-info-border: var(--blue-200);
+
+  /* Navigation has its own inverse semantic layer */
+  --color-nav: #eee8f3;
+  --color-nav-hover: rgb(82 64 97 / 6%);
+  --color-nav-active: rgb(159 130 184 / 20%);
+  --color-nav-border: rgb(82 64 97 / 13%);
+  --color-nav-control: rgb(255 255 255 / 44%);
+  --color-nav-control-border: rgb(128 100 154 / 20%);
+  --color-nav-control-border-hover: rgb(128 100 154 / 32%);
+  --color-nav-surface-subtle: rgb(255 255 255 / 30%);
+  --color-nav-text: #39313f;
+  --color-nav-text-muted: #6f6376;
+  --color-nav-accent: var(--brand-600);
+  --color-on-brand-border: rgb(255 255 255 / 18%);
+
+  /* Data visualization */
+  --chart-1: var(--brand-600);
+  --chart-2: #bd7276;
+  --chart-3: #6f8eae;
+  --chart-4: #789582;
+  --chart-5: #b58e4d;
+  --chart-6: #ad745d;
+
+  /* Typography */
+  --font-sans: "Manrope Variable", Manrope, Aptos, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: Georgia, "Times New Roman", serif;
+  --font-numeric: "Manrope Variable", Manrope, Aptos, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* Shape, elevation and motion */
+  --radius-xs: 6px;
+  --radius-sm: 9px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-pill: 999px;
+  --shadow-xs: 0 1px 2px rgb(31 28 33 / 5%);
+  --shadow-sm: 0 6px 20px rgb(31 28 33 / 7%);
+  --shadow-md: 0 14px 36px rgb(31 28 33 / 10%);
+  --shadow-lg: 0 24px 70px rgb(19 17 21 / 18%);
+  --shadow-brand: 0 8px 20px rgb(31 28 33 / 10%);
+  --shadow-shell: -12px 0 32px rgb(31 28 33 / 8%);
+  --shadow-focus: 0 0 0 3px var(--color-focus-ring);
+  --transition-fast: 140ms ease;
+  --transition-base: 180ms ease;
+
+  /* Compatibility aliases while component CSS is progressively modularized. */
+  --ink: var(--color-text);
+  --muted: var(--color-text-secondary);
+  --subtle: var(--color-text-tertiary);
+  --line: var(--color-border);
+  --panel: var(--color-surface);
+  --canvas: var(--color-canvas);
+  --sidebar: var(--color-nav);
+  --sidebar-hover: var(--color-nav-hover);
+  --accent: var(--color-brand);
+  --accent-dark: var(--color-brand-hover);
+  --accent-soft: var(--color-brand-subtle);
+  --danger: var(--color-danger);
+}

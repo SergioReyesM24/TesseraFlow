@@ -1,6 +1,5 @@
-import { Bot, Check, CircleDollarSign, LoaderCircle, Wrench, X } from 'lucide-react'
+import { Bot, Check, LoaderCircle, Wrench, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
-import { formatModelCost } from '../lib/costs'
 import type { ConversationMessage } from '../types'
 import { VisualPresentation } from './VisualPresentation'
 
@@ -8,6 +7,7 @@ interface MessageListProps {
   messages: ConversationMessage[]
   emptyTitle: string
   emptyDescription: string
+  showVisuals?: boolean
   children?: React.ReactNode
 }
 
@@ -34,28 +34,12 @@ function ToolRow({ message }: { message: ConversationMessage }) {
   )
 }
 
-/** Show the turn-level cost while keeping token and request detail inspectable. */
-function CostRow({ message }: { message: ConversationMessage }) {
-  const metrics = message.metrics
-  if (!metrics) return null
-  const cost = metrics.cost ? formatModelCost(metrics.cost) : 'Tarifa no configurada'
-  return (
-    <div
-      className="cost-row"
-      title={`${metrics.usage.uncached_input_tokens.toLocaleString('es-ES')} entrada no cacheada · ${metrics.usage.cached_input_tokens.toLocaleString('es-ES')} entrada cacheada · ${metrics.usage.output_tokens.toLocaleString('es-ES')} salida · ${metrics.calls.length} llamadas`}
-    >
-      <CircleDollarSign size={14} aria-hidden="true" />
-      <span>{cost}</span>
-      <small>{metrics.usage.total_tokens.toLocaleString('es-ES')} tokens</small>
-    </div>
-  )
-}
-
 /** Present the conversation and keep the newest streamed content in view. */
 export function MessageList({
   messages,
   emptyTitle,
   emptyDescription,
+  showVisuals = true,
   children,
 }: MessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null)
@@ -94,11 +78,11 @@ export function MessageList({
                   <i />
                 </span>
               )}
-              {message.visuals?.map((visual) => (
-                <VisualPresentation key={visual.componentId} presentation={visual} />
-              ))}
+              {showVisuals &&
+                message.visuals?.map((visual) => (
+                  <VisualPresentation key={visual.componentId} presentation={visual} />
+                ))}
               <ToolRow message={message} />
-              {message.role === 'assistant' && <CostRow message={message} />}
               {message.status === 'error' && <small className="message-error">Error</small>}
             </div>
           </article>
