@@ -94,9 +94,6 @@ crudo fuera de la persistencia.
 ### Instalación
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-make install
 cp .env.example .env
 ```
 
@@ -109,21 +106,27 @@ POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/tesseraflow
 REDIS_URL=redis://localhost:6379/0
 ```
 
-Inicia ambos servicios con Docker Compose:
+Para levantar todo con Docker Compose no hace falta cambiar `POSTGRES_URL` ni `REDIS_URL`
+en tu `.env`: el compose los sobreescribe dentro del contenedor del backend para apuntar
+a los servicios `postgres` y `redis`.
 
 ```bash
-docker compose up -d postgres redis
+docker compose up --build
 ```
 
-En otra terminal, activa el entorno y arranca la API:
+El cliente web queda disponible en `http://127.0.0.1:5173`, la API en
+`http://127.0.0.1:8000` y la documentación interactiva en
+[`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs).
+
+Si prefieres ejecutar la API localmente y usar Docker solo para PostgreSQL y Redis:
 
 ```bash
+python -m venv .venv
 source .venv/bin/activate
+make install
+docker compose up -d postgres redis
 make run
 ```
-
-La API queda disponible en `http://127.0.0.1:8000` y la documentación interactiva en
-[`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs).
 
 ### Cliente web React
 
