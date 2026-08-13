@@ -12,6 +12,7 @@ from domain.conversations import (
     ConversationKey,
     ConversationListPage,
     DailyTokenUsage,
+    SessionUsageReport,
 )
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
@@ -196,6 +197,13 @@ class ConversationHistoryRepository(Protocol):
         days: int,
     ) -> tuple[DailyTokenUsage, ...]:
         """Aggregate model usage across every conversation owned by a user."""
+        ...
+
+    async def load_session_token_usage(
+        self,
+        key: ConversationKey,
+    ) -> SessionUsageReport | None:
+        """Aggregate usage for one root conversation and its worker sessions."""
         ...
 
 

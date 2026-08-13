@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -12,6 +13,7 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
+from domain.costs import ModelCost
 from domain.tools import ToolCall, ToolResult
 from infrastructure.postgres_conversations import (
     INSERT_CONVERSATION,
@@ -24,6 +26,7 @@ from infrastructure.postgres_conversations import (
     SELECT_DAILY_TOKEN_USAGE,
     SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
+    SELECT_SESSION_TOKEN_USAGE,
     UPDATE_CONVERSATION,
     InvalidPostgresConversationDataError,
     PostgresConversationRepository,
@@ -52,6 +55,7 @@ class FakePostgresConnection:
         self.items: dict[str, list[dict[str, object]]] = {}
         self.group_rows: dict[str, list[dict[str, object]]] = {}
         self.daily_usage_rows: list[dict[str, object]] = []
+        self.session_usage_rows: dict[str, list[dict[str, object]]] = {}
 
     def transaction(self) -> FakeTransaction:
         """Create a no-op transaction boundary."""
@@ -72,13 +76,14 @@ class FakePostgresConnection:
             return self.group_rows.get(conversation_id, [])
         if query == SELECT_DAILY_TOKEN_USAGE:
             return self.daily_usage_rows
+        if query == SELECT_SESSION_TOKEN_USAGE:
+            return self.session_usage_rows.get(conversation_id, [])
         if query == SELECT_CONVERSATION_SUMMARIES:
             offset, limit = args
             rows = [
                 {"id": item_id, **row}
                 for item_id, row in self.conversations.items()
-                if row["user_id"] == conversation_id
-                and bool(self.items.get(item_id))
+                if row["user_id"] == conversation_id and bool(self.items.get(item_id))
             ]
             rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
             return rows[offset : offset + limit]
@@ -307,6 +312,9 @@ async def test_postgres_maps_global_daily_token_usage() -> None:
             "reasoning_tokens": 50,
             "input_audio_tokens": 100,
             "output_audio_tokens": 20,
+            "cost_amount": "0.0012",
+            "cost_currency": "USD",
+            "fully_priced": True,
             "turn_count": 3,
             "model_call_count": 5,
         }
@@ -319,11 +327,150 @@ async def test_postgres_maps_global_daily_token_usage() -> None:
     assert usage[0].usage.output_tokens == 200
     assert usage[0].usage.cached_input_tokens == 400
     assert usage[0].day == "21-07-2026"
+    assert usage[0].cost is not None
+    assert usage[0].cost.amount == Decimal("0.0012")
+    assert usage[0].cost.currency == "USD"
+    assert usage[0].fully_priced is True
     assert usage[0].turn_count == 3
     assert usage[0].model_call_count == 5
     assert "conversation.user_id = $1" in SELECT_DAILY_TOKEN_USAGE
     assert "jsonb_array_elements" in SELECT_DAILY_TOKEN_USAGE
     assert "model_call.value #>> '{usage,input_tokens}'" in SELECT_DAILY_TOKEN_USAGE
+    assert "model_call.value #>> '{cost,amount}'" in SELECT_DAILY_TOKEN_USAGE
+
+
+async def test_postgres_aggregates_session_usage_without_merging_member_histories() -> None:
+    """Map root, worker, model, turn, and exact cost totals from the SQL projection."""
+    pool = FakePostgresPool()
+    pool.connection.session_usage_rows["root-1"] = [
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=11,
+            model="model-a",
+            input_tokens=100,
+            output_tokens=20,
+            cost_amount="0.001",
+        ),
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=11,
+            model="model-b",
+            input_tokens=50,
+            output_tokens=10,
+            cost_amount="0.002",
+        ),
+        usage_row(
+            conversation_id="worker-1",
+            title="Worker",
+            thread_id="thread-1",
+            item_id=21,
+            model="model-a",
+            input_tokens=200,
+            output_tokens=40,
+            cost_amount="0.003",
+        ),
+    ]
+
+    report = await repository(pool).load_session_token_usage(key(conversation_id="root-1"))
+
+    assert report is not None
+    assert report.usage.total_tokens == 420
+    assert report.turn_count == 2
+    assert report.model_call_count == 3
+    assert report.cost == ModelCost(amount=Decimal("0.006"), currency="USD")
+    assert [item.conversation_id for item in report.conversations] == ["root-1", "worker-1"]
+    assert report.conversations[0].turn_count == 1
+    assert report.conversations[0].model_call_count == 2
+    assert report.conversations[1].role == "worker"
+    assert [(item.model, item.model_call_count) for item in report.models] == [
+        ("model-a", 2),
+        ("model-b", 1),
+    ]
+    assert "member.user_id = requested.user_id" in SELECT_SESSION_TOKEN_USAGE
+
+
+async def test_postgres_marks_session_cost_unknown_when_any_call_is_unpriced() -> None:
+    """Never expose a partial amount as though it were the complete session cost."""
+    pool = FakePostgresPool()
+    pool.connection.session_usage_rows["root-1"] = [
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=11,
+            model="model-a",
+            input_tokens=100,
+            output_tokens=20,
+            cost_amount=None,
+        )
+    ]
+
+    report = await repository(pool).load_session_token_usage(key(conversation_id="root-1"))
+
+    assert report is not None
+    assert report.cost is None
+    assert report.fully_priced is False
+    assert report.models[0].cost is None
+    assert report.models[0].fully_priced is False
+
+
+async def test_postgres_session_usage_enforces_requested_ownership() -> None:
+    """Reject usage reads when the requested conversation belongs to another owner."""
+    pool = FakePostgresPool()
+    pool.connection.session_usage_rows["root-1"] = [
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=None,
+            model=None,
+            input_tokens=0,
+            output_tokens=0,
+            cost_amount=None,
+        )
+    ]
+
+    with pytest.raises(ConversationAccessDeniedError):
+        await repository(pool).load_session_token_usage(
+            key(conversation_id="root-1", user_id="user-2")
+        )
+
+
+def usage_row(
+    *,
+    conversation_id: str,
+    title: str,
+    thread_id: str | None,
+    item_id: int | None,
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cost_amount: str | None,
+) -> dict[str, object]:
+    """Build one stable row from the session-usage SQL projection."""
+    return {
+        "requested_user_id": "user-1",
+        "root_id": "root-1",
+        "conversation_id": conversation_id,
+        "title": title,
+        "thread_id": thread_id,
+        "item_id": item_id,
+        "turn_id": "turn-1" if item_id is not None else None,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": 0,
+        "cached_input_audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_audio_tokens": 0,
+        "output_audio_tokens": 0,
+        "cost_amount": cost_amount,
+        "cost_currency": "USD" if cost_amount is not None else None,
+    }
 
 
 async def test_postgres_groups_multiple_worker_threads_without_merging_histories() -> None:

@@ -12,6 +12,7 @@ from domain.conversations import (
     ConversationListPage,
     ConversationMessage,
     DailyTokenUsage,
+    SessionUsageReport,
 )
 from domain.tools import ToolCall
 
@@ -120,6 +121,13 @@ class ConversationHistoryService:
         if days < 1:
             raise ValueError("days must be positive")
         return await self._histories.load_daily_token_usage(user_id, days=days)
+
+    async def load_session_token_usage(self, key: ConversationKey) -> SessionUsageReport:
+        """Return full root-plus-workers usage or reject an unknown session."""
+        usage = await self._histories.load_session_token_usage(key)
+        if usage is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        return usage
 
 
 class RecentConversationCompactor:

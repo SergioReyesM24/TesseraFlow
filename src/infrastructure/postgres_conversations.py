@@ -2,6 +2,7 @@ import json
 import uuid
 from collections import Counter
 from datetime import datetime
+from decimal import Decimal
 from importlib.resources import files
 from typing import Any, Literal, cast
 
@@ -26,9 +27,12 @@ from domain.conversations import (
     ConversationListPage,
     ConversationMessage,
     ConversationSummary,
+    ConversationUsageBreakdown,
     DailyTokenUsage,
+    ModelUsageBreakdown,
+    SessionUsageReport,
 )
-from domain.costs import ModelUsage
+from domain.costs import ZERO, ModelCost, ModelUsage
 from domain.tools import ToolCall, ToolResult
 from infrastructure.conversation_codec import (
     decode_conversation_item,
@@ -169,7 +173,20 @@ WITH requested_days AS (
                (model_call.value #>> '{usage,output_audio_tokens}')::bigint
            ), 0) AS output_audio_tokens,
            COUNT(DISTINCT item.id) AS turn_count,
-           COUNT(*) AS model_call_count
+           COUNT(*) AS model_call_count,
+           COUNT(*) FILTER (
+               WHERE model_call.value #>> '{cost,amount}' IS NOT NULL
+                 AND model_call.value #>> '{cost,currency}' IS NOT NULL
+           ) AS priced_model_call_count,
+           COUNT(DISTINCT model_call.value #>> '{cost,currency}') FILTER (
+               WHERE model_call.value #>> '{cost,currency}' IS NOT NULL
+           ) AS cost_currency_count,
+           SUM((model_call.value #>> '{cost,amount}')::numeric) FILTER (
+               WHERE model_call.value #>> '{cost,amount}' IS NOT NULL
+           ) AS cost_amount,
+           MIN(model_call.value #>> '{cost,currency}') FILTER (
+               WHERE model_call.value #>> '{cost,currency}' IS NOT NULL
+           ) AS cost_currency
     FROM conversation_items AS item
     JOIN conversations AS conversation ON conversation.id = item.conversation_id
     CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
@@ -190,10 +207,88 @@ SELECT TO_CHAR(day.usage_date, 'DD-MM-YYYY') AS usage_date,
        COALESCE(usage.input_audio_tokens, 0) AS input_audio_tokens,
        COALESCE(usage.output_audio_tokens, 0) AS output_audio_tokens,
        COALESCE(usage.turn_count, 0) AS turn_count,
-       COALESCE(usage.model_call_count, 0) AS model_call_count
+       COALESCE(usage.model_call_count, 0) AS model_call_count,
+       CASE
+           WHEN COALESCE(usage.model_call_count, 0) = 0 THEN TRUE
+           WHEN usage.priced_model_call_count = usage.model_call_count
+            AND usage.cost_currency_count = 1 THEN TRUE
+           ELSE FALSE
+       END AS fully_priced,
+       CASE
+           WHEN usage.priced_model_call_count = usage.model_call_count
+            AND usage.cost_currency_count = 1 THEN usage.cost_amount
+           ELSE NULL
+       END AS cost_amount,
+       CASE
+           WHEN usage.priced_model_call_count = usage.model_call_count
+            AND usage.cost_currency_count = 1 THEN usage.cost_currency
+           ELSE NULL
+       END AS cost_currency
 FROM requested_days AS day
 LEFT JOIN daily_usage AS usage USING (usage_date)
 ORDER BY day.usage_date
+"""
+
+SELECT_SESSION_TOKEN_USAGE = """
+WITH requested AS (
+    SELECT conversation.id, conversation.user_id,
+           COALESCE(relation.parent_conversation_id, conversation.id) AS root_id
+    FROM conversations AS conversation
+    LEFT JOIN a2a_threads AS relation
+        ON relation.worker_conversation_id = conversation.id
+    WHERE conversation.id = $1
+), members AS (
+    SELECT requested.user_id AS requested_user_id,
+           requested.root_id,
+           member.id AS conversation_id,
+           member.title,
+           relation.id AS thread_id
+    FROM requested
+    JOIN conversations AS member
+      ON member.user_id = requested.user_id
+     AND (
+        member.id = requested.root_id
+        OR EXISTS (
+          SELECT 1
+          FROM a2a_threads AS child
+          WHERE child.parent_conversation_id = requested.root_id
+            AND child.worker_conversation_id = member.id
+        )
+     )
+    LEFT JOIN a2a_threads AS relation
+        ON relation.worker_conversation_id = member.id
+)
+SELECT members.requested_user_id,
+       members.root_id,
+       members.conversation_id,
+       members.title,
+       members.thread_id,
+       item.id AS item_id,
+       item.turn_id,
+       model_call.value #>> '{model}' AS model,
+       COALESCE((model_call.value #>> '{usage,input_tokens}')::bigint, 0) AS input_tokens,
+       COALESCE((model_call.value #>> '{usage,output_tokens}')::bigint, 0) AS output_tokens,
+       COALESCE((model_call.value #>> '{usage,cached_input_tokens}')::bigint, 0)
+           AS cached_input_tokens,
+       COALESCE((model_call.value #>> '{usage,cached_input_audio_tokens}')::bigint, 0)
+           AS cached_input_audio_tokens,
+       COALESCE((model_call.value #>> '{usage,reasoning_tokens}')::bigint, 0)
+           AS reasoning_tokens,
+       COALESCE((model_call.value #>> '{usage,input_audio_tokens}')::bigint, 0)
+           AS input_audio_tokens,
+       COALESCE((model_call.value #>> '{usage,output_audio_tokens}')::bigint, 0)
+           AS output_audio_tokens,
+       model_call.value #>> '{cost,amount}' AS cost_amount,
+       model_call.value #>> '{cost,currency}' AS cost_currency
+FROM members
+LEFT JOIN conversation_items AS item
+  ON item.conversation_id = members.conversation_id
+ AND item.item_type = 'message'
+ AND item.role = 'assistant'
+LEFT JOIN LATERAL jsonb_array_elements(COALESCE(
+    item.payload #> '{metrics,calls}', '[]'::jsonb
+)) AS model_call(value) ON true
+ORDER BY members.thread_id NULLS FIRST, members.conversation_id, item.sequence
 """
 
 INSERT_CONVERSATION = """
@@ -223,6 +318,60 @@ WHERE id = $1
 
 class InvalidPostgresConversationDataError(RuntimeError):
     """Raised when canonical rows cannot be translated to domain history."""
+
+
+class _UsageAccumulator:
+    """Mutable SQL projection accumulator kept private to this adapter."""
+
+    def __init__(self) -> None:
+        self.title: str | None = None
+        self.thread_id: str | None = None
+        self.usage = ModelUsage()
+        self.cost_amount = ZERO
+        self.currency: str | None = None
+        self.fully_priced = True
+        self.turn_ids: set[int] = set()
+        self.model_call_count = 0
+        self.models: dict[str, _UsageAccumulator] = {}
+
+    @property
+    def turn_count(self) -> int:
+        """Count assistant message rows that contributed at least one model call."""
+        return len(self.turn_ids)
+
+    @property
+    def cost(self) -> ModelCost | None:
+        """Return a total only when every contributing call is priced in one currency."""
+        if self.model_call_count == 0 or not self.fully_priced or self.currency is None:
+            return None
+        return ModelCost(amount=self.cost_amount, currency=self.currency)
+
+    def add_call(
+        self,
+        *,
+        model: str,
+        usage: ModelUsage,
+        cost: ModelCost | None,
+        item_id: int,
+    ) -> None:
+        """Add one provider request to this accounting scope."""
+        if not model.strip():
+            raise ValueError("model cannot be empty")
+        self.usage += usage
+        self.turn_ids.add(item_id)
+        self.model_call_count += 1
+        self._add_cost(cost)
+
+    def _add_cost(self, cost: ModelCost | None) -> None:
+        """Track whether the aggregate can expose a precise monetary total."""
+        if cost is None:
+            self.fully_priced = False
+            return
+        if self.currency is not None and self.currency != cost.currency:
+            self.fully_priced = False
+            return
+        self.currency = cost.currency
+        self.cost_amount += cost.amount
 
 
 class PostgresConversationRepository(ConversationRepository):
@@ -456,14 +605,116 @@ class PostgresConversationRepository(ConversationRepository):
                         input_audio_tokens=int(row["input_audio_tokens"]),
                         output_audio_tokens=int(row["output_audio_tokens"]),
                     ),
+                    cost=(
+                        ModelCost(
+                            amount=Decimal(str(row["cost_amount"])),
+                            currency=str(row["cost_currency"]),
+                        )
+                        if row["cost_amount"] is not None and row["cost_currency"] is not None
+                        else None
+                    ),
                     turn_count=int(row["turn_count"]),
                     model_call_count=int(row["model_call_count"]),
+                    fully_priced=bool(row["fully_priced"]),
                 )
                 for row in rows
             )
         except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidPostgresConversationDataError("Daily token usage data is invalid") from exc
+
+    async def load_session_token_usage(
+        self,
+        key: ConversationKey,
+    ) -> SessionUsageReport | None:
+        """Aggregate usage for one root conversation and every related worker."""
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(SELECT_SESSION_TOKEN_USAGE, key.conversation_id)
+        if not rows:
+            return None
+        try:
+            requested_user_id = str(rows[0]["requested_user_id"])
+            if requested_user_id != key.user_id:
+                raise ConversationAccessDeniedError("Conversation ownership does not match")
+            root_id = str(rows[0]["root_id"])
+            members: dict[str, _UsageAccumulator] = {}
+            session = _UsageAccumulator()
+            models: dict[str, _UsageAccumulator] = {}
+            for row in rows:
+                if str(row["requested_user_id"]) != requested_user_id:
+                    raise ValueError("session usage has inconsistent ownership")
+                conversation_id = str(row["conversation_id"])
+                raw_title = row["title"]
+                if not isinstance(raw_title, str):
+                    raise ValueError("session usage title is invalid")
+                title = raw_title
+                thread_id = str(row["thread_id"]) if row["thread_id"] is not None else None
+                member = members.setdefault(conversation_id, _UsageAccumulator())
+                member.title = title
+                member.thread_id = thread_id
+                raw_model = row["model"]
+                if raw_model is None:
+                    continue
+                if not isinstance(raw_model, str):
+                    raise ValueError("session usage model is invalid")
+                model = raw_model
+                usage = ModelUsage(
+                    input_tokens=int(row["input_tokens"]),
+                    output_tokens=int(row["output_tokens"]),
+                    cached_input_tokens=int(row["cached_input_tokens"]),
+                    cached_input_audio_tokens=int(row["cached_input_audio_tokens"]),
+                    reasoning_tokens=int(row["reasoning_tokens"]),
+                    input_audio_tokens=int(row["input_audio_tokens"]),
+                    output_audio_tokens=int(row["output_audio_tokens"]),
+                )
+                cost = self._cost_from_row(row)
+                item_id = int(row["item_id"])
+                member.add_call(model=model, usage=usage, cost=cost, item_id=item_id)
+                member.models.setdefault(model, _UsageAccumulator()).add_call(
+                    model=model,
+                    usage=usage,
+                    cost=cost,
+                    item_id=item_id,
+                )
+                session.add_call(model=model, usage=usage, cost=cost, item_id=item_id)
+                models.setdefault(model, _UsageAccumulator()).add_call(
+                    model=model,
+                    usage=usage,
+                    cost=cost,
+                    item_id=item_id,
+                )
+            conversations = tuple(
+                ConversationUsageBreakdown(
+                    conversation_id=conversation_id,
+                    title=member.title or "",
+                    role="interactive" if member.thread_id is None else "worker",
+                    thread_id=member.thread_id,
+                    usage=member.usage,
+                    cost=member.cost,
+                    turn_count=member.turn_count,
+                    model_call_count=member.model_call_count,
+                    fully_priced=member.fully_priced,
+                    models=self._model_breakdowns(member.models),
+                )
+                for conversation_id, member in members.items()
+            )
+            return SessionUsageReport(
+                root_conversation=ConversationKey(
+                    conversation_id=root_id,
+                    user_id=requested_user_id,
+                ),
+                usage=session.usage,
+                cost=session.cost,
+                turn_count=session.turn_count,
+                model_call_count=session.model_call_count,
+                fully_priced=session.fully_priced,
+                models=self._model_breakdowns(models),
+                conversations=conversations,
+            )
+        except ConversationAccessDeniedError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
             raise InvalidPostgresConversationDataError(
-                "Daily token usage data is invalid"
+                "Session token usage data is invalid"
             ) from exc
 
     async def save_turn(
@@ -544,6 +795,38 @@ class PostgresConversationRepository(ConversationRepository):
             self._validate_owner(key, row)
             await connection.execute("DELETE FROM conversations WHERE id = $1", key.conversation_id)
         return True
+
+    @staticmethod
+    def _cost_from_row(row: Any) -> ModelCost | None:
+        """Decode one optional model-call cost from JSONB scalar columns."""
+        amount = row["cost_amount"]
+        currency = row["cost_currency"]
+        if amount is None or currency is None:
+            return None
+        return ModelCost(amount=Decimal(str(amount)), currency=str(currency))
+
+    @staticmethod
+    def _model_breakdowns(
+        models: dict[str, _UsageAccumulator],
+    ) -> tuple[ModelUsageBreakdown, ...]:
+        """Return deterministic model totals ordered by cost and token volume."""
+        return tuple(
+            ModelUsageBreakdown(
+                model=model,
+                usage=accumulator.usage,
+                cost=accumulator.cost,
+                model_call_count=accumulator.model_call_count,
+                fully_priced=accumulator.fully_priced,
+            )
+            for model, accumulator in sorted(
+                models.items(),
+                key=lambda item: (
+                    -(item[1].cost.amount if item[1].cost is not None else ZERO),
+                    -item[1].usage.total_tokens,
+                    item[0],
+                ),
+            )
+        )
 
     @staticmethod
     def _validate_owner(key: ConversationKey, row: asyncpg.Record) -> None:

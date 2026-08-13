@@ -11,7 +11,10 @@ from domain.conversations import (
     ConversationHistoryPage,
     ConversationListPage,
     ConversationMessage,
+    ConversationUsageBreakdown,
     DailyTokenUsage,
+    ModelUsageBreakdown,
+    SessionUsageReport,
 )
 from domain.costs import ModelUsage, TurnMetrics
 from domain.tools import ToolCall, ToolResult
@@ -166,16 +169,24 @@ class DailyTokenUsageResponse(BaseModel):
 
     date: str
     usage: ModelUsageResponse
+    cost: ModelCostResponse | None
     turn_count: int
     model_call_count: int
+    fully_priced: bool
 
     @classmethod
     def from_domain(cls, value: DailyTokenUsage) -> "DailyTokenUsageResponse":
         return cls(
             date=value.day,
             usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
             turn_count=value.turn_count,
             model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
         )
 
 
@@ -185,6 +196,102 @@ class DailyTokenUsageReportResponse(BaseModel):
     user_id: str
     timezone: Literal["UTC"] = "UTC"
     days: list[DailyTokenUsageResponse]
+
+
+class ModelUsageBreakdownResponse(BaseModel):
+    """Aggregated token and cost totals for one model."""
+
+    model: str
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    model_call_count: int
+    fully_priced: bool
+
+    @classmethod
+    def from_domain(cls, value: ModelUsageBreakdown) -> "ModelUsageBreakdownResponse":
+        return cls(
+            model=value.model,
+            usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
+            model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
+        )
+
+
+class ConversationUsageBreakdownResponse(BaseModel):
+    """Aggregated token and cost totals for one root or worker conversation."""
+
+    conversation_id: UUID
+    title: str
+    role: Literal["interactive", "worker"]
+    thread_id: UUID | None
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    turn_count: int
+    model_call_count: int
+    fully_priced: bool
+    models: list[ModelUsageBreakdownResponse]
+
+    @classmethod
+    def from_domain(
+        cls,
+        value: ConversationUsageBreakdown,
+    ) -> "ConversationUsageBreakdownResponse":
+        return cls(
+            conversation_id=UUID(value.conversation_id),
+            title=value.title,
+            role=value.role,
+            thread_id=UUID(value.thread_id) if value.thread_id is not None else None,
+            usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
+            turn_count=value.turn_count,
+            model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
+            models=[ModelUsageBreakdownResponse.from_domain(model) for model in value.models],
+        )
+
+
+class SessionUsageReportResponse(BaseModel):
+    """Full cost report for a root session plus delegated worker conversations."""
+
+    user_id: str
+    root_conversation_id: UUID
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    turn_count: int
+    model_call_count: int
+    fully_priced: bool
+    models: list[ModelUsageBreakdownResponse]
+    conversations: list[ConversationUsageBreakdownResponse]
+
+    @classmethod
+    def from_domain(cls, value: SessionUsageReport) -> "SessionUsageReportResponse":
+        return cls(
+            user_id=value.root_conversation.user_id,
+            root_conversation_id=UUID(value.root_conversation.conversation_id),
+            usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
+            turn_count=value.turn_count,
+            model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
+            models=[ModelUsageBreakdownResponse.from_domain(model) for model in value.models],
+            conversations=[
+                ConversationUsageBreakdownResponse.from_domain(conversation)
+                for conversation in value.conversations
+            ],
+        )
 
 
 class ModelCallMetricsResponse(BaseModel):
@@ -266,9 +373,7 @@ class AgentCompletedResponse(BaseModel):
                 visual_presentation_payload(component) for component in result.visual_components
             ],
             metrics=(
-                TurnMetricsResponse.from_domain(result.metrics)
-                if result.metrics.calls
-                else None
+                TurnMetricsResponse.from_domain(result.metrics) if result.metrics.calls else None
             ),
         )
 
