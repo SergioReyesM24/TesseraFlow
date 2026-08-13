@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatModelCost, parseTurnMetrics } from './costs'
+import { formatCurrencyUnit, formatModelCost, parseTurnMetrics } from './costs'
 
 describe('turn cost metrics', () => {
   it('parses the provider-neutral completed-event payload', () => {
@@ -45,6 +45,9 @@ describe('turn cost metrics', () => {
   })
 
   it('formats configured euro costs with the euro symbol', () => {
+    expect(formatModelCost({ amount: 1.236, currency: 'EUR' })).toBe('1,24 €')
     expect(formatModelCost({ amount: 0.0012, currency: '€' })).toBe('0,0012 €')
+    expect(formatModelCost({ amount: 0.0000001, currency: 'EUR' })).toBe('< 0,000001 €')
+    expect(formatCurrencyUnit('eur')).toBe('€')
   })
 })

@@ -51,6 +51,10 @@ def test_visual_events_round_trip_through_the_durable_json_codec() -> None:
                     ),
                 ),
                 y_unit="€",
+                x_min="01-07-2026",
+                x_max="08-07-2026",
+                y_min=0.0,
+                y_max=150.0,
             ),
         )
     )
@@ -60,6 +64,10 @@ def test_visual_events_round_trip_through_the_durable_json_codec() -> None:
     assert event_type == "visual_component"
     assert payload["schema"] == "tesseraflow.visual"
     assert payload["version"] == 1
+    assert payload["component"]["x_axis"]["min"] == "01-07-2026"
+    assert payload["component"]["x_axis"]["max"] == "08-07-2026"
+    assert payload["component"]["y_axis"]["min"] == 0.0
+    assert payload["component"]["y_axis"]["max"] == 150.0
     assert decode_agent_event(event_type, payload) == event
 
 

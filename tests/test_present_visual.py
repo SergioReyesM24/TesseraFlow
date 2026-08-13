@@ -56,6 +56,10 @@ async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> No
                         "x_label": "Semana",
                         "y_label": "Saldo",
                         "y_unit": "€",
+                        "x_min": "12-07-2026",
+                        "x_max": "19-07-2026",
+                        "y_min": 12000.0,
+                        "y_max": 14000.0,
                         "series": [
                             {
                                 "name": "Saldo al cierre",
@@ -82,7 +86,53 @@ async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> No
     presentation = batch.visual_components[0]
     assert presentation.component_id == "weekly-balance"
     assert isinstance(presentation.component, ChartComponent)
+    assert presentation.component.x_min == "12-07-2026"
+    assert presentation.component.x_max == "19-07-2026"
+    assert presentation.component.y_min == 12000.0
+    assert presentation.component.y_max == 14000.0
     assert presentation.component.series[0].points[-1].y == 13275.65
+
+
+async def test_present_visual_defaults_omitted_chart_axis_bounds() -> None:
+    """Keep older or manual tool callers compatible when axis bounds are absent."""
+    executor = ToolExecutor()
+
+    batch = await executor.execute(
+        (
+            ToolCall(
+                call_id="visual-default-bounds",
+                tool_name="present_visual",
+                arguments={
+                    "component_id": "weekly-balance",
+                    "fallback_text": "El saldo termina la serie en 120 €.",
+                    "component": {
+                        "kind": "chart",
+                        "title": "Saldo semanal",
+                        "subtitle": None,
+                        "chart_type": "line",
+                        "x_label": "Semana",
+                        "y_label": "Saldo",
+                        "y_unit": "€",
+                        "series": [
+                            {
+                                "name": "Saldo",
+                                "points": [{"x": "08-07-2026", "y": 120.0}],
+                            }
+                        ],
+                    },
+                },
+            ),
+        ),
+        ToolRegistry([PresentVisualTool()]),
+        execution_context(),
+    )
+
+    component = batch.visual_components[0].component
+    assert isinstance(component, ChartComponent)
+    assert component.x_min is None
+    assert component.x_max is None
+    assert component.y_min is None
+    assert component.y_max is None
 
 
 async def test_present_visual_rejects_oversized_or_non_finite_charts() -> None:
@@ -105,6 +155,10 @@ async def test_present_visual_rejects_oversized_or_non_finite_charts() -> None:
                         "x_label": None,
                         "y_label": None,
                         "y_unit": None,
+                        "x_min": None,
+                        "x_max": None,
+                        "y_min": None,
+                        "y_max": None,
                         "series": [{"name": "Serie", "points": [{"x": "A", "y": float("inf")}]}],
                     },
                 },

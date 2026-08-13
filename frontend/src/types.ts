@@ -51,14 +51,49 @@ export interface TurnMetrics {
 export interface DailyTokenUsage {
   date: string
   usage: ModelUsage
+  cost: ModelCost | null
   turn_count: number
   model_call_count: number
+  fully_priced: boolean
 }
 
 export interface DailyTokenUsageReport {
   user_id: string
   timezone: 'UTC'
   days: DailyTokenUsage[]
+}
+
+export interface ModelUsageBreakdown {
+  model: string
+  usage: ModelUsage
+  cost: ModelCost | null
+  model_call_count: number
+  fully_priced: boolean
+}
+
+export interface ConversationUsageBreakdown {
+  conversation_id: string
+  title: string
+  role: 'interactive' | 'worker'
+  thread_id: string | null
+  usage: ModelUsage
+  cost: ModelCost | null
+  turn_count: number
+  model_call_count: number
+  fully_priced: boolean
+  models: ModelUsageBreakdown[]
+}
+
+export interface SessionUsageReport {
+  user_id: string
+  root_conversation_id: string
+  usage: ModelUsage
+  cost: ModelCost | null
+  turn_count: number
+  model_call_count: number
+  fully_priced: boolean
+  models: ModelUsageBreakdown[]
+  conversations: ConversationUsageBreakdown[]
 }
 
 export interface ChartPoint {
@@ -71,13 +106,26 @@ export interface ChartSeries {
   points: ChartPoint[]
 }
 
+export interface ChartXAxis {
+  label: string | null
+  min?: string | null
+  max?: string | null
+}
+
+export interface ChartYAxis {
+  label: string | null
+  unit: string | null
+  min?: number | null
+  max?: number | null
+}
+
 export interface ChartVisualComponent {
   kind: 'chart'
   title: string
   subtitle: string | null
   chart_type: 'line' | 'bar'
-  x_axis: { label: string | null }
-  y_axis: { label: string | null; unit: string | null }
+  x_axis: ChartXAxis
+  y_axis: ChartYAxis
   series: ChartSeries[]
 }
 

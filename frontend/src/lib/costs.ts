@@ -43,11 +43,23 @@ export function parseTurnMetrics(value: unknown): TurnMetrics | undefined {
   return { usage, cost: parseCost(value.cost), calls }
 }
 
-/** Format tiny per-turn amounts without rounding them down to a misleading zero. */
+/** Normalize configured currency codes for compact UI labels. */
+export function formatCurrencyUnit(currency: string | null | undefined): string | null {
+  if (!currency) return null
+  const normalized = currency.trim()
+  return normalized.toUpperCase() === 'EUR' || normalized === '€' ? '€' : normalized
+}
+
+/** Format model costs without rounding small, non-zero amounts down to a misleading zero. */
 export function formatModelCost(cost: ModelCost): string {
-  if (cost.amount > 0 && cost.amount < 0.000001) return `< 0,000001 ${cost.currency}`
+  const currency = formatCurrencyUnit(cost.currency) ?? cost.currency
+  const absoluteAmount = Math.abs(cost.amount)
+  if (absoluteAmount > 0 && absoluteAmount < 0.000001) {
+    return `< 0,000001 ${currency}`
+  }
+  const maximumFractionDigits = absoluteAmount > 0 && absoluteAmount < 0.01 ? 6 : 2
   return `${new Intl.NumberFormat('es-ES', {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 6,
-  }).format(cost.amount)} ${cost.currency}`
+    maximumFractionDigits,
+  }).format(cost.amount)} ${currency}`
 }

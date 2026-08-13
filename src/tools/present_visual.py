@@ -1,6 +1,6 @@
 """Validated presentation tool for the deliberately small visual v1 catalog."""
 
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -55,7 +55,40 @@ class ChartArguments(VisualArguments):
     x_label: str | None = Field(min_length=1, max_length=80)
     y_label: str | None = Field(min_length=1, max_length=80)
     y_unit: str | None = Field(min_length=1, max_length=24)
+    x_min: str | None = Field(
+        min_length=1,
+        max_length=120,
+        description=(
+            "Optional lower X-axis bound. Use an exact x label, date, or numeric string "
+            "from the data when the chart should start later than the first point."
+        ),
+    )
+    x_max: str | None = Field(
+        min_length=1,
+        max_length=120,
+        description=(
+            "Optional upper X-axis bound. Use an exact x label, date, or numeric string "
+            "from the data when the chart should end before the last point."
+        ),
+    )
+    y_min: float | None = Field(
+        description="Optional lower Y-axis bound. Leave null to use the default scale."
+    )
+    y_max: float | None = Field(
+        description="Optional upper Y-axis bound. Leave null to use the default scale."
+    )
     series: list[ChartSeriesArguments] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_axis_bounds(cls, data: Any) -> Any:
+        """Accept older callers while keeping every tool-schema property explicitly required."""
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        for key in ("x_min", "x_max", "y_min", "y_max"):
+            values.setdefault(key, None)
+        return values
 
     @model_validator(mode="after")
     def validate_chart(self) -> "ChartArguments":
@@ -64,6 +97,8 @@ class ChartArguments(VisualArguments):
             raise ValueError(f"chart cannot exceed {MAX_CHART_POINTS} total points")
         if len({item.name for item in self.series}) != len(self.series):
             raise ValueError("chart series names must be unique")
+        if self.y_min is not None and self.y_max is not None and self.y_min >= self.y_max:
+            raise ValueError("chart y minimum must be lower than chart y maximum")
         return self
 
 
@@ -175,6 +210,10 @@ class PresentVisualTool(AgentTool[PresentVisualArguments]):
                 x_label=raw_component.x_label,
                 y_label=raw_component.y_label,
                 y_unit=raw_component.y_unit,
+                x_min=raw_component.x_min,
+                x_max=raw_component.x_max,
+                y_min=raw_component.y_min,
+                y_max=raw_component.y_max,
                 series=tuple(
                     ChartSeries(
                         name=series.name,

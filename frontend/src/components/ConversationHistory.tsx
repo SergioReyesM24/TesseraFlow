@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   Bot,
   ChevronDown,
   Database,
@@ -10,9 +11,10 @@ import {
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import {
   listConversationSessions,
-  loadDailyTokenUsage,
   loadConversationGroup,
   loadConversationHistory,
+  loadDailyTokenUsage,
+  loadSessionTokenUsage,
 } from '../lib/api'
 import type {
   ConversationGroupResponse,
@@ -20,19 +22,20 @@ import type {
   ConversationHistoryResponse,
   ConversationListResponse,
   DailyTokenUsageReport,
-  VisualPresentation as VisualPresentationData,
+  SessionUsageReport,
 } from '../types'
-import { formatModelCost } from '../lib/costs'
 import { formatTimestamp } from '../lib/dates'
 import { DailyTokenAnalytics } from './DailyTokenAnalytics'
+import { SessionCostAnalytics } from './SessionCostAnalytics'
 import { TokenUsage } from './TokenUsage'
-import { VisualPresentation } from './VisualPresentation'
 
 interface ConversationHistoryProps {
   apiBaseUrl: string
   userId: string
   activeSessionUid: string
 }
+
+type HistoryMode = 'overview' | 'session'
 
 /** Render arbitrary JSON tool inputs and outputs without losing nested structure. */
 function JsonBlock({ value }: { value: unknown }) {
@@ -161,8 +164,8 @@ export function HistoryRecord({ record, toolResult }: HistoryRecordProps) {
   )
 }
 
-/** Pair tool responses with their call so both details share one disclosure. */
-function TurnRecords({ records }: { records: ConversationHistoryItem[] }) {
+/** Pair tool results with their call so one disclosure contains the complete exchange. */
+export function TurnRecords({ records }: { records: ConversationHistoryItem[] }) {
   const toolResults = new Map<string, ConversationHistoryItem>()
   const toolCallIds = new Set<string>()
   for (const record of records) {
@@ -184,31 +187,35 @@ function TurnRecords({ records }: { records: ConversationHistoryItem[] }) {
   })
 }
 
-/** Inspect canonical PostgreSQL history by session identifier. */
+/** Show the token overview first and switch to a focused session KPI view on demand. */
 export function ConversationHistory({
   apiBaseUrl,
   userId,
   activeSessionUid,
 }: ConversationHistoryProps) {
+  const [mode, setMode] = useState<HistoryMode>('overview')
   const [draftSessionUid, setDraftSessionUid] = useState(activeSessionUid)
-  const [targetSessionUid, setTargetSessionUid] = useState(activeSessionUid)
-  const [selectedConversationUid, setSelectedConversationUid] = useState(activeSessionUid)
+  const [targetSessionUid, setTargetSessionUid] = useState<string | null>(null)
+  const [selectedConversationUid, setSelectedConversationUid] = useState<string | null>(null)
   const [reloadCount, setReloadCount] = useState(0)
-  const [group, setGroup] = useState<ConversationGroupResponse | null>(null)
-  const [groupLoading, setGroupLoading] = useState(true)
-  const [groupError, setGroupError] = useState<string | null>(null)
-  const [history, setHistory] = useState<ConversationHistoryResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [sessionList, setSessionList] = useState<ConversationListResponse | null>(null)
   const [listLoading, setListLoading] = useState(true)
   const [listLoadingMore, setListLoadingMore] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
-  const [dailyRange, setDailyRange] = useState(30)
+  const [dailyRange, setDailyRange] = useState(7)
   const [dailyUsage, setDailyUsage] = useState<DailyTokenUsageReport | null>(null)
   const [dailyUsageLoading, setDailyUsageLoading] = useState(true)
   const [dailyUsageError, setDailyUsageError] = useState<string | null>(null)
+  const [sessionUsage, setSessionUsage] = useState<SessionUsageReport | null>(null)
+  const [sessionUsageLoading, setSessionUsageLoading] = useState(false)
+  const [sessionUsageError, setSessionUsageError] = useState<string | null>(null)
+  const [group, setGroup] = useState<ConversationGroupResponse | null>(null)
+  const [groupLoading, setGroupLoading] = useState(false)
+  const [groupError, setGroupError] = useState<string | null>(null)
+  const [history, setHistory] = useState<ConversationHistoryResponse | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
+  const [historyError, setHistoryError] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -228,13 +235,6 @@ export function ConversationHistory({
     return () => controller.abort()
   }, [apiBaseUrl, dailyRange, userId])
 
-  /** Keep the previous report visible while the selected global window refreshes. */
-  const selectDailyRange = (days: number) => {
-    setDailyUsageLoading(true)
-    setDailyUsageError(null)
-    setDailyRange(days)
-  }
-
   useEffect(() => {
     const controller = new AbortController()
     void listConversationSessions(apiBaseUrl, userId, 0, 50, controller.signal)
@@ -252,13 +252,33 @@ export function ConversationHistory({
   }, [apiBaseUrl, userId])
 
   useEffect(() => {
+    if (mode !== 'session' || !targetSessionUid) {
+      return
+    }
+
     const controller = new AbortController()
-    void loadConversationGroup(
-      apiBaseUrl,
-      userId,
-      targetSessionUid,
-      controller.signal,
-    )
+    void loadSessionTokenUsage(apiBaseUrl, userId, targetSessionUid, controller.signal)
+      .then(setSessionUsage)
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return
+        setSessionUsage(null)
+        setSessionUsageError(
+          reason instanceof Error
+            ? reason.message
+            : 'No se pudieron cargar los costes de la sesión.',
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSessionUsageLoading(false)
+      })
+    return () => controller.abort()
+  }, [apiBaseUrl, mode, reloadCount, targetSessionUid, userId])
+
+  useEffect(() => {
+    if (mode !== 'session' || !targetSessionUid) return
+
+    const controller = new AbortController()
+    void loadConversationGroup(apiBaseUrl, userId, targetSessionUid, controller.signal)
       .then((nextGroup) => {
         setGroup(nextGroup)
         const requestedMember = nextGroup.conversations.find(
@@ -281,9 +301,11 @@ export function ConversationHistory({
         if (!controller.signal.aborted) setGroupLoading(false)
       })
     return () => controller.abort()
-  }, [apiBaseUrl, reloadCount, targetSessionUid, userId])
+  }, [apiBaseUrl, mode, reloadCount, targetSessionUid, userId])
 
   useEffect(() => {
+    if (mode !== 'session' || !selectedConversationUid) return
+
     const controller = new AbortController()
     void loadConversationHistory(
       apiBaseUrl,
@@ -297,155 +319,80 @@ export function ConversationHistory({
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return
         setHistory(null)
-        setError(reason instanceof Error ? reason.message : 'No se pudo cargar el historial.')
+        setHistoryError(
+          reason instanceof Error ? reason.message : 'No se pudo cargar el historial.',
+        )
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
+        if (!controller.signal.aborted) setHistoryLoading(false)
       })
     return () => controller.abort()
-  }, [apiBaseUrl, reloadCount, selectedConversationUid, userId])
+  }, [apiBaseUrl, mode, reloadCount, selectedConversationUid, userId])
 
   const turns = useMemo(() => {
     const grouped = new Map<string, ConversationHistoryItem[]>()
     for (const item of history?.items ?? []) {
-      const values = grouped.get(item.turn_id) ?? []
-      values.push(item)
-      grouped.set(item.turn_id, values)
+      const records = grouped.get(item.turn_id) ?? []
+      records.push(item)
+      grouped.set(item.turn_id, records)
     }
     return [...grouped.entries()]
   }, [history])
 
-  const loadedAccounting = useMemo(() => {
-    let tokens = 0
-    let inputTokens = 0
-    let outputTokens = 0
-    let cachedInputTokens = 0
-    let calls = 0
-    let amount = 0
-    let currency: string | null = null
-    let fullyPriced = true
-    let metricTurns = 0
-    for (const item of history?.items ?? []) {
-      const metrics = item.payload.type === 'message' ? item.payload.metrics : null
-      if (!metrics) continue
-      metricTurns += 1
-      tokens += metrics.usage.total_tokens
-      inputTokens += metrics.usage.input_tokens
-      outputTokens += metrics.usage.output_tokens
-      cachedInputTokens += metrics.usage.cached_input_tokens
-      calls += metrics.calls.length
-      if (!metrics.cost) {
-        fullyPriced = false
-        continue
-      }
-      if (currency !== null && currency !== metrics.cost.currency) fullyPriced = false
-      currency ??= metrics.cost.currency
-      amount += metrics.cost.amount
-    }
-    return {
-      tokens,
-      inputTokens,
-      outputTokens,
-      cachedInputTokens,
-      calls,
-      cacheRatio: inputTokens ? Math.round((cachedInputTokens / inputTokens) * 100) : 0,
-      cost:
-        metricTurns > 0 && fullyPriced && currency ? { amount, currency } : null,
-    }
-  }, [history])
+  const selectDailyRange = (days: number) => {
+    setDailyUsageLoading(true)
+    setDailyUsageError(null)
+    setDailyRange(days)
+  }
 
-  const tokenChart = useMemo<VisualPresentationData | null>(() => {
-    const measuredTurns = turns.flatMap(([turnId, records], turnIndex) => {
-      const usages = records.flatMap((record) => {
-        const payload = record.payload
-        return payload.type === 'message' && payload.metrics ? [payload.metrics.usage] : []
-      })
-      if (usages.length === 0) return []
-      return [
-        {
-          turnId,
-          label: `Turno ${turnIndex + 1}`,
-          input: usages.reduce((total, usage) => total + usage.input_tokens, 0),
-          output: usages.reduce((total, usage) => total + usage.output_tokens, 0),
-          cached: usages.reduce((total, usage) => total + usage.cached_input_tokens, 0),
-        },
-      ]
-    })
-    if (measuredTurns.length === 0) return null
-
-    return {
-      componentId: `technical-token-usage-${selectedConversationUid}`,
-      fallbackText: measuredTurns
-        .map(
-          (turn) =>
-            `${turn.label}: ${turn.input} entrada, ${turn.output} salida, ${turn.cached} en caché`,
-        )
-        .join('. '),
-      component: {
-        kind: 'chart',
-        title: 'Consumo de tokens por turno',
-        subtitle: `${measuredTurns.length} ${measuredTurns.length === 1 ? 'turno medido' : 'turnos medidos'} en la página cargada`,
-        chart_type: 'bar',
-        x_axis: { label: 'Turnos técnicos cargados' },
-        y_axis: { label: 'Tokens', unit: null },
-        series: [
-          {
-            name: 'Entrada total',
-            points: measuredTurns.map((turn) => ({ x: turn.label, y: turn.input })),
-          },
-          {
-            name: 'Salida',
-            points: measuredTurns.map((turn) => ({ x: turn.label, y: turn.output })),
-          },
-          {
-            name: 'Entrada en caché',
-            points: measuredTurns.map((turn) => ({ x: turn.label, y: turn.cached })),
-          },
-        ],
-      },
-    }
-  }, [selectedConversationUid, turns])
-
-  /** Inspect the requested UUID or refresh when it is already selected. */
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const next = draftSessionUid.trim()
     if (!next) return
-    setLoading(true)
-    setError(null)
-    setGroupError(null)
-    setGroupLoading(true)
-    setHistory(null)
-    setGroup(null)
-    setSelectedConversationUid(next)
-    if (next === targetSessionUid) setReloadCount((value) => value + 1)
-    else setTargetSessionUid(next)
+    openSession(next)
   }
 
-  /** Select a listed session and load its canonical detail immediately. */
-  const selectSession = (sessionUid: string) => {
+  const openSession = (sessionUid: string) => {
     setDraftSessionUid(sessionUid)
-    setLoading(true)
-    setError(null)
-    setGroupError(null)
+    setMode('session')
+    setSessionUsageLoading(true)
+    setSessionUsageError(null)
+    setSessionUsage(null)
     setGroupLoading(true)
-    setHistory(null)
+    setGroupError(null)
     setGroup(null)
+    setHistoryLoading(true)
+    setHistoryError(null)
+    setHistory(null)
     setSelectedConversationUid(sessionUid)
     if (sessionUid === targetSessionUid) setReloadCount((value) => value + 1)
     else setTargetSessionUid(sessionUid)
   }
 
+  const showOverview = () => {
+    setMode('overview')
+    setTargetSessionUid(null)
+    setSessionUsage(null)
+    setSessionUsageError(null)
+    setSessionUsageLoading(false)
+    setSelectedConversationUid(null)
+    setGroup(null)
+    setGroupError(null)
+    setGroupLoading(false)
+    setHistory(null)
+    setHistoryError(null)
+    setHistoryLoading(false)
+  }
+
   /** Switch between the root and worker histories without merging their records. */
   const selectConversation = (conversationId: string) => {
     if (conversationId === selectedConversationUid) return
-    setLoading(true)
-    setError(null)
+    setHistoryLoading(true)
+    setHistoryError(null)
     setHistory(null)
     setSelectedConversationUid(conversationId)
   }
 
-  /** Append another page of session headers to the browser. */
   const loadMoreSessions = async () => {
     if (!sessionList?.has_more || sessionList.next_offset === null) return
     setListLoadingMore(true)
@@ -466,11 +413,17 @@ export function ConversationHistory({
     }
   }
 
-  /** Append the next canonical item page without disturbing the current scroll. */
-  const loadMore = async () => {
-    if (!history?.has_more || history.next_after_sequence === null) return
-    setLoadingMore(true)
-    setError(null)
+  /** Append the next canonical page while retaining already visible turns. */
+  const loadMoreHistory = async () => {
+    if (
+      !history?.has_more ||
+      history.next_after_sequence === null ||
+      !selectedConversationUid
+    ) {
+      return
+    }
+    setHistoryLoadingMore(true)
+    setHistoryError(null)
     try {
       const next = await loadConversationHistory(
         apiBaseUrl,
@@ -480,9 +433,13 @@ export function ConversationHistory({
       )
       setHistory({ ...next, items: [...history.items, ...next.items] })
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'No se pudo cargar la página siguiente.')
+      setHistoryError(
+        reason instanceof Error
+          ? reason.message
+          : 'No se pudo cargar la página siguiente.',
+      )
     } finally {
-      setLoadingMore(false)
+      setHistoryLoadingMore(false)
     }
   }
 
@@ -490,9 +447,13 @@ export function ConversationHistory({
     <section className="history-view">
       <div className="history-toolbar">
         <div>
-          <span className="eyebrow">PostgreSQL canónico</span>
-          <h1>Historial técnico</h1>
-          <p>Mensajes, tool calls y resultados en el orden exacto persistido.</p>
+          <span className="eyebrow">Costes y uso</span>
+          <h1>{mode === 'overview' ? 'Histórico de tokens' : 'Detalle de sesión'}</h1>
+          <p>
+            {mode === 'overview'
+              ? 'Resumen de los últimos siete días con acceso rápido a cada sesión.'
+              : 'Costes, turnos y actividad técnica de la sesión principal y sus workers.'}
+          </p>
         </div>
         <form className="history-search" onSubmit={submit}>
           <label htmlFor="history-session-id">Session ID</label>
@@ -506,10 +467,10 @@ export function ConversationHistory({
             />
             <button
               type="submit"
-              disabled={loading || groupLoading}
+              disabled={sessionUsageLoading || groupLoading || historyLoading}
               aria-label="Consultar sesión"
             >
-              {loading || groupLoading ? (
+              {sessionUsageLoading || groupLoading || historyLoading ? (
                 <RefreshCw className="spin" size={17} />
               ) : (
                 <Search size={17} />
@@ -521,240 +482,222 @@ export function ConversationHistory({
       </div>
 
       <div className="history-scroll">
-        <DailyTokenAnalytics
-          report={dailyUsage}
-          rangeDays={dailyRange}
-          loading={dailyUsageLoading}
-          error={dailyUsageError}
-          onRangeChange={selectDailyRange}
-        />
-        <div className="history-section-divider" role="separator">
-          <span>Historial de conversaciones</span>
-        </div>
-        <div className="history-browser">
-          <aside className="history-session-browser" aria-label="Sesiones del usuario">
-            <header>
-              <div>
-                <strong>Sesiones principales</strong>
-                <span>{sessionList?.sessions.length ?? 0} cargadas</span>
-              </div>
-              {listLoading && <RefreshCw className="spin" size={14} aria-label="Cargando" />}
-            </header>
-
-            {listError && <div className="history-list-error" role="alert">{listError}</div>}
-            {sessionList?.sessions.length === 0 && !listLoading && (
-              <div className="history-list-empty">No hay sesiones para este usuario.</div>
-            )}
-            <div className="history-session-list">
-              {sessionList?.sessions.map((session) => (
-                <button
-                  className={
-                    session.session_uid ===
-                    (group?.root_conversation_id ?? targetSessionUid)
-                      ? 'active'
-                      : ''
-                  }
-                  type="button"
-                  key={session.session_uid}
-                  aria-pressed={
-                    session.session_uid ===
-                    (group?.root_conversation_id ?? targetSessionUid)
-                  }
-                  onClick={() => selectSession(session.session_uid)}
-                >
-                  <span className="history-list-title">{session.title}</span>
-                  <code>{session.session_uid}</code>
-                  <span className="history-list-meta">
-                    <span>v{session.version} · {session.last_sequence} registros</span>
-                    <time dateTime={session.updated_at}>{formatTimestamp(session.updated_at)}</time>
-                  </span>
-                </button>
-              ))}
+        {mode === 'overview' ? (
+          <>
+            <DailyTokenAnalytics
+              report={dailyUsage}
+              rangeDays={dailyRange}
+              loading={dailyUsageLoading}
+              error={dailyUsageError}
+              onRangeChange={selectDailyRange}
+            />
+            <div className="history-section-divider" role="separator">
+              <span>Selecciona una sesión</span>
             </div>
-            {sessionList?.has_more && (
-              <button
-                className="history-list-more"
-                type="button"
-                disabled={listLoadingMore}
-                onClick={() => void loadMoreSessions()}
-              >
-                {listLoadingMore ? (
-                  <RefreshCw className="spin" size={14} />
-                ) : (
-                  <ChevronDown size={14} />
-                )}
-                Más sesiones
-              </button>
-            )}
-          </aside>
-
-          <div className="history-detail">
-            {groupError && <div className="history-error" role="alert">{groupError}</div>}
-            {error && <div className="history-error" role="alert">{error}</div>}
-            {loading && !history && !error && (
-              <div className="history-detail-loading">
-                <RefreshCw className="spin" size={18} />
-                Cargando registros de la sesión…
-              </div>
-            )}
-
-            {history && (
-              <>
-                {group && (
-                  <section
-                    className="history-conversation-group"
-                    aria-label="Conversaciones relacionadas"
-                  >
-                    <header>
-                      <div>
-                        <span className="eyebrow">Conversación de usuario</span>
-                        <strong>Historiales aislados</strong>
-                      </div>
-                      <span>{group.conversations.length} conversaciones</span>
-                    </header>
-                    <div className="history-conversation-tabs">
-                      {group.conversations.map((member, index) => {
-                        const correlation = member.correlation
-                        const isRoot = correlation.parent_conversation_id === null
-                        const isActive =
-                          correlation.conversation_id === selectedConversationUid
-                        return (
-                          <button
-                            className={isActive ? 'active' : ''}
-                            type="button"
-                            key={correlation.conversation_id}
-                            aria-pressed={isActive}
-                            onClick={() => selectConversation(correlation.conversation_id)}
-                          >
-                            <span className="history-conversation-icon" aria-hidden="true">
-                              {isRoot ? <MessageSquare size={16} /> : <Bot size={16} />}
-                            </span>
-                            <span className="history-conversation-copy">
-                              <strong>{isRoot ? 'Principal' : `Agente interno ${index}`}</strong>
-                              <code>{correlation.conversation_id}</code>
-                              {!isRoot && (
-                                <small>
-                                  {member.jobs.length} {member.jobs.length === 1 ? 'job' : 'jobs'}
-                                </small>
-                              )}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </section>
-                )}
-
-                <div className="history-summary">
-                  <div className="history-session-heading">
-                    {history.correlation.parent_conversation_id === null ? (
-                      <Database size={20} />
-                    ) : (
-                      <Bot size={20} />
-                    )}
-                    <div>
-                      <span className="history-session-kind">
-                        {history.correlation.parent_conversation_id === null
-                          ? 'Conversación principal'
-                          : 'Conversación interna aislada'}
-                      </span>
-                      <strong>{history.title}</strong>
-                      <code>{history.session_uid}</code>
-                    </div>
-                    <span className={`history-status history-status-${history.status}`}>
-                      {history.status}
-                    </span>
-                  </div>
-                  <dl>
-                    <div><dt>Versión</dt><dd>{history.version}</dd></div>
-                    <div><dt>Última secuencia</dt><dd>{history.last_sequence}</dd></div>
-                    <div><dt>Creada</dt><dd>{formatTimestamp(history.created_at)}</dd></div>
-                    <div><dt>Último mensaje</dt><dd>{formatTimestamp(history.last_message_at)}</dd></div>
-                    <div>
-                      <dt>Tokens totales</dt>
-                      <dd>{loadedAccounting.tokens.toLocaleString('es-ES')}</dd>
-                    </div>
-                    <div>
-                      <dt>Entrada</dt>
-                      <dd>{loadedAccounting.inputTokens.toLocaleString('es-ES')}</dd>
-                    </div>
-                    <div>
-                      <dt>Salida</dt>
-                      <dd>{loadedAccounting.outputTokens.toLocaleString('es-ES')}</dd>
-                    </div>
-                    <div>
-                      <dt>En caché</dt>
-                      <dd>{loadedAccounting.cachedInputTokens.toLocaleString('es-ES')}</dd>
-                    </div>
-                    <div>
-                      <dt>Reutilización</dt>
-                      <dd>{loadedAccounting.cacheRatio}% de la entrada</dd>
-                    </div>
-                    <div>
-                      <dt>Llamadas al modelo</dt>
-                      <dd>{loadedAccounting.calls.toLocaleString('es-ES')}</dd>
-                    </div>
-                    <div>
-                      <dt>Coste cargado</dt>
-                      <dd>
-                        {loadedAccounting.cost
-                          ? formatModelCost(loadedAccounting.cost)
-                          : loadedAccounting.calls
-                            ? 'Parcial / sin tarifa'
-                            : '—'}
-                      </dd>
-                    </div>
-                  </dl>
+            <section className="history-session-picker" aria-label="Sesiones del usuario">
+              <header>
+                <div>
+                  <span className="eyebrow">Detalle bajo demanda</span>
+                  <strong>Sesiones principales</strong>
+                  <p>Abre una sesión para ver sus costes, turnos y tool calls.</p>
                 </div>
+                <span>
+                  {listLoading && <RefreshCw className="spin" size={14} aria-label="Cargando" />}
+                  {sessionList?.sessions.length ?? 0} cargadas
+                </span>
+              </header>
 
-                {tokenChart && (
-                  <section className="history-token-chart" aria-label="Analítica de tokens">
-                    <VisualPresentation presentation={tokenChart} />
-                  </section>
-                )}
+              {listError && <div className="history-list-error" role="alert">{listError}</div>}
+              {sessionList?.sessions.length === 0 && !listLoading && (
+                <div className="history-list-empty">No hay sesiones para este usuario.</div>
+              )}
+              <div className="history-session-list">
+                {sessionList?.sessions.map((session) => {
+                  const isActive = session.session_uid === targetSessionUid
+                  return (
+                    <button
+                      className={isActive ? 'active' : ''}
+                      type="button"
+                      key={session.session_uid}
+                      aria-pressed={isActive}
+                      onClick={() => openSession(session.session_uid)}
+                    >
+                      <span className="history-list-title">{session.title}</span>
+                      <code>{session.session_uid}</code>
+                      <span className="history-list-meta">
+                        <span>v{session.version} · {session.last_sequence} registros</span>
+                        <time dateTime={session.updated_at}>
+                          {formatTimestamp(session.updated_at)}
+                        </time>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              {sessionList?.has_more && (
+                <button
+                  className="history-list-more"
+                  type="button"
+                  disabled={listLoadingMore}
+                  onClick={() => void loadMoreSessions()}
+                >
+                  {listLoadingMore ? (
+                    <RefreshCw className="spin" size={14} />
+                  ) : (
+                    <ChevronDown size={14} />
+                  )}
+                  Más sesiones
+                </button>
+              )}
+            </section>
+          </>
+        ) : (
+          <div className="history-session-focus">
+            <button className="history-back-button" type="button" onClick={showOverview}>
+              <ArrowLeft size={16} />
+              Volver al histórico de 7 días
+            </button>
+            <SessionCostAnalytics
+              report={sessionUsage}
+              loading={sessionUsageLoading}
+              error={sessionUsageError}
+            />
 
-                {turns.length === 0 ? (
-                  <div className="history-empty">
-                    <Database size={24} />
-                    <strong>La sesión todavía no tiene registros</strong>
-                    <span>Los elementos aparecerán al completar el primer turno.</span>
+            <div className="history-section-divider" role="separator">
+              <span>Turnos y actividad técnica</span>
+            </div>
+
+            <div className="history-detail">
+              {groupError && <div className="history-error" role="alert">{groupError}</div>}
+              {historyError && <div className="history-error" role="alert">{historyError}</div>}
+              {(groupLoading || historyLoading) && !history && !historyError && (
+                <div className="history-detail-loading">
+                  <RefreshCw className="spin" size={18} />
+                  Cargando registros de la sesión…
+                </div>
+              )}
+
+              {group && (
+                <section
+                  className="history-conversation-group"
+                  aria-label="Conversaciones relacionadas"
+                >
+                  <header>
+                    <div>
+                      <span className="eyebrow">Conversación de usuario</span>
+                      <strong>Historiales aislados</strong>
+                    </div>
+                    <span>{group.conversations.length} conversaciones</span>
+                  </header>
+                  <div className="history-conversation-tabs">
+                    {group.conversations.map((member, index) => {
+                      const correlation = member.correlation
+                      const isRoot = correlation.parent_conversation_id === null
+                      const isActive =
+                        correlation.conversation_id === selectedConversationUid
+                      return (
+                        <button
+                          className={isActive ? 'active' : ''}
+                          type="button"
+                          key={correlation.conversation_id}
+                          aria-pressed={isActive}
+                          onClick={() => selectConversation(correlation.conversation_id)}
+                        >
+                          <span className="history-conversation-icon" aria-hidden="true">
+                            {isRoot ? <MessageSquare size={16} /> : <Bot size={16} />}
+                          </span>
+                          <span className="history-conversation-copy">
+                            <strong>{isRoot ? 'Principal' : `Agente interno ${index}`}</strong>
+                            <code>{correlation.conversation_id}</code>
+                            {!isRoot && (
+                              <small>
+                                {member.jobs.length} {member.jobs.length === 1 ? 'job' : 'jobs'}
+                              </small>
+                            )}
+                          </span>
+                        </button>
+                      )
+                    })}
                   </div>
-                ) : (
-                  <div className="history-turns">
-                    {turns.map(([turnId, records], index) => (
-                      <section className="history-turn" key={turnId}>
-                        <header className="history-turn-header">
-                          <span>Turno {index + 1}</span>
-                          <code>{turnId}</code>
-                          <small>{records.length} registros</small>
-                        </header>
-                        <div className="history-records">
-                          <TurnRecords records={records} />
-                        </div>
-                      </section>
-                    ))}
-                  </div>
-                )}
+                </section>
+              )}
 
-                {history.has_more && (
-                  <button
-                    className="history-load-more"
-                    type="button"
-                    disabled={loadingMore}
-                    onClick={() => void loadMore()}
-                  >
-                    {loadingMore ? (
-                      <RefreshCw className="spin" size={16} />
-                    ) : (
-                      <ChevronDown size={16} />
-                    )}
-                    Cargar más registros
-                  </button>
-                )}
-              </>
-            )}
+              {history && (
+                <>
+                  <div className="history-summary">
+                    <div className="history-session-heading">
+                      {history.correlation.parent_conversation_id === null ? (
+                        <Database size={20} />
+                      ) : (
+                        <Bot size={20} />
+                      )}
+                      <div>
+                        <span className="history-session-kind">
+                          {history.correlation.parent_conversation_id === null
+                            ? 'Conversación principal'
+                            : 'Conversación interna aislada'}
+                        </span>
+                        <strong>{history.title}</strong>
+                        <code>{history.session_uid}</code>
+                      </div>
+                      <span className={`history-status history-status-${history.status}`}>
+                        {history.status}
+                      </span>
+                    </div>
+                    <dl>
+                      <div><dt>Versión</dt><dd>{history.version}</dd></div>
+                      <div><dt>Última secuencia</dt><dd>{history.last_sequence}</dd></div>
+                      <div><dt>Creada</dt><dd>{formatTimestamp(history.created_at)}</dd></div>
+                      <div>
+                        <dt>Último mensaje</dt>
+                        <dd>{formatTimestamp(history.last_message_at)}</dd>
+                      </div>
+                    </dl>
+                  </div>
+
+                  {turns.length === 0 ? (
+                    <div className="history-empty">
+                      <Database size={24} />
+                      <strong>La sesión todavía no tiene registros</strong>
+                      <span>Los elementos aparecerán al completar el primer turno.</span>
+                    </div>
+                  ) : (
+                    <div className="history-turns">
+                      {turns.map(([turnId, records], index) => (
+                        <section className="history-turn" key={turnId}>
+                          <header className="history-turn-header">
+                            <span>Turno {index + 1}</span>
+                            <code>{turnId}</code>
+                            <small>{records.length} registros</small>
+                          </header>
+                          <div className="history-records">
+                            <TurnRecords records={records} />
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  )}
+
+                  {history.has_more && (
+                    <button
+                      className="history-load-more"
+                      type="button"
+                      disabled={historyLoadingMore}
+                      onClick={() => void loadMoreHistory()}
+                    >
+                      {historyLoadingMore ? (
+                        <RefreshCw className="spin" size={16} />
+                      ) : (
+                        <ChevronDown size={16} />
+                      )}
+                      Cargar más registros
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </section>
   )

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ConversationHistoryItem } from '../types'
-import { HistoryRecord } from './ConversationHistory'
+import { HistoryRecord, TurnRecords } from './ConversationHistory'
 
 function messageRecord(role: 'user' | 'assistant'): ConversationHistoryItem {
   return {
@@ -85,5 +85,36 @@ describe('technical history records', () => {
     expect(markup).toContain('<details class="history-tool-call history-orphan-tool-result">')
     expect(markup).not.toContain(' open=""')
     expect(markup).toContain('Respuesta de herramienta')
+  })
+
+  it('pairs tool calls and results inside the same turn disclosure', () => {
+    const call: ConversationHistoryItem = {
+      sequence: 3,
+      turn_id: 'turn-1',
+      created_at: '31-07-2026T12:00:01Z',
+      payload: {
+        type: 'tool_call',
+        call_id: 'call-paired',
+        tool_name: 'recent_transactions',
+        arguments: { limit: 5 },
+      },
+    }
+    const result: ConversationHistoryItem = {
+      sequence: 4,
+      turn_id: 'turn-1',
+      created_at: '31-07-2026T12:00:02Z',
+      payload: {
+        type: 'tool_result',
+        call_id: 'call-paired',
+        output: { count: 5 },
+        error: null,
+      },
+    }
+
+    const markup = renderToStaticMarkup(<TurnRecords records={[call, result]} />)
+
+    expect(markup).toContain('recent_transactions')
+    expect(markup).toContain('&quot;count&quot;: 5')
+    expect(markup).not.toContain('history-orphan-tool-result')
   })
 })

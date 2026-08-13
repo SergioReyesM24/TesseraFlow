@@ -34,6 +34,17 @@ function ToolRow({ message }: { message: ConversationMessage }) {
   )
 }
 
+/** Keep interrupted empty realtime turns from rendering as active typing bubbles. */
+function hasVisibleContent(message: ConversationMessage): boolean {
+  return Boolean(
+    message.content ||
+      message.visuals?.length ||
+      message.tools?.length ||
+      message.status === 'streaming' ||
+      message.status === 'error',
+  )
+}
+
 /** Present the conversation and keep the newest streamed content in view. */
 export function MessageList({
   messages,
@@ -52,8 +63,8 @@ export function MessageList({
     return (
       <div className="conversation-scroll empty-conversation">
         {children}
-        <h2>{emptyTitle}</h2>
-        <p>{emptyDescription}</p>
+        {emptyTitle && <h2>{emptyTitle}</h2>}
+        {emptyDescription && <p>{emptyDescription}</p>}
       </div>
     )
   }
@@ -61,7 +72,7 @@ export function MessageList({
   return (
     <div className="conversation-scroll" aria-live="polite">
       <div className="message-stack">
-        {messages.map((message) => (
+        {messages.filter(hasVisibleContent).map((message) => (
           <article className={`message message-${message.role}`} key={message.id}>
             {message.role === 'assistant' && (
               <div className="assistant-avatar" aria-hidden="true">
@@ -69,15 +80,14 @@ export function MessageList({
               </div>
             )}
             <div className="message-content">
-              {message.content ? (
-                <p>{message.content}</p>
-              ) : (
+              {message.content ? <p>{message.content}</p> : null}
+              {!message.content && message.status === 'streaming' ? (
                 <span className="typing-dots" aria-label="TesseraFlow está respondiendo">
                   <i />
                   <i />
                   <i />
                 </span>
-              )}
+              ) : null}
               {showVisuals &&
                 message.visuals?.map((visual) => (
                   <VisualPresentation key={visual.componentId} presentation={visual} />
