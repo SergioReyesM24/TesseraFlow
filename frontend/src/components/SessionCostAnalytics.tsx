@@ -105,6 +105,10 @@ export function SessionCostAnalytics({
                     <strong>Principal vs workers</strong>
                     <span>Coste y tokens por historial aislado</span>
                   </header>
+                  <div className="conversation-cost-legend" aria-label="Leyenda de las barras">
+                    <span><i className="cost" aria-hidden="true" />Coste</span>
+                    <span><i className="tokens" aria-hidden="true" />Tokens</span>
+                  </div>
                   <div className="conversation-cost-list">
                     {report.conversations.map((conversation, index) => (
                       <ConversationCostRow
@@ -191,6 +195,12 @@ function ConversationCostRow({
   const costShare = maxCost ? ((conversation.cost?.amount ?? 0) / maxCost) * 100 : 0
   const tokenShare = (conversation.usage.total_tokens / maxTokens) * 100
   const label = conversation.role === 'interactive' ? 'Agente usuario' : `Worker ${index}`
+  const costTooltip = conversation.cost
+    ? `Coste: ${formatModelCost(conversation.cost)} (${Math.round(costShare)} % del máximo)`
+    : conversation.model_call_count === 0
+      ? 'Coste: sin consumo'
+      : 'Coste: sin tarifa'
+  const tokenTooltip = `Tokens: ${numberFormatter.format(conversation.usage.total_tokens)} (${Math.round(tokenShare)} % del máximo)`
 
   return (
     <article className="conversation-cost-row">
@@ -213,9 +223,23 @@ function ConversationCostRow({
         </strong>
         <span>{numberFormatter.format(conversation.usage.total_tokens)} tokens</span>
       </div>
-      <div className="conversation-cost-bars" aria-hidden="true">
-        <span style={{ width: `${Math.max(costShare, conversation.cost ? 4 : 0)}%` }} />
-        <span style={{ width: `${Math.max(tokenShare, conversation.usage.total_tokens ? 4 : 0)}%` }} />
+      <div className="conversation-cost-bars">
+        <span
+          className="conversation-cost-bar cost"
+          style={{ width: `${Math.max(costShare, conversation.cost ? 4 : 0)}%` }}
+          role="img"
+          tabIndex={0}
+          aria-label={costTooltip}
+          data-tooltip={costTooltip}
+        />
+        <span
+          className="conversation-cost-bar tokens"
+          style={{ width: `${Math.max(tokenShare, conversation.usage.total_tokens ? 4 : 0)}%` }}
+          role="img"
+          tabIndex={0}
+          aria-label={tokenTooltip}
+          data-tooltip={tokenTooltip}
+        />
       </div>
     </article>
   )

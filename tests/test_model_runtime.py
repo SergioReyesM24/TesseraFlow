@@ -102,6 +102,9 @@ async def test_runtime_composes_independent_text_realtime_and_worker_roles(
         realtime_agent_model="realtime-model",
         worker_provider="openai",
         worker_agent_model="worker-model",
+        interactive_tool_evaluation_mode="shadow",
+        worker_tool_evaluation_mode="shadow",
+        evaluation_model="evaluation-model",
         openai_api_key="test-key",
         openai_base_url="https://example.test/v1",
     )
@@ -121,6 +124,10 @@ async def test_runtime_composes_independent_text_realtime_and_worker_roles(
     assert "spoken as native audio" not in runtime.text_definition.instructions
     assert "spoken as native audio" in runtime.realtime_definition.instructions
     assert isinstance(runtime.text_agent, TurnInteractionAgent)
+    interactive_gate = runtime.text_agent_service._tool_call_gate
+    assert interactive_gate is not None
+    assert runtime.realtime_agent_service._tool_call_gate is interactive_gate
+    assert runtime.worker_agent_service._tool_call_gate is not interactive_gate
     assert len(FakeOpenAIClient.instances) == 1
     assert len(FakeGeminiClient.instances) == 1
     client = FakeOpenAIClient.instances[0]
@@ -154,9 +161,7 @@ async def test_runtime_registers_openai_realtime_on_the_shared_openai_client(
 
     assert runtime.realtime_agent_provider == "openai"
     assert runtime.realtime_definition.model == "gpt-realtime-2.1"
-    assert runtime.realtime_agent_service.capabilities.input_audio_mime_type.endswith(
-        "rate=24000"
-    )
+    assert runtime.realtime_agent_service.capabilities.input_audio_mime_type.endswith("rate=24000")
     assert len(FakeOpenAIClient.instances) == 1
     assert FakeGeminiClient.instances == []
     await runtime.close()

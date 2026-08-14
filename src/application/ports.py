@@ -14,6 +14,11 @@ from domain.conversations import (
     DailyTokenUsage,
     SessionUsageReport,
 )
+from domain.evaluations import (
+    AgentStepEvaluation,
+    AgentStepEvaluationRequest,
+    EvaluationTrace,
+)
 from domain.interactions import InteractionCommand, InteractionEmission, InteractionOutput
 from domain.model import ModelReply
 from domain.realtime import (
@@ -24,6 +29,22 @@ from domain.realtime import (
 )
 from domain.tools import ToolResult, ToolSpec
 from domain.turn_events import ModelStreamEvent
+
+
+class AgentStepEvaluator(Protocol):
+    """Assess a normalized proposed agent step before external effects occur."""
+
+    async def evaluate(self, request: AgentStepEvaluationRequest) -> AgentStepEvaluation:
+        """Return one structured judgment without executing any proposed tool."""
+        ...
+
+
+class EvaluationTraceRepository(Protocol):
+    """Persist evaluator audit records outside provider-facing conversation context."""
+
+    async def append_evaluation_trace(self, trace: EvaluationTrace) -> None:
+        """Append one immutable evaluation decision."""
+        ...
 
 
 class ModelSession(Protocol):

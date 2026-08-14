@@ -219,6 +219,33 @@ export interface ConversationHistoryItem {
   payload: ConversationHistoryPayload
 }
 
+export interface EvaluationTrace {
+  trace_id: string
+  conversation_id: string
+  turn_id: string
+  job_id: string | null
+  attempt: number
+  proposed_call_ids: string[]
+  verdict: 'pass' | 'fail' | 'uncertain'
+  risk: 'low' | 'medium' | 'high'
+  reason_code:
+    | 'none'
+    | 'wrong_tool'
+    | 'unnecessary_tool'
+    | 'ungrounded_arguments'
+    | 'duplicate_action'
+    | 'unsafe_side_effect'
+    | 'incomplete_request'
+    | 'other'
+  feedback: string
+  mode: 'shadow' | 'enforce'
+  executed: boolean
+  model: string
+  usage: ModelUsage
+  latency_ms: number
+  created_at: string
+}
+
 export interface ConversationCorrelation {
   conversation_id: string
   root_conversation_id: string
@@ -256,6 +283,8 @@ export interface ConversationHistoryResponse {
   updated_at: string
   last_message_at: string | null
   items: ConversationHistoryItem[]
+  evaluations: EvaluationTrace[]
+  evaluations_truncated: boolean
   has_more: boolean
   next_after_sequence: number | null
   correlation: ConversationCorrelation

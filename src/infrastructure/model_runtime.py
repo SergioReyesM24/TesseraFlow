@@ -6,9 +6,11 @@ from google import genai
 from openai import AsyncOpenAI
 
 from application.agent import AgentService
+from application.evaluations import ToolCallEvaluationGate
 from application.interactions import TurnInteractionAgent
 from application.ports import (
     ConversationRepository,
+    EvaluationTraceRepository,
     InteractionNotifier,
     InteractionRepository,
     InteractiveAgent,
@@ -23,6 +25,7 @@ from domain.costs import ModelCostCalculator, ModelRates, ModelRateTier
 from infrastructure.gemini_realtime_gateway import GeminiRealtimeGateway
 from infrastructure.openai_gateway import OpenAIResponsesGateway
 from infrastructure.openai_realtime_gateway import OpenAIRealtimeGateway
+from infrastructure.openai_step_evaluator import OpenAIToolCallEvaluator
 
 AsyncCloser = Callable[[], Awaitable[None]]
 
@@ -55,6 +58,7 @@ def build_model_runtime(
     conversations: ConversationRepository,
     interactive_tools: ToolRegistry,
     worker_tools: ToolRegistry,
+    evaluation_traces: EvaluationTraceRepository | None = None,
     interactions: InteractionRepository | None = None,
     interaction_notifier: InteractionNotifier | None = None,
 ) -> ModelRuntime:
@@ -184,11 +188,46 @@ def build_model_runtime(
         instructions=settings.worker_agent_instructions,
         tool_names=worker_tools.names,
     )
+    if (
+        settings.interactive_tool_evaluation_mode != "off"
+        or settings.worker_tool_evaluation_mode != "off"
+    ) and settings.evaluation_provider != "openai":
+        raise ValueError(f"Unsupported evaluation provider: {settings.evaluation_provider}")
+    interactive_tool_call_gate = None
+    if settings.interactive_tool_evaluation_mode != "off":
+        interactive_tool_call_gate = ToolCallEvaluationGate(
+            OpenAIToolCallEvaluator(
+                get_openai_client(),
+                model=settings.evaluation_model,
+                instructions=settings.interactive_tool_call_evaluator_instructions,
+                timeout_seconds=settings.interactive_tool_evaluation_timeout_seconds,
+            ),
+            role="interactive",
+            mode=settings.interactive_tool_evaluation_mode,
+            fail_open=settings.interactive_tool_evaluation_fail_open,
+            technical_failure_mode="feedback",
+        )
+    worker_tool_call_gate = None
+    if settings.worker_tool_evaluation_mode != "off":
+        worker_tool_call_gate = ToolCallEvaluationGate(
+            OpenAIToolCallEvaluator(
+                get_openai_client(),
+                model=settings.evaluation_model,
+                instructions=settings.tool_call_evaluator_instructions,
+                timeout_seconds=settings.worker_tool_evaluation_timeout_seconds,
+            ),
+            role="worker",
+            mode=settings.worker_tool_evaluation_mode,
+            fail_open=settings.worker_tool_evaluation_fail_open,
+        )
     text_agent_service = AgentService(
         model_gateway=text_gateway,
         tools=interactive_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
+        tool_call_gate=interactive_tool_call_gate,
+        max_tool_call_revisions=settings.interactive_tool_evaluation_max_revisions,
+        evaluation_traces=evaluation_traces,
         cost_calculator=cost_calculator,
     )
     worker_agent_service = AgentService(
@@ -196,6 +235,9 @@ def build_model_runtime(
         tools=worker_tools,
         conversations=conversations,
         max_tool_rounds=settings.max_tool_rounds,
+        tool_call_gate=worker_tool_call_gate,
+        max_tool_call_revisions=settings.worker_tool_evaluation_max_revisions,
+        evaluation_traces=evaluation_traces,
         cost_calculator=cost_calculator,
     )
     realtime_agent_service = RealtimeAgentService(
@@ -212,6 +254,9 @@ def build_model_runtime(
         outbound_enqueue_timeout_seconds=settings.realtime_outbound_enqueue_timeout_seconds,
         proactive_turn_timeout_seconds=settings.realtime_proactive_turn_timeout_seconds,
         command_reconciliation_seconds=settings.realtime_command_reconciliation_seconds,
+        tool_call_gate=interactive_tool_call_gate,
+        max_tool_call_revisions=settings.interactive_tool_evaluation_max_revisions,
+        evaluation_traces=evaluation_traces,
         cost_calculator=cost_calculator,
     )
     return ModelRuntime(

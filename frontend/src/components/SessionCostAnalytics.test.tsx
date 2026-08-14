@@ -101,6 +101,9 @@ describe('SessionCostAnalytics', () => {
     expect(markup).toContain('gpt-5-mini')
     expect(markup).toContain('Coste por participante')
     expect(markup).toContain('Tokens por modelo')
+    expect(markup).toContain('Leyenda de las barras')
+    expect(markup).toContain('Coste: 0,0012 USD (34 % del máximo)')
+    expect(markup).toContain('Tokens: 1200 (48 % del máximo)')
   })
 
   it('shows partial pricing when a model call has no configured rate', () => {

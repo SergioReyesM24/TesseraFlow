@@ -780,6 +780,37 @@ argumentos y devuelve un ahorro base, el ahorro actual y los movimientos del má
 reciente al más antiguo. Cada movimiento incluye fecha, tipo (ingreso o gasto),
 comercio, categoría, cantidad positiva y saldo resultante.
 
+### Evaluación previa de tool calls
+
+El agente interactivo y el worker pueden evaluar cada lote propuesto antes de ejecutar
+ninguna tool. El evaluador recibe contratos neutrales: historial acotado, catálogo de tools
+y lote propuesto. Devuelve un veredicto estructurado (`pass`, `fail` o `uncertain`), riesgo,
+código de motivo y feedback. La rúbrica interactiva comprueba además la elección entre
+`delegate_to_worker_agent` y `continue_worker_agent`, la correlación de threads y que el
+mensaje delegado sea fiel y autocontenido.
+
+- `off`: no invoca el evaluador.
+- `shadow`: registra la evaluación y su consumo, pero ejecuta el lote igualmente.
+- `enforce`: solo ejecuta un lote con veredicto `pass`. Los demás se devuelven al agente
+  como resultados rechazados para que genere un lote nuevo.
+
+La evaluación es todo-o-nada: si falla una call, no se ejecuta ninguna call del lote. Tras
+agotar el límite de revisiones del rol, el turno falla sin ejecutar el último lote. Los
+fallos técnicos obedecen a la opción `FAIL_OPEN` correspondiente; para tools con efectos
+reales conviene usar `false`. El modo inicial recomendado es `shadow` hasta calibrar un
+conjunto representativo de casos. La misma política interactiva protege tanto el agente
+textual como el realtime.
+
+En realtime, la evaluación se ejecuta en una tarea separada para no detener la entrega de
+audio o texto que el modelo ya esté produciendo. Antes de una tool interactiva, el prompt
+exige una única confirmación neutral que no afirme que la operación ya comenzó. La tool no
+se ejecuta hasta recibir `pass`.
+
+Los rechazos semánticos usan `disposition="revise_silently"`: el agente corrige la call sin
+verbalizar el error. Un fallo técnico del evaluador o el agotamiento de revisiones usa
+`disposition="inform_user"`: se devuelve un resultado tipado al modelo para que explique un
+fallo general sin revelar detalles internos ni volver a llamar tools en ese turno.
+
 ### Añadir una tool
 
 1. Define un modelo de argumentos que herede de `ToolArguments`.
@@ -828,6 +859,15 @@ Los prompts por defecto están versionados como Markdown en:
 - `src/prompts/interactive_agent.md`: agente que conversa con el usuario.
 - `src/prompts/realtime_agent.md`: reglas añadidas solo al agente STS persistente.
 - `src/prompts/worker_agent.md`: agente persistente que ejecuta las tools operativas.
+- `src/prompts/interactive_tool_call_evaluator.md`: rúbrica de calls del agente principal.
+- `src/prompts/tool_call_evaluator.md`: rúbrica del evaluador de calls del worker.
+
+Las evaluaciones se guardan como trazas de auditoría separadas del historial que se envía a
+los modelos. La vista **Historial** las muestra dentro del turno y conversación evaluados con
+correlación, intento, calls propuestas, veredicto, riesgo, motivo, feedback redactado, política,
+ejecución, modelo, consumo, latencia y fecha. La API las expone en `evaluations` dentro de
+`GET /v1/sessions/{session_uid}/history`; `evaluations_truncated` indica si la proyección
+alcanzó el límite de auditoría.
 
 `config.py` los carga mediante una ruta relativa al código, independientemente del
 directorio desde el que se arranque el proceso. `AGENT_INSTRUCTIONS`,
@@ -850,6 +890,16 @@ el entorno sin modificar los archivos versionados.
 | `OPENAI_REALTIME_LANGUAGE_CODE` | inferido | Idioma opcional de la transcripción de entrada. |
 | `OPENAI_REALTIME_REASONING_EFFORT` | inferido | Esfuerzo de razonamiento opcional del modelo realtime. |
 | `WORKER_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente de trabajo. |
+| `EVALUATION_PROVIDER` | `openai` | Adaptador del evaluador de tool calls. |
+| `EVALUATION_MODEL` | `gpt-5-mini` | Modelo pequeño usado por el evaluador. |
+| `INTERACTIVE_TOOL_EVALUATION_MODE` | `off` | Evaluador del agente textual y realtime: `off`, `shadow` o `enforce`. |
+| `INTERACTIVE_TOOL_EVALUATION_TIMEOUT_SECONDS` | `15` | Presupuesto de cada evaluación interactiva. |
+| `INTERACTIVE_TOOL_EVALUATION_MAX_REVISIONS` | `2` | Lotes rechazados que el agente principal puede revisar. |
+| `INTERACTIVE_TOOL_EVALUATION_FAIL_OPEN` | `false` | Devuelve un fallo general al agente si el evaluador interactivo falla; `true` ejecuta el lote. |
+| `WORKER_TOOL_EVALUATION_MODE` | `off` | Control del evaluador: `off`, `shadow` o `enforce`. |
+| `WORKER_TOOL_EVALUATION_TIMEOUT_SECONDS` | `15` | Presupuesto de cada evaluación. |
+| `WORKER_TOOL_EVALUATION_MAX_REVISIONS` | `2` | Lotes rechazados que el agente puede revisar. |
+| `WORKER_TOOL_EVALUATION_FAIL_OPEN` | `true` | Ejecuta el lote si el evaluador sufre un fallo técnico. |
 | `MODEL_PRICING` | catálogo de los modelos predeterminados | JSON de tarifas por millón de tokens (`input`, `cached_input`, `output`, `input_audio`, `cached_input_audio`, `output_audio` y `currency`), indexado por nombre de modelo. |
 | `OPENAI_CONNECT_TIMEOUT_SECONDS` | `15` | Timeout de conexión. |
 | `GEMINI_API_KEY` | — | Credencial del adaptador Gemini realtime disponible inicialmente. |
@@ -911,6 +961,7 @@ tokens y el coste se expone como no configurado, evitando estimaciones silencios
 El catálogo incluido fue revisado el **29-07-2026** y expresa tarifas por millón
 de tokens en €:
 
+- `gpt-5.4-mini`: `0.66` € entrada, `0.07` € entrada cacheada y `3.96` € salida.
 - `gpt-5.4`: tarifa retail de Azure OpenAI Global Standard en Sweden Central:
   `2.193945` € entrada, `0.219394` € entrada cacheada y `13.163668` € salida.
   Por encima de 272.000 tokens de entrada se activa automáticamente el tier de

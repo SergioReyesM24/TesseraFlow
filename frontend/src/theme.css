@@ -97,14 +97,15 @@
   /* Navigation has its own inverse semantic layer */
   --color-nav: #ffffff;
   --color-nav-hover: rgb(16 18 23 / 5%);
-  --color-nav-active: rgb(21 94 239 / 10%);
+  --color-nav-active: rgb(21 94 239 / 16%);
   --color-nav-border: rgb(16 18 23 / 8%);
   --color-nav-control: #f7f8fb;
   --color-nav-control-border: rgb(16 18 23 / 8%);
   --color-nav-control-border-hover: rgb(21 94 239 / 22%);
   --color-nav-surface-subtle: #f7f8fb;
   --color-nav-text: #101217;
-  --color-nav-text-muted: #71757f;
+  --color-nav-text-muted: var(--neutral-700);
+  --color-nav-active-text: var(--brand-800);
   --color-nav-accent: var(--brand-600);
   --color-on-brand-border: rgb(255 255 255 / 18%);
 

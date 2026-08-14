@@ -34,6 +34,7 @@ from domain.conversations import (
     SessionUsageReport,
 )
 from domain.costs import ModelCallMetrics, ModelCost, ModelUsage, TurnMetrics
+from domain.evaluations import EvaluationTrace, EvaluationTracePage
 from domain.interactions import InteractionCommand, InteractionOutput
 from domain.realtime import (
     RealtimeAgentEvent,
@@ -368,6 +369,28 @@ class StubConversationHistoryService:
                 conversation_id=key.conversation_id,
                 root_conversation_id=key.conversation_id,
             ),
+            evaluations=EvaluationTracePage(
+                traces=(
+                    EvaluationTrace(
+                        trace_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                        conversation_id=SESSION_UID,
+                        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        attempt=1,
+                        proposed_call_ids=("call-1",),
+                        verdict="pass",
+                        risk="low",
+                        reason_code="none",
+                        feedback="",
+                        mode="enforce",
+                        executed=True,
+                        model="evaluation-model",
+                        usage=ModelUsage(input_tokens=100, output_tokens=20),
+                        latency_ms=125.5,
+                        created_at=timestamp,
+                    ),
+                )
+            ),
         )
 
 
@@ -572,6 +595,37 @@ async def test_session_history_exposes_canonical_database_items() -> None:
         "output": {"result": 5},
         "error": None,
     }
+    assert payload["evaluations"] == [
+        {
+            "trace_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "conversation_id": SESSION_UID,
+            "turn_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "job_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "attempt": 1,
+            "proposed_call_ids": ["call-1"],
+            "verdict": "pass",
+            "risk": "low",
+            "reason_code": "none",
+            "feedback": "",
+            "mode": "enforce",
+            "executed": True,
+            "model": "evaluation-model",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cached_input_tokens": 0,
+                "uncached_input_tokens": 100,
+                "cached_input_audio_tokens": 0,
+                "reasoning_tokens": 0,
+                "input_audio_tokens": 0,
+                "output_audio_tokens": 0,
+            },
+            "latency_ms": 125.5,
+            "created_at": "22-07-2026T10:00:00Z",
+        }
+    ]
+    assert payload["evaluations_truncated"] is False
 
 
 async def test_session_list_exposes_clickable_conversation_summaries() -> None:

@@ -33,6 +33,14 @@ from domain.conversations import (
     SessionUsageReport,
 )
 from domain.costs import ZERO, ModelCost, ModelUsage
+from domain.evaluations import (
+    EvaluationMode,
+    EvaluationReasonCode,
+    EvaluationRisk,
+    EvaluationTrace,
+    EvaluationTracePage,
+    EvaluationVerdict,
+)
 from domain.tools import ToolCall, ToolResult
 from infrastructure.conversation_codec import (
     decode_conversation_item,
@@ -141,6 +149,30 @@ WHERE conversation_id = $1
   AND sequence > $2
 ORDER BY sequence
 LIMIT $3
+"""
+
+EVALUATION_TRACE_HISTORY_LIMIT = 200
+
+SELECT_EVALUATION_TRACES = """
+SELECT id, conversation_id, turn_id, job_id, attempt, proposed_call_ids,
+       verdict, risk, reason_code, feedback, mode, executed, model, usage,
+       latency_ms, created_at
+FROM evaluation_traces
+WHERE conversation_id = $1
+ORDER BY created_at, attempt, id
+LIMIT $2
+"""
+
+INSERT_EVALUATION_TRACE = """
+INSERT INTO evaluation_traces (
+    id, conversation_id, turn_id, job_id, attempt, proposed_call_ids,
+    verdict, risk, reason_code, feedback, mode, executed, model, usage,
+    latency_ms, created_at
+)
+VALUES (
+    $1::uuid, $2, $3::uuid, $4::uuid, $5, $6::jsonb,
+    $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16
+)
 """
 
 SELECT_DAILY_TOKEN_USAGE = """
@@ -455,6 +487,38 @@ class PostgresConversationRepository(ConversationRepository):
             has_more=len(rows) > limit,
         )
 
+    async def append_evaluation_trace(self, trace: EvaluationTrace) -> None:
+        """Persist one immutable evaluator decision outside conversation items."""
+        usage = {
+            "input_tokens": trace.usage.input_tokens,
+            "output_tokens": trace.usage.output_tokens,
+            "cached_input_tokens": trace.usage.cached_input_tokens,
+            "cached_input_audio_tokens": trace.usage.cached_input_audio_tokens,
+            "reasoning_tokens": trace.usage.reasoning_tokens,
+            "input_audio_tokens": trace.usage.input_audio_tokens,
+            "output_audio_tokens": trace.usage.output_audio_tokens,
+        }
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                INSERT_EVALUATION_TRACE,
+                trace.trace_id,
+                trace.conversation_id,
+                trace.turn_id,
+                trace.job_id,
+                trace.attempt,
+                json.dumps(trace.proposed_call_ids, separators=(",", ":")),
+                trace.verdict,
+                trace.risk,
+                trace.reason_code,
+                trace.feedback,
+                trace.mode,
+                trace.executed,
+                trace.model,
+                json.dumps(usage, separators=(",", ":")),
+                trace.latency_ms,
+                trace.created_at,
+            )
+
     async def load_history(
         self,
         key: ConversationKey,
@@ -480,6 +544,11 @@ class PostgresConversationRepository(ConversationRepository):
                 key.conversation_id,
                 after_sequence,
                 limit + 1,
+            )
+            evaluation_rows = await connection.fetch(
+                SELECT_EVALUATION_TRACES,
+                key.conversation_id,
+                EVALUATION_TRACE_HISTORY_LIMIT + 1,
             )
         visible_rows = item_rows[:limit]
         try:
@@ -509,6 +578,13 @@ class PostgresConversationRepository(ConversationRepository):
                 correlation=self._correlation_from_row(
                     row,
                     conversation_id=key.conversation_id,
+                ),
+                evaluations=EvaluationTracePage(
+                    traces=tuple(
+                        self._evaluation_trace_from_row(value)
+                        for value in evaluation_rows[:EVALUATION_TRACE_HISTORY_LIMIT]
+                    ),
+                    truncated=len(evaluation_rows) > EVALUATION_TRACE_HISTORY_LIMIT,
                 ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -804,6 +880,63 @@ class PostgresConversationRepository(ConversationRepository):
         if amount is None or currency is None:
             return None
         return ModelCost(amount=Decimal(str(amount)), currency=str(currency))
+
+    @staticmethod
+    def _evaluation_trace_from_row(row: Any) -> EvaluationTrace:
+        """Decode one stable evaluator audit record from PostgreSQL values."""
+        raw_call_ids = row["proposed_call_ids"]
+        raw_usage = row["usage"]
+        call_ids = json.loads(raw_call_ids) if isinstance(raw_call_ids, str) else raw_call_ids
+        usage = json.loads(raw_usage) if isinstance(raw_usage, str) else raw_usage
+        if not isinstance(call_ids, list) or not isinstance(usage, dict):
+            raise ValueError("evaluation trace JSON fields are invalid")
+        verdict = str(row["verdict"])
+        risk = str(row["risk"])
+        reason_code = str(row["reason_code"])
+        mode = str(row["mode"])
+        if verdict not in ("pass", "fail", "uncertain"):
+            raise ValueError("evaluation trace verdict is invalid")
+        if risk not in ("low", "medium", "high"):
+            raise ValueError("evaluation trace risk is invalid")
+        if reason_code not in (
+            "none",
+            "wrong_tool",
+            "unnecessary_tool",
+            "ungrounded_arguments",
+            "duplicate_action",
+            "unsafe_side_effect",
+            "incomplete_request",
+            "other",
+        ):
+            raise ValueError("evaluation trace reason code is invalid")
+        if mode not in ("shadow", "enforce"):
+            raise ValueError("evaluation trace mode is invalid")
+        return EvaluationTrace(
+            trace_id=str(row["id"]),
+            conversation_id=str(row["conversation_id"]),
+            turn_id=str(row["turn_id"]),
+            job_id=str(row["job_id"]) if row["job_id"] is not None else None,
+            attempt=int(row["attempt"]),
+            proposed_call_ids=tuple(str(value) for value in call_ids),
+            verdict=cast(EvaluationVerdict, verdict),
+            risk=cast(EvaluationRisk, risk),
+            reason_code=cast(EvaluationReasonCode, reason_code),
+            feedback=str(row["feedback"]),
+            mode=cast(EvaluationMode, mode),
+            executed=bool(row["executed"]),
+            model=str(row["model"]),
+            usage=ModelUsage(
+                input_tokens=int(usage.get("input_tokens", 0)),
+                output_tokens=int(usage.get("output_tokens", 0)),
+                cached_input_tokens=int(usage.get("cached_input_tokens", 0)),
+                cached_input_audio_tokens=int(usage.get("cached_input_audio_tokens", 0)),
+                reasoning_tokens=int(usage.get("reasoning_tokens", 0)),
+                input_audio_tokens=int(usage.get("input_audio_tokens", 0)),
+                output_audio_tokens=int(usage.get("output_audio_tokens", 0)),
+            ),
+            latency_ms=float(row["latency_ms"]),
+            created_at=cast(datetime, row["created_at"]),
+        )
 
     @staticmethod
     def _model_breakdowns(

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Literal, TypeAlias
 
 from domain.costs import ModelCost, ModelUsage, TurnMetrics
+from domain.evaluations import EvaluationTracePage
 from domain.tools import ToolCall, ToolResult
 
 
@@ -282,6 +283,7 @@ class ConversationHistoryPage:
     items: tuple[ConversationHistoryItem, ...]
     has_more: bool
     correlation: ConversationCorrelation
+    evaluations: EvaluationTracePage = EvaluationTracePage()
 
 
 @dataclass(frozen=True, slots=True)

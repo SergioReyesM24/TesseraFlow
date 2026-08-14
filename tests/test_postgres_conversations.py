@@ -13,10 +13,12 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
-from domain.costs import ModelCost
+from domain.costs import ModelCost, ModelUsage
+from domain.evaluations import EvaluationTrace
 from domain.tools import ToolCall, ToolResult
 from infrastructure.postgres_conversations import (
     INSERT_CONVERSATION,
+    INSERT_EVALUATION_TRACE,
     INSERT_ITEM,
     SELECT_CONVERSATION,
     SELECT_CONVERSATION_FOR_UPDATE,
@@ -24,6 +26,7 @@ from infrastructure.postgres_conversations import (
     SELECT_CONVERSATION_HISTORY,
     SELECT_CONVERSATION_SUMMARIES,
     SELECT_DAILY_TOKEN_USAGE,
+    SELECT_EVALUATION_TRACES,
     SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
     SELECT_SESSION_TOKEN_USAGE,
@@ -56,6 +59,7 @@ class FakePostgresConnection:
         self.group_rows: dict[str, list[dict[str, object]]] = {}
         self.daily_usage_rows: list[dict[str, object]] = []
         self.session_usage_rows: dict[str, list[dict[str, object]]] = {}
+        self.evaluation_traces: dict[str, list[dict[str, object]]] = {}
 
     def transaction(self) -> FakeTransaction:
         """Create a no-op transaction boundary."""
@@ -87,6 +91,9 @@ class FakePostgresConnection:
             ]
             rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
             return rows[offset : offset + limit]
+        if query == SELECT_EVALUATION_TRACES:
+            (limit,) = args
+            return self.evaluation_traces.get(conversation_id, [])[:limit]
         records = self.items.get(conversation_id, [])
         if query == SELECT_HISTORY_ITEMS:
             after_sequence, limit = args
@@ -131,6 +138,47 @@ class FakePostgresConnection:
             assert isinstance(conversation_id, str)
             self.conversations.pop(conversation_id, None)
             self.items.pop(conversation_id, None)
+            self.evaluation_traces.pop(conversation_id, None)
+        elif query == INSERT_EVALUATION_TRACE:
+            (
+                trace_id,
+                conversation_id,
+                turn_id,
+                job_id,
+                attempt,
+                proposed_call_ids,
+                verdict,
+                risk,
+                reason_code,
+                feedback,
+                mode,
+                executed,
+                model,
+                usage,
+                latency_ms,
+                created_at,
+            ) = args
+            assert isinstance(conversation_id, str)
+            self.evaluation_traces.setdefault(conversation_id, []).append(
+                {
+                    "id": trace_id,
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "proposed_call_ids": proposed_call_ids,
+                    "verdict": verdict,
+                    "risk": risk,
+                    "reason_code": reason_code,
+                    "feedback": feedback,
+                    "mode": mode,
+                    "executed": executed,
+                    "model": model,
+                    "usage": usage,
+                    "latency_ms": latency_ms,
+                    "created_at": created_at,
+                }
+            )
         else:
             raise AssertionError(f"Unexpected query: {query}")
         return "OK"
@@ -243,6 +291,38 @@ async def test_postgres_loads_paginated_technical_history_with_tool_records() ->
     assert second is not None
     assert second.has_more is False
     assert isinstance(second.items[0].item, ToolResult)
+
+
+async def test_postgres_persists_evaluation_traces_outside_conversation_items() -> None:
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.create(key())
+    created_at = datetime(2026, 7, 22, 10, 1, tzinfo=UTC)
+    trace = EvaluationTrace(
+        trace_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        conversation_id="conv-1",
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        attempt=1,
+        proposed_call_ids=("call-1",),
+        verdict="fail",
+        risk="low",
+        reason_code="wrong_tool",
+        feedback="Selecciona una herramienta adecuada.",
+        mode="enforce",
+        executed=False,
+        model="evaluation-model",
+        usage=ModelUsage(input_tokens=100, output_tokens=20),
+        latency_ms=125.5,
+        created_at=created_at,
+    )
+
+    await store.append_evaluation_trace(trace)
+    history = await store.load_history(key(), after_sequence=0, limit=50)
+
+    assert history is not None
+    assert history.evaluations.traces == (trace,)
+    assert history.items == ()
 
 
 async def test_postgres_history_enforces_conversation_ownership() -> None:
@@ -678,6 +758,7 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "REFERENCES conversations(id) ON DELETE CASCADE" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS a2a_threads" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS a2a_jobs" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS evaluation_traces" in combined_sql
     assert "CREATE TRIGGER interaction_command_notify_trigger" in combined_sql
     assert "CREATE TRIGGER interaction_output_notify_trigger" in combined_sql
     assert "CREATE TRIGGER a2a_job_notify_trigger" in combined_sql

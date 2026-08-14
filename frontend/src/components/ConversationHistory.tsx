@@ -6,6 +6,7 @@ import {
   MessageSquare,
   RefreshCw,
   Search,
+  ShieldCheck,
   Wrench,
 } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
@@ -22,6 +23,7 @@ import type {
   ConversationHistoryResponse,
   ConversationListResponse,
   DailyTokenUsageReport,
+  EvaluationTrace,
   SessionUsageReport,
 } from '../types'
 import { formatTimestamp } from '../lib/dates'
@@ -187,6 +189,39 @@ export function TurnRecords({ records }: { records: ConversationHistoryItem[] })
   })
 }
 
+export function EvaluationTraceCard({ trace }: { trace: EvaluationTrace }) {
+  const status = trace.executed ? 'Ejecutada' : 'Bloqueada'
+  return (
+    <article className={`history-evaluation history-evaluation-${trace.verdict}`}>
+      <header>
+        <span className="history-evaluation-icon" aria-hidden="true">
+          <ShieldCheck size={16} />
+        </span>
+        <strong>Evaluación #{trace.attempt}</strong>
+        <span className="history-evaluation-verdict">{trace.verdict}</span>
+        <small>{status}</small>
+      </header>
+      <dl>
+        <div><dt>Riesgo</dt><dd>{trace.risk}</dd></div>
+        <div><dt>Motivo</dt><dd>{trace.reason_code}</dd></div>
+        <div><dt>Modo</dt><dd>{trace.mode}</dd></div>
+        <div><dt>Modelo</dt><dd>{trace.model}</dd></div>
+        <div><dt>Latencia</dt><dd>{trace.latency_ms.toLocaleString('es-ES')} ms</dd></div>
+        <div><dt>Tokens</dt><dd>{trace.usage.total_tokens.toLocaleString('es-ES')}</dd></div>
+      </dl>
+      <div className="history-evaluation-calls">
+        <span>Tool call IDs</span>
+        {trace.proposed_call_ids.map((callId) => <code key={callId}>{callId}</code>)}
+      </div>
+      {trace.feedback && <p>{trace.feedback}</p>}
+      <footer>
+        <code>{trace.trace_id}</code>
+        <time>{formatTimestamp(trace.created_at)}</time>
+      </footer>
+    </article>
+  )
+}
+
 /** Show the token overview first and switch to a focused session KPI view on demand. */
 export function ConversationHistory({
   apiBaseUrl,
@@ -338,6 +373,23 @@ export function ConversationHistory({
     }
     return [...grouped.entries()]
   }, [history])
+
+  const evaluationsByTurn = useMemo(() => {
+    const grouped = new Map<string, EvaluationTrace[]>()
+    for (const trace of history?.evaluations ?? []) {
+      const traces = grouped.get(trace.turn_id) ?? []
+      traces.push(trace)
+      grouped.set(trace.turn_id, traces)
+    }
+    return grouped
+  }, [history])
+
+  const orphanEvaluations = useMemo(() => {
+    const persistedTurnIds = new Set(turns.map(([turnId]) => turnId))
+    return (history?.evaluations ?? []).filter(
+      (trace) => !persistedTurnIds.has(trace.turn_id),
+    )
+  }, [history, turns])
 
   const selectDailyRange = (days: number) => {
     setDailyUsageLoading(true)
@@ -655,7 +707,7 @@ export function ConversationHistory({
                     </dl>
                   </div>
 
-                  {turns.length === 0 ? (
+                  {turns.length === 0 && orphanEvaluations.length === 0 ? (
                     <div className="history-empty">
                       <Database size={24} />
                       <strong>La sesión todavía no tiene registros</strong>
@@ -671,11 +723,35 @@ export function ConversationHistory({
                             <small>{records.length} registros</small>
                           </header>
                           <div className="history-records">
+                            {(evaluationsByTurn.get(turnId) ?? []).map((trace) => (
+                              <EvaluationTraceCard key={trace.trace_id} trace={trace} />
+                            ))}
                             <TurnRecords records={records} />
                           </div>
                         </section>
                       ))}
+                      {orphanEvaluations.length > 0 && (
+                        <section className="history-turn history-evaluation-orphans">
+                          <header className="history-turn-header">
+                            <span>Evaluaciones sin turno persistido</span>
+                            <small>
+                              El turno fue bloqueado o terminó antes de guardarse.
+                            </small>
+                          </header>
+                          <div className="history-records">
+                            {orphanEvaluations.map((trace) => (
+                              <EvaluationTraceCard key={trace.trace_id} trace={trace} />
+                            ))}
+                          </div>
+                        </section>
+                      )}
                     </div>
+                  )}
+
+                  {history.evaluations_truncated && (
+                    <p className="history-evaluation-warning">
+                      Se muestran las 200 evaluaciones más antiguas de esta conversación.
+                    </p>
                   )}
 
                   {history.has_more && (

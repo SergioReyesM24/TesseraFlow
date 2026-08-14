@@ -7,8 +7,9 @@ from typing import ClassVar
 
 import pytest
 
-from application.agent import AgentService
+from application.agent import AgentService, ToolCallEvaluationRejectedError
 from application.conversations import ConversationConflictError, ConversationNotFoundError
+from application.evaluations import ToolCallEvaluationGate
 from application.tools import AgentTool, ToolArguments, ToolExecutionContext, ToolRegistry
 from domain.agent import AgentDefinition
 from domain.conversations import (
@@ -18,6 +19,7 @@ from domain.conversations import (
     ConversationMessage,
 )
 from domain.costs import ModelCostCalculator, ModelRates, ModelUsage
+from domain.evaluations import AgentStepEvaluation, AgentStepEvaluationRequest, EvaluationTrace
 from domain.model import ModelReply
 from domain.tools import (
     ToolCall,
@@ -202,15 +204,39 @@ class SampleTool(AgentTool[SampleToolArguments]):
     description = "Test-only deterministic tool."
     arguments_model: ClassVar[type[SampleToolArguments]] = SampleToolArguments
 
+    def __init__(self) -> None:
+        self.invocations: list[SampleToolArguments] = []
+
     async def execute(
         self,
         arguments: SampleToolArguments,
         context: ToolExecutionContext,
     ) -> object:
         del context
+        self.invocations.append(arguments)
         if arguments.error is not None:
             raise ValueError(arguments.error)
         return {"result": arguments.result}
+
+
+class StubStepEvaluator:
+    """Return deterministic judgments while retaining neutral evidence."""
+
+    def __init__(self, evaluations: list[AgentStepEvaluation]) -> None:
+        self.evaluations = deque(evaluations)
+        self.requests: list[AgentStepEvaluationRequest] = []
+
+    async def evaluate(self, request: AgentStepEvaluationRequest) -> AgentStepEvaluation:
+        self.requests.append(request)
+        return self.evaluations.popleft()
+
+
+class InMemoryEvaluationTraceRepository:
+    def __init__(self) -> None:
+        self.traces: list[EvaluationTrace] = []
+
+    async def append_evaluation_trace(self, trace: EvaluationTrace) -> None:
+        self.traces.append(trace)
 
 
 def conversation_key(conversation_id: str = "conversation-1") -> ConversationKey:
@@ -286,6 +312,352 @@ async def test_runs_and_captures_a_tool_call() -> None:
             source="assistant",
         ),
     )
+
+
+async def test_rejected_tool_call_is_revised_before_any_tool_executes() -> None:
+    """Feed a rejected batch back to the model and execute only its valid replacement."""
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(
+                    response_id="resp_bad",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_bad",
+                            tool_name="sample_tool",
+                            arguments={"result": "invented"},
+                        ),
+                    ),
+                ),
+                ModelReply(
+                    response_id="resp_fixed",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_fixed",
+                            tool_name="sample_tool",
+                            arguments={"result": "supported"},
+                        ),
+                    ),
+                ),
+                ModelReply(response_id="resp_done", text="Resultado comprobado"),
+            ]
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="fail",
+                risk="medium",
+                reason_code="ungrounded_arguments",
+                feedback="Use only arguments supported by the request.",
+                model="evaluation-model",
+                usage=ModelUsage(input_tokens=20, output_tokens=5),
+            ),
+            AgentStepEvaluation(
+                verdict="pass",
+                risk="low",
+                reason_code="none",
+                feedback="",
+                model="evaluation-model",
+                usage=ModelUsage(input_tokens=20, output_tokens=5),
+            ),
+        ]
+    )
+    tool = SampleTool()
+    repository = InMemoryConversationRepository()
+    traces = InMemoryEvaluationTraceRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([tool]),
+        repository,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="worker",
+            mode="enforce",
+            fail_open=False,
+        ),
+        evaluation_traces=traces,
+    )
+    await repository.create(conversation_key())
+
+    result = await service.run(
+        "Use a supported value",
+        agent_definition("sample_tool"),
+        conversation_key(),
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+
+    assert [arguments.result for arguments in tool.invocations] == ["supported"]
+    assert [record.call_id for record in result.tool_calls] == ["call_fixed"]
+    assert [call.model for call in result.metrics.calls] == [
+        "evaluation-model",
+        "evaluation-model",
+    ]
+    rejected_result = gateway.sessions[0].tool_result_batches[0][0]
+    assert rejected_result.call_id == "call_bad"
+    assert rejected_result.error is not None
+    assert '"code":"tool_call_rejected"' in rejected_result.error
+    assert evaluator.requests[1].context[-2:] == (
+        ToolCall(
+            call_id="call_bad",
+            tool_name="sample_tool",
+            arguments={"result": "invented"},
+        ),
+        rejected_result,
+    )
+    assert [trace.attempt for trace in traces.traces] == [1, 2]
+    assert [trace.executed for trace in traces.traces] == [False, True]
+    assert traces.traces[0].feedback == (
+        "Usa únicamente argumentos respaldados por el contexto disponible."
+    )
+    assert traces.traces[0].proposed_call_ids == ("call_bad",)
+    assert traces.traces[0].turn_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    assert traces.traces[0].job_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+async def test_shadow_evaluation_never_blocks_tool_execution() -> None:
+    """Collect a failing judgment without changing runtime behavior in shadow mode."""
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(
+                    response_id="resp_1",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_1",
+                            tool_name="sample_tool",
+                            arguments={"result": "value"},
+                        ),
+                    ),
+                ),
+                ModelReply(response_id="resp_2", text="Hecho"),
+            ]
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="fail",
+                risk="high",
+                reason_code="wrong_tool",
+                feedback="Choose another tool.",
+                model="evaluation-model",
+            )
+        ]
+    )
+    tool = SampleTool()
+    repository = InMemoryConversationRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([tool]),
+        repository,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="worker",
+            mode="shadow",
+            fail_open=False,
+        ),
+    )
+    await repository.create(conversation_key())
+
+    result = await service.run(
+        "Run it",
+        agent_definition("sample_tool"),
+        conversation_key(),
+    )
+
+    assert result.answer == "Hecho"
+    assert [arguments.result for arguments in tool.invocations] == ["value"]
+    assert len(gateway.sessions[0].tool_result_batches) == 1
+
+
+async def test_interactive_evaluation_trace_does_not_claim_a_worker_job_id() -> None:
+    """Correlate a root evaluation to its turn without inventing an A2A job identity."""
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(
+                    response_id="resp_1",
+                    text="",
+                    tool_calls=(
+                        ToolCall(
+                            call_id="call_delegate",
+                            tool_name="sample_tool",
+                            arguments={"result": "supported"},
+                        ),
+                    ),
+                ),
+                ModelReply(response_id="resp_2", text="Delegado"),
+            ]
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="pass",
+                risk="low",
+                reason_code="none",
+                feedback="",
+                model="evaluation-model",
+            )
+        ]
+    )
+    repository = InMemoryConversationRepository()
+    traces = InMemoryEvaluationTraceRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([SampleTool()]),
+        repository,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+        ),
+        evaluation_traces=traces,
+    )
+    await repository.create(conversation_key())
+
+    await service.run(
+        "Delega esta tarea",
+        agent_definition("sample_tool"),
+        conversation_key(),
+        turn_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+
+    assert len(traces.traces) == 1
+    assert traces.traces[0].turn_id == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    assert traces.traces[0].job_id is None
+
+
+async def test_interactive_revision_limit_becomes_a_user_facing_model_result() -> None:
+    """Stop internal repair and let the main agent explain a terminal policy outcome."""
+    rejected_calls = (
+        ToolCall(
+            call_id="call_delegate",
+            tool_name="sample_tool",
+            arguments={"result": "new-thread"},
+        ),
+        ToolCall(
+            call_id="call_continue",
+            tool_name="sample_tool",
+            arguments={"result": "wrong-thread"},
+        ),
+    )
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(response_id="resp_1", text="", tool_calls=(rejected_calls[0],)),
+                ModelReply(response_id="resp_2", text="", tool_calls=(rejected_calls[1],)),
+                ModelReply(
+                    response_id="resp_3",
+                    text="No he podido completar la operación. Puedes intentarlo de nuevo.",
+                ),
+            ]
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="fail",
+                risk="medium",
+                reason_code="wrong_tool",
+                feedback="Use the existing thread.",
+                model="evaluation-model",
+            )
+            for _ in rejected_calls
+        ]
+    )
+    tool = SampleTool()
+    repository = InMemoryConversationRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([tool]),
+        repository,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+            technical_failure_mode="feedback",
+        ),
+        max_tool_call_revisions=1,
+    )
+    await repository.create(conversation_key())
+
+    result = await service.run(
+        "Continúa el trabajo",
+        agent_definition("sample_tool"),
+        conversation_key(),
+    )
+
+    assert tool.invocations == []
+    assert result.answer.startswith("No he podido")
+    terminal_result = gateway.sessions[0].tool_result_batches[1][0]
+    assert terminal_result.error is not None
+    assert '"code":"tool_call_revision_limit_exceeded"' in terminal_result.error
+    assert '"disposition":"inform_user"' in terminal_result.error
+
+
+async def test_rejected_tool_calls_stop_after_the_revision_limit() -> None:
+    """Bound corrective loops and leave every rejected action unexecuted."""
+    rejected_calls = [
+        ToolCall(
+            call_id=f"call_{index}",
+            tool_name="sample_tool",
+            arguments={"result": f"value-{index}"},
+        )
+        for index in range(2)
+    ]
+    gateway = StubModelGateway(
+        [
+            [
+                ModelReply(response_id="resp_1", text="", tool_calls=(rejected_calls[0],)),
+                ModelReply(response_id="resp_2", text="", tool_calls=(rejected_calls[1],)),
+            ]
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="fail",
+                risk="medium",
+                reason_code="ungrounded_arguments",
+                feedback="Use supported arguments.",
+                model="evaluation-model",
+            )
+            for _ in rejected_calls
+        ]
+    )
+    tool = SampleTool()
+    repository = InMemoryConversationRepository()
+    service = AgentService(
+        gateway,
+        ToolRegistry([tool]),
+        repository,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="worker",
+            mode="enforce",
+            fail_open=False,
+        ),
+        max_tool_call_revisions=1,
+    )
+    await repository.create(conversation_key())
+
+    with pytest.raises(ToolCallEvaluationRejectedError):
+        await service.run(
+            "Use only grounded arguments",
+            agent_definition("sample_tool"),
+            conversation_key(),
+        )
+
+    assert tool.invocations == []
+    assert len(evaluator.requests) == 2
+    assert len(gateway.sessions[0].tool_result_batches) == 1
 
 
 async def test_aggregates_tool_round_costs_and_persists_them_on_the_turn() -> None:

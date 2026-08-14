@@ -4,7 +4,13 @@ from uuid import uuid4
 import structlog
 
 from application.conversations import ConversationNotFoundError
-from application.ports import ConversationRepository, ModelGateway
+from application.evaluations import (
+    ToolCallEvaluationGate,
+    ToolCallGateDecision,
+    append_evaluation_trace,
+    tool_call_revision_limit_results,
+)
+from application.ports import ConversationRepository, EvaluationTraceRepository, ModelGateway
 from application.tools import (
     ToolExecutionContext,
     ToolExecutor,
@@ -20,7 +26,7 @@ from domain.conversations import (
 )
 from domain.costs import ModelCallMetrics, ModelCostCalculator, ModelUsage, TurnMetrics
 from domain.interactions import InteractionSource
-from domain.tools import ToolCallRecord
+from domain.tools import ToolCall, ToolCallRecord, ToolSpec
 from domain.turn_events import (
     AgentAudioDelta,
     AgentAudioInterrupted,
@@ -52,6 +58,12 @@ class IncompleteModelStreamError(RuntimeError):
     pass
 
 
+class ToolCallEvaluationRejectedError(RuntimeError):
+    """Raised when an agent cannot repair a rejected tool-call batch."""
+
+    pass
+
+
 class AgentService:
     """Provider-neutral orchestration of model and tool interactions."""
 
@@ -62,6 +74,9 @@ class AgentService:
         conversations: ConversationRepository,
         *,
         max_tool_rounds: int = 8,
+        tool_call_gate: ToolCallEvaluationGate | None = None,
+        max_tool_call_revisions: int = 2,
+        evaluation_traces: EvaluationTraceRepository | None = None,
         cost_calculator: ModelCostCalculator | None = None,
     ) -> None:
         """Initialize the orchestrator with shared gateways and the tool catalog."""
@@ -69,6 +84,11 @@ class AgentService:
         self._tools = tools
         self._conversations = conversations
         self._max_tool_rounds = max_tool_rounds
+        self._tool_call_gate = tool_call_gate
+        if max_tool_call_revisions < 0:
+            raise ValueError("max_tool_call_revisions cannot be negative")
+        self._max_tool_call_revisions = max_tool_call_revisions
+        self._evaluation_traces = evaluation_traces
         self._cost_calculator = cost_calculator or ModelCostCalculator()
         self._tool_executor = ToolExecutor()
 
@@ -83,6 +103,7 @@ class AgentService:
     ) -> AgentResult:
         """Continue and persist one owned conversation after a complete model run."""
         conversation = await self._load_conversation(conversation_key)
+        effective_turn_id = turn_id or str(uuid4())
         selected_tools = self._tools.select(definition.tool_names)
         records: list[ToolCallRecord] = []
         visual_components: list[VisualPresentation] = []
@@ -105,15 +126,57 @@ class AgentService:
             reply = await session.send_message(message)
             self._capture_metrics(model_calls, definition.model, reply.usage)
 
-            for round_number in range(self._max_tool_rounds):
+            tool_rounds = 0
+            revisions = 0
+            evaluation_attempt = 0
+            terminal_rejection_sent = False
+            while reply.tool_calls:
+                if terminal_rejection_sent:
+                    raise ToolCallEvaluationRejectedError(
+                        "Agent requested another tool after a terminal evaluation result"
+                    )
                 logger.info(
                     "model_reply_received",
                     response_id=reply.response_id,
                     tool_call_count=len(reply.tool_calls),
-                    round=round_number,
+                    round=tool_rounds,
                 )
-                if not reply.tool_calls:
-                    break
+
+                evaluation_attempt += 1
+                decision = await self._inspect_tool_calls(
+                    context=conversation.messages + tuple(turn_items),
+                    specs=selected_tools.specs,
+                    calls=reply.tool_calls,
+                    model_calls=model_calls,
+                    conversation_key=conversation_key,
+                    turn_id=effective_turn_id,
+                    attempt=evaluation_attempt,
+                )
+                if decision is not None and not decision.execute:
+                    feedback_results = decision.feedback_results
+                    if decision.disposition == "inform_user":
+                        terminal_rejection_sent = True
+                    elif revisions >= self._max_tool_call_revisions:
+                        assert self._tool_call_gate is not None
+                        if self._tool_call_gate.role == "worker":
+                            raise ToolCallEvaluationRejectedError(
+                                "Agent could not repair rejected tool calls within the "
+                                "configured limit"
+                            )
+                        feedback_results = tool_call_revision_limit_results(reply.tool_calls)
+                        terminal_rejection_sent = True
+                    else:
+                        revisions += 1
+                    turn_items.extend(reply.tool_calls)
+                    turn_items.extend(feedback_results)
+                    reply = await session.send_tool_results(feedback_results)
+                    self._capture_metrics(model_calls, definition.model, reply.usage)
+                    continue
+
+                if tool_rounds >= self._max_tool_rounds:
+                    raise ToolRoundsExceededError(
+                        f"Agent exceeded {self._max_tool_rounds} tool rounds"
+                    )
 
                 execution = await self._tool_executor.execute(
                     reply.tool_calls,
@@ -124,13 +187,9 @@ class AgentService:
                 extend_visual_components(visual_components, execution.visual_components)
                 turn_items.extend(reply.tool_calls)
                 turn_items.extend(execution.results)
+                tool_rounds += 1
                 reply = await session.send_tool_results(execution.results)
                 self._capture_metrics(model_calls, definition.model, reply.usage)
-            else:
-                if reply.tool_calls:
-                    raise ToolRoundsExceededError(
-                        f"Agent exceeded {self._max_tool_rounds} tool rounds"
-                    )
 
         metrics = TurnMetrics(calls=tuple(model_calls))
         logger.info(
@@ -163,7 +222,7 @@ class AgentService:
         await self._persist_turn(
             conversation,
             tuple(turn_items),
-            turn_id=turn_id or str(uuid4()),
+            turn_id=effective_turn_id,
         )
         return result
 
@@ -178,6 +237,7 @@ class AgentService:
     ) -> AsyncGenerator[AgentStreamEvent, None]:
         """Stream one conversation turn and persist it before terminal success."""
         conversation = await self._load_conversation(conversation_key)
+        effective_turn_id = turn_id or str(uuid4())
         selected_tools = self._tools.select(definition.tool_names)
         records: list[ToolCallRecord] = []
         visual_components: list[VisualPresentation] = []
@@ -199,7 +259,11 @@ class AgentService:
             conversation.messages,
         ) as session:
             model_events = session.stream_message(message)
-            for round_number in range(self._max_tool_rounds + 1):
+            tool_rounds = 0
+            revisions = 0
+            evaluation_attempt = 0
+            terminal_rejection_sent = False
+            while True:
                 completed_reply = None
                 async for event in model_events:
                     if isinstance(event, ModelTextDelta):
@@ -229,7 +293,7 @@ class AgentService:
                     "model_stream_completed",
                     response_id=completed_reply.response_id,
                     tool_call_count=len(completed_reply.tool_calls),
-                    round=round_number,
+                    round=tool_rounds,
                 )
                 if not completed_reply.tool_calls:
                     metrics = TurnMetrics(calls=tuple(model_calls))
@@ -252,7 +316,7 @@ class AgentService:
                     await self._persist_turn(
                         conversation,
                         tuple(turn_items),
-                        turn_id=turn_id or str(uuid4()),
+                        turn_id=effective_turn_id,
                     )
                     logger.info(
                         "agent_stream_completed",
@@ -265,14 +329,49 @@ class AgentService:
                         cost_amount=(
                             str(metrics.cost.amount) if metrics.cost is not None else None
                         ),
-                        cost_currency=(
-                            metrics.cost.currency if metrics.cost is not None else None
-                        ),
+                        cost_currency=(metrics.cost.currency if metrics.cost is not None else None),
                     )
                     yield AgentStreamCompleted(result=result)
                     return
 
-                if round_number == self._max_tool_rounds:
+                if terminal_rejection_sent:
+                    raise ToolCallEvaluationRejectedError(
+                        "Agent requested another tool after a terminal evaluation result"
+                    )
+
+                evaluation_attempt += 1
+                decision = await self._inspect_tool_calls(
+                    context=conversation.messages + tuple(turn_items),
+                    specs=selected_tools.specs,
+                    calls=completed_reply.tool_calls,
+                    model_calls=model_calls,
+                    conversation_key=conversation_key,
+                    turn_id=effective_turn_id,
+                    attempt=evaluation_attempt,
+                )
+                if decision is not None and not decision.execute:
+                    feedback_results = decision.feedback_results
+                    if decision.disposition == "inform_user":
+                        terminal_rejection_sent = True
+                    elif revisions >= self._max_tool_call_revisions:
+                        assert self._tool_call_gate is not None
+                        if self._tool_call_gate.role == "worker":
+                            raise ToolCallEvaluationRejectedError(
+                                "Agent could not repair rejected tool calls within the "
+                                "configured limit"
+                            )
+                        feedback_results = tool_call_revision_limit_results(
+                            completed_reply.tool_calls
+                        )
+                        terminal_rejection_sent = True
+                    else:
+                        revisions += 1
+                    turn_items.extend(completed_reply.tool_calls)
+                    turn_items.extend(feedback_results)
+                    model_events = session.stream_tool_results(feedback_results)
+                    continue
+
+                if tool_rounds >= self._max_tool_rounds:
                     raise ToolRoundsExceededError(
                         f"Agent exceeded {self._max_tool_rounds} tool rounds"
                     )
@@ -288,6 +387,7 @@ class AgentService:
                 extend_visual_components(visual_components, execution.visual_components)
                 turn_items.extend(completed_reply.tool_calls)
                 turn_items.extend(execution.results)
+                tool_rounds += 1
                 for record in execution.records:
                     yield AgentToolCompleted(record=record)
                 for presentation in execution.visual_components:
@@ -306,6 +406,42 @@ class AgentService:
         if usage.total_tokens == 0:
             return
         calls.append(self._cost_calculator.metrics(model, usage))
+
+    async def _inspect_tool_calls(
+        self,
+        *,
+        context: tuple[ConversationItem, ...],
+        specs: tuple[ToolSpec, ...],
+        calls: tuple[ToolCall, ...],
+        model_calls: list[ModelCallMetrics],
+        conversation_key: ConversationKey,
+        turn_id: str,
+        attempt: int,
+    ) -> ToolCallGateDecision | None:
+        """Evaluate one normalized batch and include evaluator usage in turn metrics."""
+        if self._tool_call_gate is None:
+            return None
+        decision = await self._tool_call_gate.inspect(
+            context=context,
+            available_tools=specs,
+            proposed_calls=calls,
+        )
+        if decision.evaluation is not None:
+            self._capture_metrics(
+                model_calls,
+                decision.evaluation.model,
+                decision.evaluation.usage,
+            )
+            await append_evaluation_trace(
+                self._evaluation_traces,
+                decision=decision,
+                conversation_id=conversation_key.conversation_id,
+                turn_id=turn_id,
+                job_id=turn_id if self._tool_call_gate.role == "worker" else None,
+                attempt=attempt,
+                calls=calls,
+            )
+        return decision
 
     async def _load_conversation(self, key: ConversationKey) -> Conversation:
         """Load an explicitly created conversation before invoking the model."""

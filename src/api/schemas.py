@@ -17,6 +17,7 @@ from domain.conversations import (
     SessionUsageReport,
 )
 from domain.costs import ModelUsage, TurnMetrics
+from domain.evaluations import EvaluationTrace
 from domain.tools import ToolCall, ToolResult
 from domain.visuals import visual_presentation_payload
 
@@ -556,6 +557,57 @@ class ConversationListResponse(BaseModel):
         )
 
 
+class EvaluationTraceResponse(DateFormattedResponse):
+    """Safe evaluator audit record exposed without provider prompts or raw feedback."""
+
+    trace_id: UUID
+    conversation_id: UUID
+    turn_id: UUID
+    job_id: UUID | None
+    attempt: int
+    proposed_call_ids: list[str]
+    verdict: Literal["pass", "fail", "uncertain"]
+    risk: Literal["low", "medium", "high"]
+    reason_code: Literal[
+        "none",
+        "wrong_tool",
+        "unnecessary_tool",
+        "ungrounded_arguments",
+        "duplicate_action",
+        "unsafe_side_effect",
+        "incomplete_request",
+        "other",
+    ]
+    feedback: str
+    mode: Literal["shadow", "enforce"]
+    executed: bool
+    model: str
+    usage: ModelUsageResponse
+    latency_ms: float
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, trace: EvaluationTrace) -> "EvaluationTraceResponse":
+        return cls(
+            trace_id=UUID(trace.trace_id),
+            conversation_id=UUID(trace.conversation_id),
+            turn_id=UUID(trace.turn_id),
+            job_id=UUID(trace.job_id) if trace.job_id is not None else None,
+            attempt=trace.attempt,
+            proposed_call_ids=list(trace.proposed_call_ids),
+            verdict=trace.verdict,
+            risk=trace.risk,
+            reason_code=trace.reason_code,
+            feedback=trace.feedback,
+            mode=trace.mode,
+            executed=trace.executed,
+            model=trace.model,
+            usage=ModelUsageResponse.from_domain(trace.usage),
+            latency_ms=round(trace.latency_ms, 2),
+            created_at=trace.created_at,
+        )
+
+
 class ConversationHistoryResponse(DateFormattedResponse):
     """Paginated technical history for an owner-scoped conversation session."""
 
@@ -569,6 +621,8 @@ class ConversationHistoryResponse(DateFormattedResponse):
     updated_at: datetime
     last_message_at: datetime | None
     items: list[ConversationHistoryItemResponse]
+    evaluations: list[EvaluationTraceResponse]
+    evaluations_truncated: bool
     has_more: bool
     next_after_sequence: int | None
     correlation: ConversationCorrelationResponse
@@ -625,6 +679,11 @@ class ConversationHistoryResponse(DateFormattedResponse):
             updated_at=history.updated_at,
             last_message_at=history.last_message_at,
             items=items,
+            evaluations=[
+                EvaluationTraceResponse.from_domain(trace)
+                for trace in history.evaluations.traces
+            ],
+            evaluations_truncated=history.evaluations.truncated,
             has_more=history.has_more,
             next_after_sequence=next_sequence,
             correlation=ConversationCorrelationResponse.from_domain(history.correlation),
