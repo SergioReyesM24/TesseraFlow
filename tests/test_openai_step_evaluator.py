@@ -46,6 +46,7 @@ async def test_openai_evaluator_uses_structured_outputs_and_neutral_payload() ->
         model="evaluation-model",
         instructions="Evaluate tool calls",
         timeout_seconds=1,
+        reasoning_effort="none",
     )
     request = AgentStepEvaluationRequest(
         role="worker",
@@ -68,6 +69,7 @@ async def test_openai_evaluator_uses_structured_outputs_and_neutral_payload() ->
     assert result.usage.cached_input_tokens == 10
     assert result.usage.reasoning_tokens == 2
     assert client.responses.kwargs["model"] == "evaluation-model"
+    assert client.responses.kwargs["reasoning"]["effort"] == "none"
     assert client.responses.kwargs["store"] is False
     payload = json.loads(client.responses.kwargs["input"][0]["content"])
     assert payload["protocol"] == "tesseraflow.tool_call_evaluation"

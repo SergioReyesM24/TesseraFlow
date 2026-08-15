@@ -68,28 +68,37 @@ WHERE conversation.id = $1
 """
 
 SELECT_CONVERSATION_SUMMARIES = """
-SELECT conversation.id, conversation.user_id, conversation.title, conversation.status,
-       conversation.version, conversation.last_sequence, conversation.created_at,
-       conversation.updated_at, conversation.last_message_at,
-       NULL::TEXT AS parent_conversation_id,
-       NULL::TEXT AS worker_conversation_id,
-       NULL::TEXT AS thread_id
-FROM conversations AS conversation
-WHERE conversation.user_id = $1
-  AND EXISTS (
-      SELECT 1
-      FROM conversation_items AS item
-      WHERE item.conversation_id = conversation.id
-        AND item.item_type = 'message'
-  )
-  AND NOT EXISTS (
-      SELECT 1
-      FROM a2a_threads AS relation
-      WHERE relation.worker_conversation_id = conversation.id
-  )
-ORDER BY conversation.updated_at DESC, conversation.id DESC
-OFFSET $2
-LIMIT $3
+WITH eligible AS (
+    SELECT conversation.id, conversation.user_id, conversation.title, conversation.status,
+           conversation.version, conversation.last_sequence, conversation.created_at,
+           conversation.updated_at, conversation.last_message_at,
+           NULL::TEXT AS parent_conversation_id,
+           NULL::TEXT AS worker_conversation_id,
+           NULL::TEXT AS thread_id
+    FROM conversations AS conversation
+    WHERE conversation.user_id = $1
+      AND EXISTS (
+          SELECT 1
+          FROM conversation_items AS item
+          WHERE item.conversation_id = conversation.id
+            AND item.item_type = 'message'
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM a2a_threads AS relation
+          WHERE relation.worker_conversation_id = conversation.id
+      )
+), page AS (
+    SELECT *
+    FROM eligible
+    ORDER BY updated_at DESC, id DESC
+    OFFSET $2
+    LIMIT $3
+)
+SELECT page.*, totals.total_count
+FROM (SELECT COUNT(*)::BIGINT AS total_count FROM eligible) AS totals
+LEFT JOIN page ON TRUE
+ORDER BY page.updated_at DESC NULLS LAST, page.id DESC NULLS LAST
 """
 
 SELECT_CONVERSATION_GROUP = """
@@ -471,20 +480,27 @@ class PostgresConversationRepository(ConversationRepository):
                 SELECT_CONVERSATION_SUMMARIES,
                 user_id,
                 offset,
-                limit + 1,
+                limit,
             )
-        visible_rows = rows[:limit]
         try:
+            total = int(rows[0]["total_count"]) if rows else 0
             sessions = tuple(
-                self._summary_from_row(row, expected_user_id=user_id) for row in visible_rows
+                self._summary_from_row(row, expected_user_id=user_id)
+                for row in rows
+                if row["id"] is not None
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise InvalidPostgresConversationDataError(
                 "Canonical conversation summary data is invalid"
             ) from exc
+        if total < 0 or len(sessions) > total:
+            raise InvalidPostgresConversationDataError(
+                "Canonical conversation summary total is invalid"
+            )
         return ConversationListPage(
             sessions=sessions,
-            has_more=len(rows) > limit,
+            total=total,
+            has_more=offset + len(sessions) < total,
         )
 
     async def append_evaluation_trace(self, trace: EvaluationTrace) -> None:

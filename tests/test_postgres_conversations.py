@@ -90,7 +90,11 @@ class FakePostgresConnection:
                 if row["user_id"] == conversation_id and bool(self.items.get(item_id))
             ]
             rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
-            return rows[offset : offset + limit]
+            total = len(rows)
+            page = rows[offset : offset + limit]
+            if not page:
+                return [{"id": None, "total_count": total}]
+            return [{**row, "total_count": total} for row in page]
         if query == SELECT_EVALUATION_TRACES:
             (limit,) = args
             return self.evaluation_traces.get(conversation_id, [])[:limit]
@@ -369,11 +373,17 @@ async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
 
     first = await store.list_sessions("user-1", offset=0, limit=1)
     second = await store.list_sessions("user-1", offset=1, limit=1)
+    beyond_last = await store.list_sessions("user-1", offset=10, limit=1)
 
     assert [item.key.conversation_id for item in first.sessions] == ["conv-2"]
+    assert first.total == 2
     assert first.has_more is True
     assert [item.key.conversation_id for item in second.sessions] == ["conv-1"]
+    assert second.total == 2
     assert second.has_more is False
+    assert beyond_last.sessions == ()
+    assert beyond_last.total == 2
+    assert beyond_last.has_more is False
     assert "FROM conversation_items AS item" in SELECT_CONVERSATION_SUMMARIES
     assert "item.item_type = 'message'" in SELECT_CONVERSATION_SUMMARIES
     assert "NOT EXISTS" in SELECT_CONVERSATION_SUMMARIES

@@ -125,7 +125,14 @@ class ConversationListPage:
     """Bounded page of persisted conversation summaries."""
 
     sessions: tuple[ConversationSummary, ...]
+    total: int
     has_more: bool
+
+    def __post_init__(self) -> None:
+        if self.total < 0:
+            raise ValueError("Conversation total cannot be negative")
+        if len(self.sessions) > self.total:
+            raise ValueError("Conversation page cannot contain more sessions than its total")
 
 
 @dataclass(frozen=True, slots=True)

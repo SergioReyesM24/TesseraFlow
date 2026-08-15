@@ -62,6 +62,7 @@ describe('API URL composition', () => {
     const payload = {
       user_id: 'user-1',
       sessions: [],
+      total: 0,
       has_more: false,
       next_offset: null,
     }

@@ -527,8 +527,9 @@ ejecución y una conversación atraviesa muchas de esas sesiones. Un UID descono
 produce `404` y un UID de otro propietario produce `403`.
 
 La API deriva la agrupación desde `a2a_threads`; no almacena otro identificador raíz. El
-listado de sesiones devuelve solo conversaciones principales. Tanto sus elementos como el
-historial incluyen una proyección `correlation`, y
+listado paginado de sesiones devuelve solo conversaciones principales y expone `total` junto
+con `has_more` y `next_offset`, de modo que el cliente puede calcular la última página sin
+cargar las anteriores. Tanto sus elementos como el historial incluyen una proyección `correlation`, y
 `GET /v1/sessions/{session_uid}/group` acepta el ID principal o uno interno y devuelve el
 grupo completo sin mezclar historiales. Los identificadores tienen esta semántica:
 
@@ -891,7 +892,8 @@ el entorno sin modificar los archivos versionados.
 | `OPENAI_REALTIME_REASONING_EFFORT` | inferido | Esfuerzo de razonamiento opcional del modelo realtime. |
 | `WORKER_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente de trabajo. |
 | `EVALUATION_PROVIDER` | `openai` | Adaptador del evaluador de tool calls. |
-| `EVALUATION_MODEL` | `gpt-5-mini` | Modelo pequeño usado por el evaluador. |
+| `EVALUATION_MODEL` | `gpt-5.4-mini` | Modelo pequeño usado por el evaluador. |
+| `EVALUATION_REASONING_EFFORT` | `none` | Esfuerzo de razonamiento del evaluador OpenAI. |
 | `INTERACTIVE_TOOL_EVALUATION_MODE` | `off` | Evaluador del agente textual y realtime: `off`, `shadow` o `enforce`. |
 | `INTERACTIVE_TOOL_EVALUATION_TIMEOUT_SECONDS` | `15` | Presupuesto de cada evaluación interactiva. |
 | `INTERACTIVE_TOOL_EVALUATION_MAX_REVISIONS` | `2` | Lotes rechazados que el agente principal puede revisar. |

@@ -112,7 +112,10 @@ class Settings(BaseSettings):
     openai_realtime_language_code: str | None = None
     openai_realtime_reasoning_effort: str | None = None
     worker_agent_model: str = "gpt-5-mini"
-    evaluation_model: str = "gpt-5-mini"
+    evaluation_model: str = "gpt-5.4-mini"
+    evaluation_reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = "none"
     interactive_tool_evaluation_mode: Literal["off", "shadow", "enforce"] = "off"
     interactive_tool_evaluation_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     interactive_tool_evaluation_max_revisions: int = Field(default=2, ge=0, le=10)

@@ -305,6 +305,7 @@ export interface ConversationSummary {
 export interface ConversationListResponse {
   user_id: string
   sessions: ConversationSummary[]
+  total: number
   has_more: boolean
   next_offset: number | null
 }

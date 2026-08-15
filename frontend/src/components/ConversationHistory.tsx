@@ -2,6 +2,8 @@ import {
   ArrowLeft,
   Bot,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Database,
   MessageSquare,
   RefreshCw,
@@ -27,6 +29,7 @@ import type {
   SessionUsageReport,
 } from '../types'
 import { formatTimestamp } from '../lib/dates'
+import { buildCompactPagination } from '../lib/pagination'
 import { DailyTokenAnalytics } from './DailyTokenAnalytics'
 import { SessionCostAnalytics } from './SessionCostAnalytics'
 import { TokenUsage } from './TokenUsage'
@@ -38,6 +41,89 @@ interface ConversationHistoryProps {
 }
 
 type HistoryMode = 'overview' | 'session'
+
+const SESSION_PAGE_SIZE = 4
+
+interface SessionPaginationProps {
+  offset: number
+  itemCount: number
+  totalItems: number
+  loading: boolean
+  onPageChange: (page: number) => void
+}
+
+/** Navigate bounded backend pages without accumulating every session in the browser. */
+export function SessionPagination({
+  offset,
+  itemCount,
+  totalItems,
+  loading,
+  onPageChange,
+}: SessionPaginationProps) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / SESSION_PAGE_SIZE))
+  const page = Math.min(Math.floor(offset / SESSION_PAGE_SIZE) + 1, totalPages)
+  const firstVisible = itemCount > 0 ? offset + 1 : 0
+  const lastVisible = offset + itemCount
+  const paginationItems = buildCompactPagination(page, totalPages)
+
+  return (
+    <nav className="history-session-pagination" aria-label="Paginación de sesiones">
+      <span className="history-pagination-status" aria-live="polite">
+        <strong>Página {page} de {totalPages}</strong>
+        <small>
+          {loading
+            ? 'Cargando sesiones…'
+            : itemCount > 0
+            ? `Sesiones ${firstVisible}–${lastVisible} de ${totalItems}`
+            : 'Sin sesiones en esta página'}
+        </small>
+      </span>
+      <span className="history-pagination-actions">
+        <button
+          className="history-pagination-arrow"
+          type="button"
+          disabled={loading || page === 1}
+          onClick={() => onPageChange(page - 1)}
+          aria-label="Ir a la página anterior"
+        >
+          <ChevronLeft size={15} aria-hidden="true" />
+        </button>
+        {paginationItems.map((item) => {
+          if (typeof item !== 'number') {
+            return <span className="history-pagination-ellipsis" key={item} aria-hidden="true">…</span>
+          }
+          const edgeLabel = item === 1
+            ? 'Ir a la primera página'
+            : item === totalPages
+              ? 'Ir a la última página'
+              : `Ir a la página ${item}`
+          return (
+            <button
+              className={item === page ? 'active' : ''}
+              type="button"
+              disabled={loading}
+              onClick={() => onPageChange(item)}
+              aria-label={edgeLabel}
+              aria-current={item === page ? 'page' : undefined}
+              key={item}
+            >
+              {item}
+            </button>
+          )
+        })}
+        <button
+          className="history-pagination-arrow"
+          type="button"
+          disabled={loading || page === totalPages}
+          onClick={() => onPageChange(page + 1)}
+          aria-label="Ir a la página siguiente"
+        >
+          <ChevronRight size={15} aria-hidden="true" />
+        </button>
+      </span>
+    </nav>
+  )
+}
 
 /** Render arbitrary JSON tool inputs and outputs without losing nested structure. */
 function JsonBlock({ value }: { value: unknown }) {
@@ -234,8 +320,9 @@ export function ConversationHistory({
   const [selectedConversationUid, setSelectedConversationUid] = useState<string | null>(null)
   const [reloadCount, setReloadCount] = useState(0)
   const [sessionList, setSessionList] = useState<ConversationListResponse | null>(null)
+  const [sessionTotal, setSessionTotal] = useState(0)
+  const [sessionOffset, setSessionOffset] = useState(0)
   const [listLoading, setListLoading] = useState(true)
-  const [listLoadingMore, setListLoadingMore] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
   const [dailyRange, setDailyRange] = useState(7)
   const [dailyUsage, setDailyUsage] = useState<DailyTokenUsageReport | null>(null)
@@ -272,8 +359,17 @@ export function ConversationHistory({
 
   useEffect(() => {
     const controller = new AbortController()
-    void listConversationSessions(apiBaseUrl, userId, 0, 50, controller.signal)
-      .then(setSessionList)
+    void listConversationSessions(
+      apiBaseUrl,
+      userId,
+      sessionOffset,
+      SESSION_PAGE_SIZE,
+      controller.signal,
+    )
+      .then((page) => {
+        setSessionList(page)
+        setSessionTotal(page.total)
+      })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return
         setListError(
@@ -284,7 +380,7 @@ export function ConversationHistory({
         if (!controller.signal.aborted) setListLoading(false)
       })
     return () => controller.abort()
-  }, [apiBaseUrl, userId])
+  }, [apiBaseUrl, sessionOffset, userId])
 
   useEffect(() => {
     if (mode !== 'session' || !targetSessionUid) {
@@ -445,24 +541,13 @@ export function ConversationHistory({
     setSelectedConversationUid(conversationId)
   }
 
-  const loadMoreSessions = async () => {
-    if (!sessionList?.has_more || sessionList.next_offset === null) return
-    setListLoadingMore(true)
+  const changeSessionPage = (page: number) => {
+    const offset = (page - 1) * SESSION_PAGE_SIZE
+    if (offset < 0 || offset === sessionOffset) return
+    setListLoading(true)
     setListError(null)
-    try {
-      const next = await listConversationSessions(
-        apiBaseUrl,
-        userId,
-        sessionList.next_offset,
-      )
-      setSessionList({ ...next, sessions: [...sessionList.sessions, ...next.sessions] })
-    } catch (reason) {
-      setListError(
-        reason instanceof Error ? reason.message : 'No se pudo cargar la página siguiente.',
-      )
-    } finally {
-      setListLoadingMore(false)
-    }
+    setSessionList(null)
+    setSessionOffset(offset)
   }
 
   /** Append the next canonical page while retaining already visible turns. */
@@ -494,6 +579,12 @@ export function ConversationHistory({
       setHistoryLoadingMore(false)
     }
   }
+
+  const sessionPageCount = Math.max(1, Math.ceil(sessionTotal / SESSION_PAGE_SIZE))
+  const visibleSessionPage = Math.min(
+    Math.floor(sessionOffset / SESSION_PAGE_SIZE) + 1,
+    sessionPageCount,
+  )
 
   return (
     <section className="history-view">
@@ -555,7 +646,7 @@ export function ConversationHistory({
                 </div>
                 <span>
                   {listLoading && <RefreshCw className="spin" size={14} aria-label="Cargando" />}
-                  {sessionList?.sessions.length ?? 0} cargadas
+                  Página {visibleSessionPage} de {sessionPageCount}
                 </span>
               </header>
 
@@ -563,7 +654,7 @@ export function ConversationHistory({
               {sessionList?.sessions.length === 0 && !listLoading && (
                 <div className="history-list-empty">No hay sesiones para este usuario.</div>
               )}
-              <div className="history-session-list">
+              <div className="history-session-list" aria-busy={listLoading}>
                 {sessionList?.sessions.map((session) => {
                   const isActive = session.session_uid === targetSessionUid
                   return (
@@ -586,20 +677,14 @@ export function ConversationHistory({
                   )
                 })}
               </div>
-              {sessionList?.has_more && (
-                <button
-                  className="history-list-more"
-                  type="button"
-                  disabled={listLoadingMore}
-                  onClick={() => void loadMoreSessions()}
-                >
-                  {listLoadingMore ? (
-                    <RefreshCw className="spin" size={14} />
-                  ) : (
-                    <ChevronDown size={14} />
-                  )}
-                  Más sesiones
-                </button>
+              {(sessionOffset > 0 || sessionTotal > SESSION_PAGE_SIZE) && (
+                <SessionPagination
+                  offset={sessionOffset}
+                  itemCount={sessionList?.sessions.length ?? 0}
+                  totalItems={sessionTotal}
+                  loading={listLoading}
+                  onPageChange={changeSessionPage}
+                />
               )}
             </section>
           </>

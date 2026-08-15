@@ -205,6 +205,7 @@ class StubConversationHistoryService:
                     ),
                 ),
             ),
+            total=1,
             has_more=False,
         )
 
@@ -660,6 +661,7 @@ async def test_session_list_exposes_clickable_conversation_summaries() -> None:
                 },
             }
         ],
+        "total": 1,
         "has_more": False,
         "next_offset": None,
     }

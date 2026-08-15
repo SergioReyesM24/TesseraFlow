@@ -54,6 +54,15 @@ def test_default_prompts_are_loaded_from_versioned_markdown_files() -> None:
     assert "textual explanation" in DEFAULT_AGENT_INSTRUCTIONS
     assert "delegate_to_worker_agent" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
     assert "continue_worker_agent" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    assert "immediate orchestration boundary" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "downstream execution data is not `incomplete_request`" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "send a Bizum of 10 EUR to their mother" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
     assert "revise_silently" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
     assert "tool_call_evaluation_unavailable" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
 
@@ -93,7 +102,8 @@ def test_endpoint_and_worker_models_have_independent_provider_settings() -> None
     assert settings.interactive_tool_evaluation_mode == "shadow"
     assert settings.worker_tool_evaluation_mode == "off"
     assert settings.evaluation_provider == "openai"
-    assert settings.evaluation_model == "gpt-5-mini"
+    assert settings.evaluation_model == "gpt-5.4-mini"
+    assert settings.evaluation_reasoning_effort == "none"
     assert settings.gemini_api_key == "gemini-key"
     assert settings.openai_api_key == "openai-key"
     assert settings.openai_realtime_voice_name == "marin"

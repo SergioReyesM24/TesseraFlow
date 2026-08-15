@@ -523,6 +523,7 @@ class ConversationListResponse(BaseModel):
 
     user_id: str
     sessions: list[ConversationSummaryResponse]
+    total: int
     has_more: bool
     next_offset: int | None
 
@@ -552,6 +553,7 @@ class ConversationListResponse(BaseModel):
         return cls(
             user_id=user_id,
             sessions=sessions,
+            total=page.total,
             has_more=page.has_more,
             next_offset=offset + len(sessions) if page.has_more else None,
         )

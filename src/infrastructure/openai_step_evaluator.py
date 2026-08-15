@@ -4,6 +4,7 @@ from typing import Literal
 
 import structlog
 from openai import AsyncOpenAI
+from openai.types.shared_params.reasoning import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
 from application.ports import AgentStepEvaluator
@@ -50,11 +51,15 @@ class OpenAIToolCallEvaluator(AgentStepEvaluator):
         model: str,
         instructions: str,
         timeout_seconds: float,
+        reasoning_effort: Literal[
+            "none", "minimal", "low", "medium", "high", "xhigh", "max"
+        ],
     ) -> None:
         self._client = client
         self._model = model
         self._instructions = instructions
         self._timeout_seconds = timeout_seconds
+        self._reasoning_effort = reasoning_effort
 
     async def evaluate(self, request: AgentStepEvaluationRequest) -> AgentStepEvaluation:
         """Send bounded neutral evidence and normalize one structured judgment."""
@@ -67,6 +72,7 @@ class OpenAIToolCallEvaluator(AgentStepEvaluator):
         logger.info(
             "openai_tool_call_evaluation_started",
             model=self._model,
+            reasoning_effort=self._reasoning_effort,
             role=request.role,
             context_item_count=len(request.context),
             tool_count=len(request.available_tools),
@@ -77,6 +83,7 @@ class OpenAIToolCallEvaluator(AgentStepEvaluator):
                 model=self._model,
                 instructions=self._instructions,
                 input=[{"role": "user", "content": payload}],
+                reasoning=Reasoning(effort=self._reasoning_effort),
                 text_format=_OpenAIToolCallEvaluation,
                 store=False,
             )

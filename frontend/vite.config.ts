@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
-      allowedHosts: ['44f4-79-145-199-116.ngrok-free.app'],
+      allowedHosts: ['64aa-79-145-199-116.ngrok-free.app'],
       port: 5173,
       proxy: {
         '/v1': {

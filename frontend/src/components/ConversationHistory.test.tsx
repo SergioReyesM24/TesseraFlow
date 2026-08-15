@@ -1,7 +1,12 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ConversationHistoryItem, EvaluationTrace } from '../types'
-import { EvaluationTraceCard, HistoryRecord, TurnRecords } from './ConversationHistory'
+import {
+  EvaluationTraceCard,
+  HistoryRecord,
+  SessionPagination,
+  TurnRecords,
+} from './ConversationHistory'
 
 function messageRecord(role: 'user' | 'assistant'): ConversationHistoryItem {
   return {
@@ -19,6 +24,53 @@ function messageRecord(role: 'user' | 'assistant'): ConversationHistoryItem {
 }
 
 describe('technical history records', () => {
+  it('renders a bounded session page with accessible navigation', () => {
+    const markup = renderToStaticMarkup(
+      <SessionPagination
+        offset={4}
+        itemCount={4}
+        totalItems={10}
+        loading={false}
+        onPageChange={() => undefined}
+      />,
+    )
+
+    expect(markup).toContain('Página 2 de 3')
+    expect(markup).toContain('Sesiones 5–8 de 10')
+    expect(markup).toContain('Ir a la primera página')
+    expect(markup).toContain('Ir a la última página')
+    expect(markup).toContain('aria-current="page"')
+    expect(markup).not.toContain('disabled=""')
+  })
+
+  it('disables unavailable session pagination directions', () => {
+    const firstPage = renderToStaticMarkup(
+      <SessionPagination
+        offset={0}
+        itemCount={4}
+        totalItems={10}
+        loading={false}
+        onPageChange={() => undefined}
+      />,
+    )
+    const lastPage = renderToStaticMarkup(
+      <SessionPagination
+        offset={8}
+        itemCount={2}
+        totalItems={10}
+        loading={false}
+        onPageChange={() => undefined}
+      />,
+    )
+
+    expect(firstPage).toContain(
+      'disabled="" aria-label="Ir a la página anterior"',
+    )
+    expect(lastPage).toContain(
+      'disabled="" aria-label="Ir a la página siguiente"',
+    )
+  })
+
   it('renders a persisted evaluator decision without raw conversation evidence', () => {
     const trace: EvaluationTrace = {
       trace_id: 'trace-1',

@@ -1,5 +1,6 @@
 import { SlidersHorizontal } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { BrandMark } from './components/BrandMark'
 import { SettingsDialog, type ThemeMode, Workspace } from './components/Workspace'
 import { createSession } from './lib/api'
 import type { Mode } from './types'
@@ -112,7 +113,7 @@ export default function App() {
     return (
       <main className="session-gate">
         <div className="gate-card">
-          <div className="brand-mark large" aria-hidden="true">T</div>
+          <BrandMark large />
           <span className="eyebrow">TesseraFlow</span>
           <h1>{creatingSession ? 'Preparando tu conversación' : 'No pudimos conectar'}</h1>
           <p>

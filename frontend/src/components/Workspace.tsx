@@ -25,6 +25,7 @@ import {
 import { useAgentSocket } from '../hooks/useAgentSocket'
 import { useRealtimeSocket } from '../hooks/useRealtimeSocket'
 import type { Mode } from '../types'
+import { BrandMark } from './BrandMark'
 import { Composer } from './Composer'
 import { ConversationHistory } from './ConversationHistory'
 import { MessageList } from './MessageList'
@@ -338,22 +339,11 @@ export function Workspace({
     >
       <aside className="sidebar">
         <div className="brand-row">
-          <div className="brand-mark" aria-hidden="true">T</div>
+          <BrandMark />
           <div className="brand-copy">
             <strong>TesseraFlow</strong>
             <span>Agente multimodal</span>
           </div>
-          <button
-            className="sidebar-collapse-toggle"
-            type="button"
-            aria-label={navigationExpanded ? 'Contraer navegación' : 'Desplegar navegación'}
-            aria-expanded={navigationExpanded}
-            title={navigationExpanded ? 'Contraer navegación' : 'Desplegar navegación'}
-            onClick={toggleNavigation}
-          >
-            {navigationExpanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
-            <span>{navigationExpanded ? 'Contraer' : 'Menú'}</span>
-          </button>
         </div>
 
         <button
@@ -414,6 +404,17 @@ export function Workspace({
           <span>Sesión activa</span>
           <code title={sessionUid}>{sessionUid.slice(0, 8)}…{sessionUid.slice(-4)}</code>
         </div>
+        <button
+          className="sidebar-collapse-toggle"
+          type="button"
+          aria-label={navigationExpanded ? 'Contraer navegación' : 'Desplegar navegación'}
+          aria-expanded={navigationExpanded}
+          title={navigationExpanded ? 'Contraer navegación' : 'Desplegar navegación'}
+          onClick={toggleNavigation}
+        >
+          {navigationExpanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+          <span>{navigationExpanded ? 'Contraer' : 'Menú'}</span>
+        </button>
         <button className="settings-button" type="button" onClick={onOpenSettings}>
           <Settings size={18} />
           <span>Configuración</span>
@@ -423,7 +424,7 @@ export function Workspace({
       <main className="main-panel">
         <header className="topbar">
           <div className="mobile-brand">
-            <div className="brand-mark" aria-hidden="true">T</div>
+            <BrandMark />
           </div>
           <ModeSelector
             mode={mode}
