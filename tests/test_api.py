@@ -28,9 +28,13 @@ from domain.conversations import (
     ConversationListPage,
     ConversationMessage,
     ConversationSummary,
+    ConversationUsageBreakdown,
     DailyTokenUsage,
+    ModelUsageBreakdown,
+    SessionUsageReport,
 )
 from domain.costs import ModelCallMetrics, ModelCost, ModelUsage, TurnMetrics
+from domain.evaluations import EvaluationTrace, EvaluationTracePage
 from domain.interactions import InteractionCommand, InteractionOutput
 from domain.realtime import (
     RealtimeAgentEvent,
@@ -201,6 +205,7 @@ class StubConversationHistoryService:
                     ),
                 ),
             ),
+            total=1,
             has_more=False,
         )
 
@@ -221,8 +226,77 @@ class StubConversationHistoryService:
                     output_tokens=200,
                     cached_input_tokens=400,
                 ),
+                cost=ModelCost(amount=Decimal("0.0012"), currency="USD"),
                 turn_count=3,
                 model_call_count=5,
+                fully_priced=True,
+            ),
+        )
+
+    async def load_session_token_usage(self, key: ConversationKey) -> SessionUsageReport:
+        """Return root-plus-worker usage grouped by model and conversation."""
+        assert key == ConversationKey(conversation_id=SESSION_UID, user_id="user-1")
+        interactive_usage = ModelUsage(input_tokens=1_000, output_tokens=200)
+        worker_usage = ModelUsage(input_tokens=2_000, output_tokens=500, cached_input_tokens=800)
+        interactive_cost = ModelCost(amount=Decimal("0.0012"), currency="USD")
+        worker_cost = ModelCost(amount=Decimal("0.0035"), currency="USD")
+        return SessionUsageReport(
+            root_conversation=key,
+            usage=interactive_usage + worker_usage,
+            cost=ModelCost(amount=Decimal("0.0047"), currency="USD"),
+            turn_count=3,
+            model_call_count=4,
+            fully_priced=True,
+            models=(
+                ModelUsageBreakdown(
+                    model="gpt-5-mini",
+                    usage=interactive_usage + worker_usage,
+                    cost=ModelCost(amount=Decimal("0.0047"), currency="USD"),
+                    model_call_count=4,
+                    fully_priced=True,
+                ),
+            ),
+            conversations=(
+                ConversationUsageBreakdown(
+                    conversation_id=SESSION_UID,
+                    title="Suma dos números",
+                    role="interactive",
+                    thread_id=None,
+                    usage=interactive_usage,
+                    cost=interactive_cost,
+                    turn_count=2,
+                    model_call_count=2,
+                    fully_priced=True,
+                    models=(
+                        ModelUsageBreakdown(
+                            model="gpt-5-mini",
+                            usage=interactive_usage,
+                            cost=interactive_cost,
+                            model_call_count=2,
+                            fully_priced=True,
+                        ),
+                    ),
+                ),
+                ConversationUsageBreakdown(
+                    conversation_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    title="Conversación interna",
+                    role="worker",
+                    thread_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    usage=worker_usage,
+                    cost=worker_cost,
+                    turn_count=1,
+                    model_call_count=2,
+                    fully_priced=True,
+                    models=(
+                        ModelUsageBreakdown(
+                            model="gpt-5-mini",
+                            usage=worker_usage,
+                            cost=worker_cost,
+                            model_call_count=2,
+                            fully_priced=True,
+                        ),
+                    ),
+                ),
             ),
         )
 
@@ -295,6 +369,28 @@ class StubConversationHistoryService:
             correlation=ConversationCorrelation(
                 conversation_id=key.conversation_id,
                 root_conversation_id=key.conversation_id,
+            ),
+            evaluations=EvaluationTracePage(
+                traces=(
+                    EvaluationTrace(
+                        trace_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                        conversation_id=SESSION_UID,
+                        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        attempt=1,
+                        proposed_call_ids=("call-1",),
+                        verdict="pass",
+                        risk="low",
+                        reason_code="none",
+                        feedback="",
+                        mode="enforce",
+                        executed=True,
+                        model="evaluation-model",
+                        usage=ModelUsage(input_tokens=100, output_tokens=20),
+                        latency_ms=125.5,
+                        created_at=timestamp,
+                    ),
+                )
             ),
         )
 
@@ -500,6 +596,37 @@ async def test_session_history_exposes_canonical_database_items() -> None:
         "output": {"result": 5},
         "error": None,
     }
+    assert payload["evaluations"] == [
+        {
+            "trace_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "conversation_id": SESSION_UID,
+            "turn_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "job_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "attempt": 1,
+            "proposed_call_ids": ["call-1"],
+            "verdict": "pass",
+            "risk": "low",
+            "reason_code": "none",
+            "feedback": "",
+            "mode": "enforce",
+            "executed": True,
+            "model": "evaluation-model",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cached_input_tokens": 0,
+                "uncached_input_tokens": 100,
+                "cached_input_audio_tokens": 0,
+                "reasoning_tokens": 0,
+                "input_audio_tokens": 0,
+                "output_audio_tokens": 0,
+            },
+            "latency_ms": 125.5,
+            "created_at": "22-07-2026T10:00:00Z",
+        }
+    ]
+    assert payload["evaluations_truncated"] is False
 
 
 async def test_session_list_exposes_clickable_conversation_summaries() -> None:
@@ -534,6 +661,7 @@ async def test_session_list_exposes_clickable_conversation_summaries() -> None:
                 },
             }
         ],
+        "total": 1,
         "has_more": False,
         "next_offset": None,
     }
@@ -567,8 +695,10 @@ async def test_daily_token_metrics_are_global_and_normalized() -> None:
                     "input_audio_tokens": 0,
                     "output_audio_tokens": 0,
                 },
+                "cost": {"amount": 0.0012, "currency": "USD"},
                 "turn_count": 3,
                 "model_call_count": 5,
+                "fully_priced": True,
             }
         ],
     }
@@ -601,6 +731,33 @@ async def test_session_group_exposes_root_correlation_without_merging_history() 
             }
         ],
     }
+
+
+async def test_session_token_usage_includes_root_and_worker_costs() -> None:
+    """Expose total session cost while preserving individual worker breakdowns."""
+    async with AsyncClient(
+        transport=ASGITransport(app=build_test_app()), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            f"/v1/sessions/{SESSION_UID}/usage",
+            params={"user_id": "user-1"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["root_conversation_id"] == SESSION_UID
+    assert payload["usage"]["total_tokens"] == 3_700
+    assert payload["cost"] == {"amount": 0.0047, "currency": "USD"}
+    assert payload["turn_count"] == 3
+    assert payload["model_call_count"] == 4
+    assert payload["models"][0]["model"] == "gpt-5-mini"
+    assert payload["models"][0]["cost"] == {"amount": 0.0047, "currency": "USD"}
+    assert [conversation["role"] for conversation in payload["conversations"]] == [
+        "interactive",
+        "worker",
+    ]
+    assert payload["conversations"][0]["cost"] == {"amount": 0.0012, "currency": "USD"}
+    assert payload["conversations"][1]["cost"] == {"amount": 0.0035, "currency": "USD"}
 
 
 def test_agent_websocket_streams_correlated_json_events() -> None:

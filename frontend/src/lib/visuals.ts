@@ -66,8 +66,17 @@ function parseChart(raw: UnknownObject): ChartVisualComponent | null {
     title,
     subtitle: nullableText(raw.subtitle),
     chart_type: chartType,
-    x_axis: { label: nullableText(xAxis.label) },
-    y_axis: { label: nullableText(yAxis.label), unit: nullableText(yAxis.unit) },
+    x_axis: {
+      label: nullableText(xAxis.label),
+      min: nullableText(xAxis.min),
+      max: nullableText(xAxis.max),
+    },
+    y_axis: {
+      label: nullableText(yAxis.label),
+      unit: nullableText(yAxis.unit),
+      min: nullableNumber(yAxis.min),
+      max: nullableNumber(yAxis.max),
+    },
     series: series as ChartSeries[],
   }
 }
@@ -203,6 +212,11 @@ function text(value: unknown): string | null {
 /** Accept the nullable text fields produced by the v1 schema. */
 function nullableText(value: unknown): string | null {
   return value === null || value === undefined ? null : text(value)
+}
+
+/** Accept one finite number or a nullable omitted bound. */
+function nullableNumber(value: unknown): number | null {
+  return value === null || value === undefined ? null : finiteNumber(value)
 }
 
 /** Accept one finite JSON number. */

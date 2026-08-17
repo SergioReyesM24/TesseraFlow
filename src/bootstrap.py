@@ -116,6 +116,7 @@ async def build_container(settings: Settings) -> AppContainer:
         interaction_notifier=interaction_notifier,
         interactive_tools=interactive_tools,
         worker_tools=worker_tools,
+        evaluation_traces=canonical_conversations,
     )
     a2a_worker = A2AWorker(
         jobs,

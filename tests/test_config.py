@@ -6,7 +6,9 @@ import bootstrap
 from bootstrap import build_container
 from config import (
     DEFAULT_AGENT_INSTRUCTIONS,
+    DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS,
     DEFAULT_REALTIME_AGENT_INSTRUCTIONS,
+    DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS,
     DEFAULT_WORKER_AGENT_INSTRUCTIONS,
     PROJECT_ENV_FILE,
     PROMPT_DIRECTORY,
@@ -34,12 +36,35 @@ def test_default_prompts_are_loaded_from_versioned_markdown_files() -> None:
         DEFAULT_REALTIME_AGENT_INSTRUCTIONS
         == (PROMPT_DIRECTORY / "realtime_agent.md").read_text(encoding="utf-8").strip()
     )
+    assert (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+        == (PROMPT_DIRECTORY / "interactive_tool_call_evaluator.md")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    assert (
+        DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+        == (PROMPT_DIRECTORY / "tool_call_evaluator.md").read_text(encoding="utf-8").strip()
+    )
     assert "Do not ask the user" in DEFAULT_AGENT_INSTRUCTIONS
     assert "immediately call" in DEFAULT_AGENT_INSTRUCTIONS
     assert "Voy a consultarlo, dame un momento." in DEFAULT_AGENT_INSTRUCTIONS
     assert "lateral data panel" in DEFAULT_AGENT_INSTRUCTIONS
     assert "new or changed visual view" in DEFAULT_AGENT_INSTRUCTIONS
     assert "textual explanation" in DEFAULT_AGENT_INSTRUCTIONS
+    assert "delegate_to_worker_agent" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    assert "continue_worker_agent" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    assert "immediate orchestration boundary" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "downstream execution data is not `incomplete_request`" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "send a Bizum of 10 EUR to their mother" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "revise_silently" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
+    assert "tool_call_evaluation_unavailable" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
 
 
 def test_explicit_settings_can_override_markdown_prompts() -> None:
@@ -64,6 +89,8 @@ def test_endpoint_and_worker_models_have_independent_provider_settings() -> None
         gemini_api_key="gemini-key",
         openai_api_key="openai-key",
         worker_agent_model="worker-model",
+        interactive_tool_evaluation_mode="shadow",
+        worker_tool_evaluation_mode="off",
     )
 
     assert settings.text_agent_provider == "openai"
@@ -72,6 +99,11 @@ def test_endpoint_and_worker_models_have_independent_provider_settings() -> None
     assert settings.realtime_agent_model == "realtime-model"
     assert settings.worker_provider == "openai"
     assert settings.worker_agent_model == "worker-model"
+    assert settings.interactive_tool_evaluation_mode == "shadow"
+    assert settings.worker_tool_evaluation_mode == "off"
+    assert settings.evaluation_provider == "openai"
+    assert settings.evaluation_model == "gpt-5.4-mini"
+    assert settings.evaluation_reasoning_effort == "none"
     assert settings.gemini_api_key == "gemini-key"
     assert settings.openai_api_key == "openai-key"
     assert settings.openai_realtime_voice_name == "marin"
@@ -87,6 +119,13 @@ def test_realtime_has_bounded_pcm_and_outbound_queues() -> None:
 
     assert settings.realtime_audio_max_chunk_bytes == 3_200
     assert settings.realtime_outbound_max_audio_bytes == 6_400
+
+
+def test_interactive_evaluation_fails_closed_by_default() -> None:
+    """Prefer a user-visible general failure over an unvalidated interactive effect."""
+    settings = Settings(_env_file=None)
+
+    assert settings.interactive_tool_evaluation_fail_open is False
 
 
 def test_model_pricing_accepts_a_provider_neutral_json_catalog(monkeypatch: Any) -> None:
@@ -114,6 +153,16 @@ def test_active_worker_model_has_reviewed_euro_rates_and_long_context_tier() -> 
     assert rates.currency == "€"
     assert rates.tiers[0].min_input_tokens == 272_001
     assert rates.tiers[0].output == Decimal("19.745502")
+
+
+def test_gpt_5_4_mini_has_euro_rates() -> None:
+    """Keep the GPT-5.4 mini worker priced in the default catalog."""
+    rates = Settings(_env_file=None).model_pricing["gpt-5.4-mini"]
+
+    assert rates.input == Decimal("0.66")
+    assert rates.cached_input == Decimal("0.07")
+    assert rates.output == Decimal("3.96")
+    assert rates.currency == "€"
 
 
 def test_removed_interactive_and_ambiguous_model_variables_are_ignored(

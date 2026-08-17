@@ -85,4 +85,44 @@ describe('MessageList docked visuals', () => {
     expect(markup).not.toContain('Uso de tokens')
     expect(markup).not.toContain('En caché')
   })
+
+  it('shows typing dots only while an empty assistant message is streaming', () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          {
+            id: 'voice-assistant-active',
+            role: 'assistant',
+            content: '',
+            status: 'streaming',
+          },
+        ]}
+        emptyTitle="Sin mensajes"
+        emptyDescription="No hay actividad"
+      />,
+    )
+
+    expect(markup).toContain('typing-dots')
+    expect(markup).toContain('TesseraFlow está respondiendo')
+  })
+
+  it('hides empty completed assistant messages left by realtime interruption', () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          {
+            id: 'voice-assistant-interrupted',
+            role: 'assistant',
+            content: '',
+            status: 'complete',
+          },
+        ]}
+        emptyTitle="Sin mensajes"
+        emptyDescription="No hay actividad"
+      />,
+    )
+
+    expect(markup).not.toContain('typing-dots')
+    expect(markup).not.toContain('voice-assistant-interrupted')
+  })
 })

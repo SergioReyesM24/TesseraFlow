@@ -51,14 +51,49 @@ export interface TurnMetrics {
 export interface DailyTokenUsage {
   date: string
   usage: ModelUsage
+  cost: ModelCost | null
   turn_count: number
   model_call_count: number
+  fully_priced: boolean
 }
 
 export interface DailyTokenUsageReport {
   user_id: string
   timezone: 'UTC'
   days: DailyTokenUsage[]
+}
+
+export interface ModelUsageBreakdown {
+  model: string
+  usage: ModelUsage
+  cost: ModelCost | null
+  model_call_count: number
+  fully_priced: boolean
+}
+
+export interface ConversationUsageBreakdown {
+  conversation_id: string
+  title: string
+  role: 'interactive' | 'worker'
+  thread_id: string | null
+  usage: ModelUsage
+  cost: ModelCost | null
+  turn_count: number
+  model_call_count: number
+  fully_priced: boolean
+  models: ModelUsageBreakdown[]
+}
+
+export interface SessionUsageReport {
+  user_id: string
+  root_conversation_id: string
+  usage: ModelUsage
+  cost: ModelCost | null
+  turn_count: number
+  model_call_count: number
+  fully_priced: boolean
+  models: ModelUsageBreakdown[]
+  conversations: ConversationUsageBreakdown[]
 }
 
 export interface ChartPoint {
@@ -71,13 +106,26 @@ export interface ChartSeries {
   points: ChartPoint[]
 }
 
+export interface ChartXAxis {
+  label: string | null
+  min?: string | null
+  max?: string | null
+}
+
+export interface ChartYAxis {
+  label: string | null
+  unit: string | null
+  min?: number | null
+  max?: number | null
+}
+
 export interface ChartVisualComponent {
   kind: 'chart'
   title: string
   subtitle: string | null
   chart_type: 'line' | 'bar'
-  x_axis: { label: string | null }
-  y_axis: { label: string | null; unit: string | null }
+  x_axis: ChartXAxis
+  y_axis: ChartYAxis
   series: ChartSeries[]
 }
 
@@ -171,6 +219,33 @@ export interface ConversationHistoryItem {
   payload: ConversationHistoryPayload
 }
 
+export interface EvaluationTrace {
+  trace_id: string
+  conversation_id: string
+  turn_id: string
+  job_id: string | null
+  attempt: number
+  proposed_call_ids: string[]
+  verdict: 'pass' | 'fail' | 'uncertain'
+  risk: 'low' | 'medium' | 'high'
+  reason_code:
+    | 'none'
+    | 'wrong_tool'
+    | 'unnecessary_tool'
+    | 'ungrounded_arguments'
+    | 'duplicate_action'
+    | 'unsafe_side_effect'
+    | 'incomplete_request'
+    | 'other'
+  feedback: string
+  mode: 'shadow' | 'enforce'
+  executed: boolean
+  model: string
+  usage: ModelUsage
+  latency_ms: number
+  created_at: string
+}
+
 export interface ConversationCorrelation {
   conversation_id: string
   root_conversation_id: string
@@ -208,6 +283,8 @@ export interface ConversationHistoryResponse {
   updated_at: string
   last_message_at: string | null
   items: ConversationHistoryItem[]
+  evaluations: EvaluationTrace[]
+  evaluations_truncated: boolean
   has_more: boolean
   next_after_sequence: number | null
   correlation: ConversationCorrelation
@@ -228,6 +305,7 @@ export interface ConversationSummary {
 export interface ConversationListResponse {
   user_id: string
   sessions: ConversationSummary[]
+  total: number
   has_more: boolean
   next_offset: number | null
 }

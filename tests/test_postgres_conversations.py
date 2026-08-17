@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -12,9 +13,12 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
+from domain.costs import ModelCost, ModelUsage
+from domain.evaluations import EvaluationTrace
 from domain.tools import ToolCall, ToolResult
 from infrastructure.postgres_conversations import (
     INSERT_CONVERSATION,
+    INSERT_EVALUATION_TRACE,
     INSERT_ITEM,
     SELECT_CONVERSATION,
     SELECT_CONVERSATION_FOR_UPDATE,
@@ -22,8 +26,10 @@ from infrastructure.postgres_conversations import (
     SELECT_CONVERSATION_HISTORY,
     SELECT_CONVERSATION_SUMMARIES,
     SELECT_DAILY_TOKEN_USAGE,
+    SELECT_EVALUATION_TRACES,
     SELECT_HISTORY_ITEMS,
     SELECT_RECENT_ITEMS,
+    SELECT_SESSION_TOKEN_USAGE,
     UPDATE_CONVERSATION,
     InvalidPostgresConversationDataError,
     PostgresConversationRepository,
@@ -52,6 +58,8 @@ class FakePostgresConnection:
         self.items: dict[str, list[dict[str, object]]] = {}
         self.group_rows: dict[str, list[dict[str, object]]] = {}
         self.daily_usage_rows: list[dict[str, object]] = []
+        self.session_usage_rows: dict[str, list[dict[str, object]]] = {}
+        self.evaluation_traces: dict[str, list[dict[str, object]]] = {}
 
     def transaction(self) -> FakeTransaction:
         """Create a no-op transaction boundary."""
@@ -72,16 +80,24 @@ class FakePostgresConnection:
             return self.group_rows.get(conversation_id, [])
         if query == SELECT_DAILY_TOKEN_USAGE:
             return self.daily_usage_rows
+        if query == SELECT_SESSION_TOKEN_USAGE:
+            return self.session_usage_rows.get(conversation_id, [])
         if query == SELECT_CONVERSATION_SUMMARIES:
             offset, limit = args
             rows = [
                 {"id": item_id, **row}
                 for item_id, row in self.conversations.items()
-                if row["user_id"] == conversation_id
-                and bool(self.items.get(item_id))
+                if row["user_id"] == conversation_id and bool(self.items.get(item_id))
             ]
             rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
-            return rows[offset : offset + limit]
+            total = len(rows)
+            page = rows[offset : offset + limit]
+            if not page:
+                return [{"id": None, "total_count": total}]
+            return [{**row, "total_count": total} for row in page]
+        if query == SELECT_EVALUATION_TRACES:
+            (limit,) = args
+            return self.evaluation_traces.get(conversation_id, [])[:limit]
         records = self.items.get(conversation_id, [])
         if query == SELECT_HISTORY_ITEMS:
             after_sequence, limit = args
@@ -126,6 +142,47 @@ class FakePostgresConnection:
             assert isinstance(conversation_id, str)
             self.conversations.pop(conversation_id, None)
             self.items.pop(conversation_id, None)
+            self.evaluation_traces.pop(conversation_id, None)
+        elif query == INSERT_EVALUATION_TRACE:
+            (
+                trace_id,
+                conversation_id,
+                turn_id,
+                job_id,
+                attempt,
+                proposed_call_ids,
+                verdict,
+                risk,
+                reason_code,
+                feedback,
+                mode,
+                executed,
+                model,
+                usage,
+                latency_ms,
+                created_at,
+            ) = args
+            assert isinstance(conversation_id, str)
+            self.evaluation_traces.setdefault(conversation_id, []).append(
+                {
+                    "id": trace_id,
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "proposed_call_ids": proposed_call_ids,
+                    "verdict": verdict,
+                    "risk": risk,
+                    "reason_code": reason_code,
+                    "feedback": feedback,
+                    "mode": mode,
+                    "executed": executed,
+                    "model": model,
+                    "usage": usage,
+                    "latency_ms": latency_ms,
+                    "created_at": created_at,
+                }
+            )
         else:
             raise AssertionError(f"Unexpected query: {query}")
         return "OK"
@@ -240,6 +297,38 @@ async def test_postgres_loads_paginated_technical_history_with_tool_records() ->
     assert isinstance(second.items[0].item, ToolResult)
 
 
+async def test_postgres_persists_evaluation_traces_outside_conversation_items() -> None:
+    pool = FakePostgresPool()
+    store = repository(pool)
+    await store.create(key())
+    created_at = datetime(2026, 7, 22, 10, 1, tzinfo=UTC)
+    trace = EvaluationTrace(
+        trace_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        conversation_id="conv-1",
+        turn_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        attempt=1,
+        proposed_call_ids=("call-1",),
+        verdict="fail",
+        risk="low",
+        reason_code="wrong_tool",
+        feedback="Selecciona una herramienta adecuada.",
+        mode="enforce",
+        executed=False,
+        model="evaluation-model",
+        usage=ModelUsage(input_tokens=100, output_tokens=20),
+        latency_ms=125.5,
+        created_at=created_at,
+    )
+
+    await store.append_evaluation_trace(trace)
+    history = await store.load_history(key(), after_sequence=0, limit=50)
+
+    assert history is not None
+    assert history.evaluations.traces == (trace,)
+    assert history.items == ()
+
+
 async def test_postgres_history_enforces_conversation_ownership() -> None:
     """Reject technical inspection through another user identifier."""
     pool = FakePostgresPool()
@@ -284,11 +373,17 @@ async def test_postgres_lists_only_the_users_sessions_with_pagination() -> None:
 
     first = await store.list_sessions("user-1", offset=0, limit=1)
     second = await store.list_sessions("user-1", offset=1, limit=1)
+    beyond_last = await store.list_sessions("user-1", offset=10, limit=1)
 
     assert [item.key.conversation_id for item in first.sessions] == ["conv-2"]
+    assert first.total == 2
     assert first.has_more is True
     assert [item.key.conversation_id for item in second.sessions] == ["conv-1"]
+    assert second.total == 2
     assert second.has_more is False
+    assert beyond_last.sessions == ()
+    assert beyond_last.total == 2
+    assert beyond_last.has_more is False
     assert "FROM conversation_items AS item" in SELECT_CONVERSATION_SUMMARIES
     assert "item.item_type = 'message'" in SELECT_CONVERSATION_SUMMARIES
     assert "NOT EXISTS" in SELECT_CONVERSATION_SUMMARIES
@@ -307,6 +402,9 @@ async def test_postgres_maps_global_daily_token_usage() -> None:
             "reasoning_tokens": 50,
             "input_audio_tokens": 100,
             "output_audio_tokens": 20,
+            "cost_amount": "0.0012",
+            "cost_currency": "USD",
+            "fully_priced": True,
             "turn_count": 3,
             "model_call_count": 5,
         }
@@ -319,11 +417,150 @@ async def test_postgres_maps_global_daily_token_usage() -> None:
     assert usage[0].usage.output_tokens == 200
     assert usage[0].usage.cached_input_tokens == 400
     assert usage[0].day == "21-07-2026"
+    assert usage[0].cost is not None
+    assert usage[0].cost.amount == Decimal("0.0012")
+    assert usage[0].cost.currency == "USD"
+    assert usage[0].fully_priced is True
     assert usage[0].turn_count == 3
     assert usage[0].model_call_count == 5
     assert "conversation.user_id = $1" in SELECT_DAILY_TOKEN_USAGE
     assert "jsonb_array_elements" in SELECT_DAILY_TOKEN_USAGE
     assert "model_call.value #>> '{usage,input_tokens}'" in SELECT_DAILY_TOKEN_USAGE
+    assert "model_call.value #>> '{cost,amount}'" in SELECT_DAILY_TOKEN_USAGE
+
+
+async def test_postgres_aggregates_session_usage_without_merging_member_histories() -> None:
+    """Map root, worker, model, turn, and exact cost totals from the SQL projection."""
+    pool = FakePostgresPool()
+    pool.connection.session_usage_rows["root-1"] = [
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=11,
+            model="model-a",
+            input_tokens=100,
+            output_tokens=20,
+            cost_amount="0.001",
+        ),
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=11,
+            model="model-b",
+            input_tokens=50,
+            output_tokens=10,
+            cost_amount="0.002",
+        ),
+        usage_row(
+            conversation_id="worker-1",
+            title="Worker",
+            thread_id="thread-1",
+            item_id=21,
+            model="model-a",
+            input_tokens=200,
+            output_tokens=40,
+            cost_amount="0.003",
+        ),
+    ]
+
+    report = await repository(pool).load_session_token_usage(key(conversation_id="root-1"))
+
+    assert report is not None
+    assert report.usage.total_tokens == 420
+    assert report.turn_count == 2
+    assert report.model_call_count == 3
+    assert report.cost == ModelCost(amount=Decimal("0.006"), currency="USD")
+    assert [item.conversation_id for item in report.conversations] == ["root-1", "worker-1"]
+    assert report.conversations[0].turn_count == 1
+    assert report.conversations[0].model_call_count == 2
+    assert report.conversations[1].role == "worker"
+    assert [(item.model, item.model_call_count) for item in report.models] == [
+        ("model-a", 2),
+        ("model-b", 1),
+    ]
+    assert "member.user_id = requested.user_id" in SELECT_SESSION_TOKEN_USAGE
+
+
+async def test_postgres_marks_session_cost_unknown_when_any_call_is_unpriced() -> None:
+    """Never expose a partial amount as though it were the complete session cost."""
+    pool = FakePostgresPool()
+    pool.connection.session_usage_rows["root-1"] = [
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=11,
+            model="model-a",
+            input_tokens=100,
+            output_tokens=20,
+            cost_amount=None,
+        )
+    ]
+
+    report = await repository(pool).load_session_token_usage(key(conversation_id="root-1"))
+
+    assert report is not None
+    assert report.cost is None
+    assert report.fully_priced is False
+    assert report.models[0].cost is None
+    assert report.models[0].fully_priced is False
+
+
+async def test_postgres_session_usage_enforces_requested_ownership() -> None:
+    """Reject usage reads when the requested conversation belongs to another owner."""
+    pool = FakePostgresPool()
+    pool.connection.session_usage_rows["root-1"] = [
+        usage_row(
+            conversation_id="root-1",
+            title="Principal",
+            thread_id=None,
+            item_id=None,
+            model=None,
+            input_tokens=0,
+            output_tokens=0,
+            cost_amount=None,
+        )
+    ]
+
+    with pytest.raises(ConversationAccessDeniedError):
+        await repository(pool).load_session_token_usage(
+            key(conversation_id="root-1", user_id="user-2")
+        )
+
+
+def usage_row(
+    *,
+    conversation_id: str,
+    title: str,
+    thread_id: str | None,
+    item_id: int | None,
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cost_amount: str | None,
+) -> dict[str, object]:
+    """Build one stable row from the session-usage SQL projection."""
+    return {
+        "requested_user_id": "user-1",
+        "root_id": "root-1",
+        "conversation_id": conversation_id,
+        "title": title,
+        "thread_id": thread_id,
+        "item_id": item_id,
+        "turn_id": "turn-1" if item_id is not None else None,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": 0,
+        "cached_input_audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_audio_tokens": 0,
+        "output_audio_tokens": 0,
+        "cost_amount": cost_amount,
+        "cost_currency": "USD" if cost_amount is not None else None,
+    }
 
 
 async def test_postgres_groups_multiple_worker_threads_without_merging_histories() -> None:
@@ -531,6 +768,7 @@ async def test_postgres_migration_creates_metadata_and_item_tables() -> None:
     assert "REFERENCES conversations(id) ON DELETE CASCADE" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS a2a_threads" in combined_sql
     assert "CREATE TABLE IF NOT EXISTS a2a_jobs" in combined_sql
+    assert "CREATE TABLE IF NOT EXISTS evaluation_traces" in combined_sql
     assert "CREATE TRIGGER interaction_command_notify_trigger" in combined_sql
     assert "CREATE TRIGGER interaction_output_notify_trigger" in combined_sql
     assert "CREATE TRIGGER a2a_job_notify_trigger" in combined_sql

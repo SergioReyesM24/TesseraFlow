@@ -66,7 +66,9 @@ describe('VisualPresentation chart data tooltips', () => {
     }))
 
     const markup = renderToStaticMarkup(<VisualPresentation presentation={presentation} />)
-    const bars = [...markup.matchAll(/<rect[^>]* x="([\d.]+)"[^>]* width="([\d.]+)"/g)]
+    const bars = [
+      ...markup.matchAll(/<rect class="chart-data-mark chart-bar"[^>]* x="([\d.]+)"[^>]* width="([\d.]+)"/g),
+    ]
 
     expect(bars).toHaveLength(6)
     for (const [, rawX, rawWidth] of bars) {
@@ -74,6 +76,82 @@ describe('VisualPresentation chart data tooltips', () => {
       expect(Number(rawX)).toBeGreaterThanOrEqual(0)
       expect(rightEdge).toBeLessThanOrEqual(640)
     }
+  })
+
+  it('anchors positive chart scales at zero', () => {
+    const markup = renderToStaticMarkup(
+      <VisualPresentation presentation={chartPresentation('line')} />,
+    )
+
+    expect(markup).toMatch(/class="chart-axis-value"[^>]*>0,00<\/text>/)
+  })
+
+  it('uses explicit y-axis bounds when the visual provides them', () => {
+    const presentation = chartPresentation('line')
+    if (presentation.component?.kind !== 'chart') throw new Error('Expected chart fixture')
+    presentation.component.y_axis = {
+      ...presentation.component.y_axis,
+      min: 12000,
+      max: 14000,
+    }
+
+    const markup = renderToStaticMarkup(<VisualPresentation presentation={presentation} />)
+    const format = new Intl.NumberFormat('es-ES', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })
+
+    expect(markup).toContain(`>${format.format(14000)}</text>`)
+    expect(markup).toContain(`>${format.format(13000)}</text>`)
+    expect(markup).toContain(`>${format.format(12000)}</text>`)
+    expect(markup).not.toMatch(/class="chart-axis-value"[^>]*>0,00<\/text>/)
+  })
+
+  it('uses explicit x-axis bounds to limit the visible chart range', () => {
+    const presentation = chartPresentation('line')
+    if (presentation.component?.kind !== 'chart') throw new Error('Expected chart fixture')
+    presentation.component.x_axis = {
+      ...presentation.component.x_axis,
+      min: 'Turno 2',
+      max: 'Turno 3',
+    }
+    presentation.component.series = [
+      {
+        name: 'Saldo al cierre',
+        points: [
+          { x: 'Turno 1', y: 90 },
+          { x: 'Turno 2', y: 120 },
+          { x: 'Turno 3', y: 160 },
+        ],
+      },
+    ]
+
+    const markup = renderToStaticMarkup(<VisualPresentation presentation={presentation} />)
+    const hoverBands = [...markup.matchAll(/class="chart-hover-zone"/g)]
+
+    expect(hoverBands).toHaveLength(2)
+    expect(markup).not.toContain('aria-label="Turno 1,')
+    expect(markup).toContain('aria-label="Turno 2,')
+    expect(markup).toContain('aria-label="Turno 3,')
+  })
+
+  it('adds one hover band per x value for nearest-column inspection', () => {
+    const presentation = chartPresentation('line')
+    if (presentation.component?.kind !== 'chart') throw new Error('Expected chart fixture')
+    presentation.component.series = ['Entrada', 'Salida'].map((name, seriesIndex) => ({
+      name,
+      points: [
+        { x: 'Turno 1', y: 100 + seriesIndex * 20 },
+        { x: 'Turno 2', y: 160 + seriesIndex * 20 },
+      ],
+    }))
+
+    const markup = renderToStaticMarkup(<VisualPresentation presentation={presentation} />)
+    const hoverBands = [...markup.matchAll(/class="chart-hover-zone"/g)]
+
+    expect(hoverBands).toHaveLength(2)
+    expect(markup).toContain('aria-label="Turno 1, 2 series"')
+    expect(markup).toContain('tabindex="0"')
   })
 })
 

@@ -13,8 +13,8 @@ describe('visual presentation protocol', () => {
         title: 'Saldo semanal',
         subtitle: null,
         chart_type: 'line',
-        x_axis: { label: 'Semana' },
-        y_axis: { label: 'Saldo', unit: '€' },
+        x_axis: { label: 'Semana', min: '01-07-2026', max: '08-07-2026' },
+        y_axis: { label: 'Saldo', unit: '€', min: 0, max: 150 },
         series: [
           {
             name: 'Saldo',
@@ -29,6 +29,10 @@ describe('visual presentation protocol', () => {
 
     expect(visual?.component?.kind).toBe('chart')
     if (visual?.component?.kind === 'chart') {
+      expect(visual.component.x_axis.min).toBe('01-07-2026')
+      expect(visual.component.x_axis.max).toBe('08-07-2026')
+      expect(visual.component.y_axis.min).toBe(0)
+      expect(visual.component.y_axis.max).toBe(150)
       expect(visual.component.series[0].points[1].y).toBe(120)
     }
   })

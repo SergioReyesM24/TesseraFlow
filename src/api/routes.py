@@ -24,6 +24,7 @@ from api.schemas import (
     CreateSessionResponse,
     DailyTokenUsageReportResponse,
     DailyTokenUsageResponse,
+    SessionUsageReportResponse,
     StreamAgentRequest,
 )
 from api.sse import encode_agent_stream
@@ -167,6 +168,30 @@ async def get_session_history(
     except ConversationAccessDeniedError as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Conversation access denied") from exc
     return ConversationHistoryResponse.from_history(history)
+
+
+@router.get(
+    "/v1/sessions/{session_uid}/usage",
+    response_model=SessionUsageReportResponse,
+    tags=["agent"],
+)
+async def get_session_token_usage(
+    session_uid: Annotated[UUID, Path()],
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    service: Annotated[
+        ConversationHistoryService,
+        Depends(get_conversation_history_service),
+    ],
+) -> SessionUsageReportResponse:
+    """Return total model cost for one root session and its worker conversations."""
+    key = ConversationKey(conversation_id=str(session_uid), user_id=user_id)
+    try:
+        usage = await service.load_session_token_usage(key)
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
+    except ConversationAccessDeniedError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Conversation access denied") from exc
+    return SessionUsageReportResponse.from_domain(usage)
 
 
 @router.get(

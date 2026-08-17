@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="tf-accent" x1="14" y1="55" x2="55" y2="8" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#155EEF"/>
+      <stop offset="0.52" stop-color="#245CFF"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="tf-depth" x1="9" y1="8" x2="45" y2="48" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#17233D"/>
+      <stop offset="1" stop-color="#0B1020"/>
+    </linearGradient>
+  </defs>
+  <path
+    fill="url(#tf-depth)"
+    d="M7.6 8h46.8c1.6 0 2.6 1.6 1.9 3l-2.8 5.7c-.6 1.2-1.8 2-3.2 2H36.8L23.4 52.1A6.3 6.3 0 0 1 17.5 56h-6.1c-1.7 0-2.7-1.7-2-3.2l13.8-34.1H5.7c-1.7 0-2.7-1.7-1.9-3.2L6 9.3C6.3 8.5 6.9 8 7.6 8Z"
+  />
+  <path
+    fill="url(#tf-accent)"
+    d="M30.2 8h25.1c1.7 0 2.7 1.7 1.9 3.2l-2.7 5.3a8.2 8.2 0 0 1-7.3 4.5H37l-3.7 9h16.4c1.6 0 2.6 1.6 1.9 3l-2.4 4.8a5.6 5.6 0 0 1-5 3.1H29l-4.5 11.2a6.3 6.3 0 0 1-5.9 3.9h-6.1c-1.7 0-2.7-1.7-2-3.2l13.8-34.2A17 17 0 0 1 30.2 8Z"
+  />
+</svg>

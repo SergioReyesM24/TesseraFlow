@@ -4,6 +4,7 @@ import type {
   ConversationListResponse,
   DailyTokenUsageReport,
   SessionResponse,
+  SessionUsageReport,
 } from '../types'
 
 /** Remove trailing slashes so endpoint composition stays stable. */
@@ -130,4 +131,26 @@ export async function loadDailyTokenUsage(
   }
 
   return (await response.json()) as DailyTokenUsageReport
+}
+
+/** Load full root-plus-worker model usage and cost for one session group. */
+export async function loadSessionTokenUsage(
+  baseUrl: string,
+  userId: string,
+  sessionUid: string,
+  signal?: AbortSignal,
+): Promise<SessionUsageReport> {
+  const query = new URLSearchParams({ user_id: userId })
+  const response = await fetch(
+    httpUrl(`/v1/sessions/${encodeURIComponent(sessionUid)}/usage?${query}`, baseUrl),
+    { signal },
+  )
+
+  if (!response.ok) {
+    if (response.status === 404) throw new Error('No existe una sesión con ese identificador.')
+    if (response.status === 403) throw new Error('La sesión pertenece a otro usuario.')
+    throw new Error(`No se pudieron cargar los costes de la sesión (${response.status}).`)
+  }
+
+  return (await response.json()) as SessionUsageReport
 }

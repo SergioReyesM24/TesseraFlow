@@ -56,6 +56,10 @@ class ChartComponent:
     x_label: str | None = None
     y_label: str | None = None
     y_unit: str | None = None
+    x_min: str | None = None
+    x_max: str | None = None
+    y_min: float | None = None
+    y_max: float | None = None
 
     def __post_init__(self) -> None:
         """Enforce the v1 chart catalog and payload bounds."""
@@ -66,6 +70,12 @@ class ChartComponent:
         _optional_text(self.x_label, "chart x label", maximum=80)
         _optional_text(self.y_label, "chart y label", maximum=80)
         _optional_text(self.y_unit, "chart y unit", maximum=24)
+        _optional_text(self.x_min, "chart x minimum", maximum=120)
+        _optional_text(self.x_max, "chart x maximum", maximum=120)
+        _optional_number(self.y_min, "chart y minimum")
+        _optional_number(self.y_max, "chart y maximum")
+        if self.y_min is not None and self.y_max is not None and self.y_min >= self.y_max:
+            raise ValueError("chart y minimum must be lower than chart y maximum")
         if self.chart_type not in ("line", "bar"):
             raise ValueError("chart type must be line or bar")
         if not 1 <= len(self.series) <= MAX_CHART_SERIES:
@@ -170,9 +180,7 @@ class TransactionListComponent:
         if self.total_income < 0 or self.total_expenses < 0:
             raise ValueError("transaction totals cannot be negative")
         if not 1 <= len(self.transactions) <= MAX_TRANSACTIONS:
-            raise ValueError(
-                f"transaction list must contain 1 to {MAX_TRANSACTIONS} transactions"
-            )
+            raise ValueError(f"transaction list must contain 1 to {MAX_TRANSACTIONS} transactions")
 
 
 VisualComponent: TypeAlias = ChartComponent | MetricGroupComponent | TransactionListComponent
@@ -201,8 +209,17 @@ def visual_presentation_payload(presentation: VisualPresentation) -> dict[str, o
             "title": component.title,
             "subtitle": component.subtitle,
             "chart_type": component.chart_type,
-            "x_axis": {"label": component.x_label},
-            "y_axis": {"label": component.y_label, "unit": component.y_unit},
+            "x_axis": {
+                "label": component.x_label,
+                "min": component.x_min,
+                "max": component.x_max,
+            },
+            "y_axis": {
+                "label": component.y_label,
+                "unit": component.y_unit,
+                "min": component.y_min,
+                "max": component.y_max,
+            },
             "series": [
                 {
                     "name": series.name,
@@ -314,6 +331,10 @@ def _chart_from_payload(component: dict[str, Any]) -> ChartComponent:
         x_label=_optional_payload_text(x_axis, "label"),
         y_label=_optional_payload_text(y_axis, "label"),
         y_unit=_optional_payload_text(y_axis, "unit"),
+        x_min=_optional_payload_text(x_axis, "min"),
+        x_max=_optional_payload_text(x_axis, "max"),
+        y_min=_optional_payload_number(y_axis, "min"),
+        y_max=_optional_payload_number(y_axis, "max"),
         series=tuple(series),
     )
 
@@ -392,6 +413,16 @@ def _optional_payload_text(payload: dict[str, Any], name: str) -> str | None:
     return value
 
 
+def _optional_payload_number(payload: dict[str, Any], name: str) -> float | None:
+    """Read one nullable finite JSON number without accepting booleans."""
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or not isfinite(value):
+        raise ValueError(f"{name} must be a finite number or null")
+    return float(value)
+
+
 def _number(payload: dict[str, Any], name: str) -> float:
     """Read one finite JSON number without accepting booleans."""
     value = payload.get(name)
@@ -417,3 +448,9 @@ def _optional_text(value: str | None, name: str, *, maximum: int) -> None:
     """Validate one optional bounded semantic label."""
     if value is not None:
         _require_text(value, name, maximum=maximum)
+
+
+def _optional_number(value: float | None, name: str) -> None:
+    """Validate one optional finite semantic axis bound."""
+    if value is not None and (isinstance(value, bool) or not isfinite(value)):
+        raise ValueError(f"{name} must be a finite number")

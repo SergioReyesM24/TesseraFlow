@@ -10,7 +10,6 @@ from openai.types.responses import Response
 from application.ports import ModelGateway, ModelSession
 from domain.agent import AgentDefinition
 from domain.conversations import ConversationItem, ConversationMessage
-from domain.costs import ModelUsage
 from domain.model import ModelReply
 from domain.tools import ToolCall, ToolResult, ToolSpec
 from domain.turn_events import (
@@ -19,6 +18,7 @@ from domain.turn_events import (
     ModelTextDelta,
 )
 from domain.types import JsonObject
+from infrastructure.openai_usage import normalize_openai_usage
 
 logger = structlog.get_logger(__name__)
 
@@ -224,21 +224,7 @@ class OpenAIModelSession(ModelSession):
             response_id=response.id,
             text=response.output_text,
             tool_calls=tuple(calls),
-            usage=self._normalize_usage(getattr(response, "usage", None)),
-        )
-
-    @staticmethod
-    def _normalize_usage(usage: object | None) -> ModelUsage:
-        """Translate OpenAI usage details into the shared accounting contract."""
-        if usage is None:
-            return ModelUsage()
-        input_details = getattr(usage, "input_tokens_details", None)
-        output_details = getattr(usage, "output_tokens_details", None)
-        return ModelUsage(
-            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-            cached_input_tokens=int(getattr(input_details, "cached_tokens", 0) or 0),
-            reasoning_tokens=int(getattr(output_details, "reasoning_tokens", 0) or 0),
+            usage=normalize_openai_usage(getattr(response, "usage", None)),
         )
 
     @staticmethod

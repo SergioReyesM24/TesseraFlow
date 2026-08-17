@@ -85,6 +85,7 @@ class StubConversationHistoryRepository:
                     ),
                 ),
             ),
+            total=1,
             has_more=False,
         )
 

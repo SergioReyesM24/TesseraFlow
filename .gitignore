@@ -13,4 +13,5 @@ build/
 node_modules/
 *.tsbuildinfo
 .DS_Store
+.codex-screenshots/
 AGENTS.md

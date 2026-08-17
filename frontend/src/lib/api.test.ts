@@ -5,6 +5,7 @@ import {
   loadConversationGroup,
   loadConversationHistory,
   loadDailyTokenUsage,
+  loadSessionTokenUsage,
   normalizeBaseUrl,
 } from './api'
 
@@ -61,6 +62,7 @@ describe('API URL composition', () => {
     const payload = {
       user_id: 'user-1',
       sessions: [],
+      total: 0,
       has_more: false,
       next_offset: null,
     }
@@ -128,6 +130,35 @@ describe('API URL composition', () => {
     )
     expect(fetchMock).toHaveBeenCalledWith(
       'http://api.test/v1/metrics/tokens/daily?user_id=user-1&days=90',
+      { signal: undefined },
+    )
+
+    vi.unstubAllGlobals()
+  })
+
+  it('loads root-plus-worker costs for the selected session', async () => {
+    const payload = {
+      user_id: 'user-1',
+      root_conversation_id: 'main-1',
+      usage: { total_tokens: 0 },
+      cost: null,
+      turn_count: 0,
+      model_call_count: 0,
+      fully_priced: true,
+      models: [],
+      conversations: [],
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      loadSessionTokenUsage('http://api.test/', 'user-1', 'main-1'),
+    ).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/sessions/main-1/usage?user_id=user-1',
       { signal: undefined },
     )
 

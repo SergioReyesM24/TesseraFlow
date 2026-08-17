@@ -1,6 +1,7 @@
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,6 +18,10 @@ def load_prompt(filename: str) -> str:
 DEFAULT_AGENT_INSTRUCTIONS = load_prompt("interactive_agent.md")
 DEFAULT_REALTIME_AGENT_INSTRUCTIONS = load_prompt("realtime_agent.md")
 DEFAULT_WORKER_AGENT_INSTRUCTIONS = load_prompt("worker_agent.md")
+DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS = load_prompt(
+    "interactive_tool_call_evaluator.md"
+)
+DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS = load_prompt("tool_call_evaluator.md")
 
 
 class ModelRateTierSettings(BaseModel):
@@ -51,6 +56,12 @@ def default_model_pricing() -> dict[str, ModelRateSettings]:
             input=Decimal("0.219684"),
             cached_input=Decimal("0.021968"),
             output=Decimal("1.757469"),
+            currency="€",
+        ),
+        "gpt-5.4-mini": ModelRateSettings(
+            input=Decimal("0.66"),
+            cached_input=Decimal("0.07"),
+            output=Decimal("3.96"),
             currency="€",
         ),
         "gpt-5.4": ModelRateSettings(
@@ -93,6 +104,7 @@ class Settings(BaseSettings):
     realtime_agent_provider: str = "gemini"
     realtime_agent_model: str = "gemini-3.1-flash-live-preview"
     worker_provider: str = "openai"
+    evaluation_provider: str = "openai"
     openai_api_key: str = Field(default="", repr=False)
     openai_base_url: str | None = None
     openai_realtime_voice_name: str = "marin"
@@ -100,6 +112,18 @@ class Settings(BaseSettings):
     openai_realtime_language_code: str | None = None
     openai_realtime_reasoning_effort: str | None = None
     worker_agent_model: str = "gpt-5-mini"
+    evaluation_model: str = "gpt-5.4-mini"
+    evaluation_reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = "none"
+    interactive_tool_evaluation_mode: Literal["off", "shadow", "enforce"] = "off"
+    interactive_tool_evaluation_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    interactive_tool_evaluation_max_revisions: int = Field(default=2, ge=0, le=10)
+    interactive_tool_evaluation_fail_open: bool = False
+    worker_tool_evaluation_mode: Literal["off", "shadow", "enforce"] = "off"
+    worker_tool_evaluation_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    worker_tool_evaluation_max_revisions: int = Field(default=2, ge=0, le=10)
+    worker_tool_evaluation_fail_open: bool = True
     model_pricing: dict[str, ModelRateSettings] = Field(default_factory=default_model_pricing)
     openai_connect_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     gemini_api_key: str = Field(default="", repr=False)
@@ -133,6 +157,10 @@ class Settings(BaseSettings):
     agent_instructions: str = DEFAULT_AGENT_INSTRUCTIONS
     realtime_agent_instructions: str = DEFAULT_REALTIME_AGENT_INSTRUCTIONS
     worker_agent_instructions: str = DEFAULT_WORKER_AGENT_INSTRUCTIONS
+    interactive_tool_call_evaluator_instructions: str = (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    tool_call_evaluator_instructions: str = DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS
     a2a_worker_reconciliation_seconds: float = Field(
         default=5.0,
         gt=0,

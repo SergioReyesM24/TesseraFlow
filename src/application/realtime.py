@@ -8,8 +8,15 @@ from uuid import uuid4
 import structlog
 
 from application.conversations import ConversationConflictError, ConversationNotFoundError
+from application.evaluations import (
+    ToolCallEvaluationGate,
+    ToolCallGateDecision,
+    append_evaluation_trace,
+    tool_call_revision_limit_results,
+)
 from application.ports import (
     ConversationRepository,
+    EvaluationTraceRepository,
     InteractionNotifier,
     InteractionRepository,
     RealtimeModelGateway,
@@ -56,7 +63,7 @@ from domain.realtime import (
     RealtimeTurnCompleted,
     RealtimeVisualComponent,
 )
-from domain.tools import ToolCallRecord, ToolResult
+from domain.tools import ToolCall, ToolCallRecord, ToolResult
 from domain.visuals import VisualPresentation
 
 logger = structlog.get_logger(__name__)
@@ -74,6 +81,10 @@ class RealtimeAudioChunkError(ValueError):
 
 class RealtimeToolRoundsExceededError(RuntimeError):
     """Raised when one speech turn exceeds its allowed model tool rounds."""
+
+
+class RealtimeToolCallEvaluationRejectedError(RuntimeError):
+    """Raised when the realtime agent cannot repair a rejected tool-call batch."""
 
 
 class RealtimeBackpressureError(RuntimeError):
@@ -126,6 +137,9 @@ class RealtimeAgentService:
         outbound_enqueue_timeout_seconds: float,
         proactive_turn_timeout_seconds: float,
         command_reconciliation_seconds: float,
+        tool_call_gate: ToolCallEvaluationGate | None = None,
+        max_tool_call_revisions: int = 2,
+        evaluation_traces: EvaluationTraceRepository | None = None,
         cost_calculator: ModelCostCalculator | None = None,
     ) -> None:
         """Bind application ports, authorized tools, and bounded session limits."""
@@ -142,6 +156,11 @@ class RealtimeAgentService:
         self._outbound_enqueue_timeout_seconds = outbound_enqueue_timeout_seconds
         self._proactive_turn_timeout_seconds = proactive_turn_timeout_seconds
         self._command_reconciliation_seconds = command_reconciliation_seconds
+        self._tool_call_gate = tool_call_gate
+        if max_tool_call_revisions < 0:
+            raise ValueError("max_tool_call_revisions cannot be negative")
+        self._max_tool_call_revisions = max_tool_call_revisions
+        self._evaluation_traces = evaluation_traces
         self._cost_calculator = cost_calculator or ModelCostCalculator()
 
     @property
@@ -205,6 +224,9 @@ class RealtimeAgentService:
                     outbound_enqueue_timeout_seconds=(self._outbound_enqueue_timeout_seconds),
                     proactive_turn_timeout_seconds=self._proactive_turn_timeout_seconds,
                     command_reconciliation_seconds=self._command_reconciliation_seconds,
+                    tool_call_gate=self._tool_call_gate,
+                    max_tool_call_revisions=self._max_tool_call_revisions,
+                    evaluation_traces=self._evaluation_traces,
                 )
                 async with session.lifecycle():
                     yield session
@@ -233,6 +255,9 @@ class RealtimeAgentSession:
         outbound_enqueue_timeout_seconds: float = 5.0,
         proactive_turn_timeout_seconds: float = 120.0,
         command_reconciliation_seconds: float = 5.0,
+        tool_call_gate: ToolCallEvaluationGate | None = None,
+        max_tool_call_revisions: int = 2,
+        evaluation_traces: EvaluationTraceRepository | None = None,
     ) -> None:
         """Initialize isolated state and a bounded outbound command channel."""
         self._model_session = model_session
@@ -251,6 +276,11 @@ class RealtimeAgentSession:
         self._outbound_max_audio_bytes = outbound_max_audio_bytes
         self._proactive_turn_timeout_seconds = proactive_turn_timeout_seconds
         self._command_reconciliation_seconds = command_reconciliation_seconds
+        self._tool_call_gate = tool_call_gate
+        if max_tool_call_revisions < 0:
+            raise ValueError("max_tool_call_revisions cannot be negative")
+        self._max_tool_call_revisions = max_tool_call_revisions
+        self._evaluation_traces = evaluation_traces
         self._tool_executor = ToolExecutor()
         self._outbound: asyncio.Queue[_OutboundCommand] = asyncio.Queue(
             maxsize=outbound_max_messages
@@ -261,6 +291,9 @@ class RealtimeAgentSession:
         self._next_outbound_sequence = 0
         self._writer_task: asyncio.Task[None] | None = None
         self._dispatcher_task: asyncio.Task[None] | None = None
+        self._tool_evaluation_task: asyncio.Task[ToolCallGateDecision | None] | None = None
+        self._pending_tool_turn_id: str | None = None
+        self._pending_tool_event: RealtimeModelToolCall | None = None
         self._lifecycle_active = False
         self._closing = False
         self._worker_id = f"realtime:{uuid4()}"
@@ -293,6 +326,9 @@ class RealtimeAgentSession:
         self._visual_component_ready = asyncio.Event()
         self._model_calls: list[ModelCallMetrics] = []
         self._tool_rounds = 0
+        self._tool_call_revisions = 0
+        self._evaluation_attempt = 0
+        self._terminal_rejection_sent = False
 
     @property
     def connection_state(self) -> RealtimeConnectionState:
@@ -388,12 +424,22 @@ class RealtimeAgentSession:
                 waiters: set[asyncio.Task[Any]] = {receive_task, visual_task}
                 if self._dispatcher_task is not None:
                     waiters.add(self._dispatcher_task)
+                tool_evaluation_task = self._tool_evaluation_task
+                if tool_evaluation_task is not None:
+                    waiters.add(tool_evaluation_task)
                 done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
                 if self._dispatcher_task is not None and self._dispatcher_task in done:
                     exception = self._dispatcher_task.exception()
                     if exception is not None:
                         raise exception
                     raise RealtimeSessionStateError("Realtime command dispatcher stopped")
+                if tool_evaluation_task is not None and tool_evaluation_task in done:
+                    visual_task.cancel()
+                    await asyncio.gather(visual_task, return_exceptions=True)
+                    visual_task = None
+                    async for tool_event in self._settle_tool_evaluation():
+                        yield tool_event
+                    continue
                 if self._pending_visual_components:
                     pending = tuple(self._pending_visual_components)
                     self._pending_visual_components = []
@@ -410,6 +456,9 @@ class RealtimeAgentSession:
                 try:
                     event = receive_task.result()
                 except StopAsyncIteration:
+                    if self._tool_evaluation_task is not None:
+                        async for tool_event in self._settle_tool_evaluation():
+                            yield tool_event
                     if not self._lifecycle_active:
                         await self._close_tasks()
                     return
@@ -424,6 +473,7 @@ class RealtimeAgentSession:
                 *(task for task in (receive_task, visual_task) if task is not None),
                 return_exceptions=True,
             )
+            await self._cancel_tool_evaluation()
 
     @staticmethod
     async def _next_model_event(
@@ -434,6 +484,18 @@ class RealtimeAgentSession:
 
     async def _handle_model_event(self, event: object) -> AsyncIterator[RealtimeAgentEvent]:
         """Translate one provider-neutral event and advance connection-local state."""
+        if self._tool_evaluation_task is not None and isinstance(
+            event,
+            (
+                RealtimeModelInputTranscriptDelta,
+                RealtimeModelAudioInterrupted,
+                RealtimeModelActivityStarted,
+            ),
+        ):
+            # Output may keep flowing while policy runs, but events that can replace
+            # the logical turn must settle its pending call first.
+            async for tool_event in self._settle_tool_evaluation():
+                yield tool_event
         if self._pending_visual_components:
             turn_id = self._ensure_turn_id()
             pending = tuple(self._pending_visual_components)
@@ -486,9 +548,12 @@ class RealtimeAgentSession:
             yield RealtimeAudioInterrupted(turn_id=interrupted_turn_id or self._ensure_turn_id())
         elif isinstance(event, RealtimeModelToolCall):
             self._capture_metrics(event.usage)
-            async for tool_event in self._handle_tools(self._ensure_turn_id(), event):
-                yield tool_event
+            self._schedule_tool_evaluation(self._ensure_turn_id(), event)
         elif isinstance(event, RealtimeModelTurnCompleted):
+            if self._tool_evaluation_task is not None:
+                async for tool_event in self._settle_tool_evaluation():
+                    yield tool_event
+                return
             turn_id = self._ensure_turn_id()
             self._capture_metrics(event.usage)
             for deferred in self._release_deferred_output(deduplicate=True):
@@ -514,16 +579,72 @@ class RealtimeAgentSession:
             self._connection_state = "connected"
             yield RealtimeReconnected(resumed=event.resumed)
 
-    async def _handle_tools(
+    def _schedule_tool_evaluation(
         self,
         turn_id: str,
         event: RealtimeModelToolCall,
-    ) -> AsyncIterator[RealtimeAgentEvent]:
-        """Execute one tool batch and enqueue results through the single writer."""
+    ) -> None:
+        """Start policy evaluation without blocking subsequent provider output events."""
+        if self._tool_evaluation_task is not None:
+            raise RealtimeSessionStateError(
+                "Realtime model emitted another tool batch while evaluation was pending"
+            )
         if self._pre_tool_output is None:
             emitted = "".join(self._output_parts).strip()
             if emitted:
                 self._pre_tool_output = emitted
+        self._evaluation_attempt += 1
+        self._pending_tool_turn_id = turn_id
+        self._pending_tool_event = event
+        self._tool_evaluation_task = asyncio.create_task(
+            self._inspect_tool_calls(
+                turn_id=turn_id,
+                calls=event.calls,
+                attempt=self._evaluation_attempt,
+            ),
+            name=f"realtime-tool-evaluation-{turn_id}",
+        )
+
+    async def _settle_tool_evaluation(self) -> AsyncIterator[RealtimeAgentEvent]:
+        """Apply one completed background decision before any external tool effect."""
+        task = self._tool_evaluation_task
+        turn_id = self._pending_tool_turn_id
+        event = self._pending_tool_event
+        if task is None or turn_id is None or event is None:
+            raise RealtimeSessionStateError("Realtime tool evaluation state is incomplete")
+        try:
+            decision = await task
+        finally:
+            self._tool_evaluation_task = None
+            self._pending_tool_turn_id = None
+            self._pending_tool_event = None
+        async for tool_event in self._finish_tools(turn_id, event, decision):
+            yield tool_event
+
+    async def _finish_tools(
+        self,
+        turn_id: str,
+        event: RealtimeModelToolCall,
+        decision: ToolCallGateDecision | None,
+    ) -> AsyncIterator[RealtimeAgentEvent]:
+        """Apply evaluation policy, then execute only an approved realtime batch."""
+        if self._terminal_rejection_sent:
+            raise RealtimeToolCallEvaluationRejectedError(
+                "Realtime agent requested another tool after a terminal evaluation result"
+            )
+        if decision is not None and not decision.execute:
+            feedback_results = decision.feedback_results
+            if decision.disposition == "inform_user":
+                self._terminal_rejection_sent = True
+            elif self._tool_call_revisions >= self._max_tool_call_revisions:
+                feedback_results = tool_call_revision_limit_results(event.calls)
+                self._terminal_rejection_sent = True
+            else:
+                self._tool_call_revisions += 1
+            self._turn_items.extend(event.calls)
+            self._turn_items.extend(feedback_results)
+            await self._enqueue("tool_results", feedback_results)
+            return
         self._tool_rounds += 1
         if self._tool_rounds > self._max_tool_rounds:
             raise RealtimeToolRoundsExceededError(
@@ -552,6 +673,58 @@ class RealtimeAgentSession:
         for presentation in execution.visual_components:
             yield RealtimeVisualComponent(turn_id=turn_id, presentation=presentation)
         await self._enqueue("tool_results", execution.results)
+
+    async def _cancel_tool_evaluation(self) -> None:
+        """Cancel and clear a pending evaluator task when its realtime session closes."""
+        task = self._tool_evaluation_task
+        self._tool_evaluation_task = None
+        self._pending_tool_turn_id = None
+        self._pending_tool_event = None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _inspect_tool_calls(
+        self,
+        *,
+        turn_id: str,
+        calls: tuple[ToolCall, ...],
+        attempt: int,
+    ) -> ToolCallGateDecision | None:
+        """Evaluate a realtime batch against durable history and current-turn evidence."""
+        if self._tool_call_gate is None:
+            return None
+        conversation = await self._conversations.load(self._conversation_key)
+        if conversation is None:
+            raise ConversationNotFoundError("Conversation session does not exist")
+        current_input = "".join(self._input_parts).strip()
+        current_items: tuple[ConversationItem, ...] = tuple(self._turn_items)
+        if current_input:
+            current_items = (
+                ConversationMessage(role="user", content=current_input, source=self._source),
+                *current_items,
+            )
+        decision = await self._tool_call_gate.inspect(
+            context=conversation.messages + current_items,
+            available_tools=self._tools.specs,
+            proposed_calls=calls,
+        )
+        if decision.evaluation is not None:
+            self._capture_metrics(
+                decision.evaluation.usage,
+                model=decision.evaluation.model,
+            )
+            await append_evaluation_trace(
+                self._evaluation_traces,
+                decision=decision,
+                conversation_id=self._conversation_key.conversation_id,
+                turn_id=turn_id,
+                job_id=None,
+                attempt=attempt,
+                calls=calls,
+            )
+        return decision
 
     def _release_deferred_output(
         self,
@@ -679,10 +852,10 @@ class RealtimeAgentSession:
         )
         return turn_id
 
-    def _capture_metrics(self, usage: ModelUsage) -> None:
+    def _capture_metrics(self, usage: ModelUsage, *, model: str | None = None) -> None:
         """Accumulate each billable realtime response inside its logical turn."""
         if usage.total_tokens:
-            self._model_calls.append(self._cost_calculator.metrics(self._model, usage))
+            self._model_calls.append(self._cost_calculator.metrics(model or self._model, usage))
 
     async def _persist_turn(
         self,
@@ -896,6 +1069,7 @@ class RealtimeAgentSession:
         """Stop connection tasks and release any claimed durable command."""
         self._connection_state = "disconnected"
         self._closing = True
+        await self._cancel_tool_evaluation()
         try:
             await self._drain_visible_proactive_turn()
         finally:
@@ -1089,6 +1263,9 @@ class RealtimeAgentSession:
         self._visual_component_ready.clear()
         self._model_calls = []
         self._tool_rounds = 0
+        self._tool_call_revisions = 0
+        self._evaluation_attempt = 0
+        self._terminal_rejection_sent = False
         self._turn_has_input = False
         self._turn_has_output = False
 

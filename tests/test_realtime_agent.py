@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from application.evaluations import ToolCallEvaluationGate
 from application.ports import RealtimeModelSession
 from application.realtime import (
     RealtimeAgentService,
@@ -24,12 +25,15 @@ from domain.conversations import (
     ConversationKey,
     ConversationMessage,
 )
+from domain.costs import ModelUsage
+from domain.evaluations import AgentStepEvaluation, AgentStepEvaluationRequest, EvaluationTrace
 from domain.interactions import InteractionCommand
 from domain.realtime import (
     AudioChunk,
     RealtimeActivityConfig,
     RealtimeActivityEnded,
     RealtimeActivityStarted,
+    RealtimeAgentEvent,
     RealtimeAudioDelta,
     RealtimeAudioInterrupted,
     RealtimeInputTranscriptDelta,
@@ -71,17 +75,83 @@ class LookupTool(AgentTool[LookupArguments]):
     description = "Look up one value."
     arguments_model = LookupArguments
 
+    def __init__(self) -> None:
+        self.invocations: list[LookupArguments] = []
+
     async def execute(
         self,
         arguments: LookupArguments,
         context: ToolExecutionContext,
     ) -> Any:
         """Echo the value and owning user without external I/O."""
+        self.invocations.append(arguments)
         return {
             "value": arguments.value,
             "user_id": context.user_id,
             "delivery_mode": context.delivery_mode,
         }
+
+
+class StubStepEvaluator:
+    """Return deterministic judgments while retaining realtime evidence."""
+
+    def __init__(self, evaluations: list[AgentStepEvaluation]) -> None:
+        self._evaluations = evaluations
+        self.requests: list[AgentStepEvaluationRequest] = []
+
+    async def evaluate(self, request: AgentStepEvaluationRequest) -> AgentStepEvaluation:
+        self.requests.append(request)
+        return self._evaluations.pop(0)
+
+
+class BlockingStepEvaluator:
+    """Hold one passing decision so tests can observe concurrent provider output."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def evaluate(self, request: AgentStepEvaluationRequest) -> AgentStepEvaluation:
+        del request
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return AgentStepEvaluation(
+            verdict="pass",
+            risk="low",
+            reason_code="none",
+            feedback="",
+            model="evaluation-model",
+        )
+
+
+class FailingStepEvaluator:
+    """Represent an evaluator outage independently from the realtime provider."""
+
+    async def evaluate(self, request: AgentStepEvaluationRequest) -> AgentStepEvaluation:
+        del request
+        raise TimeoutError("evaluation timed out")
+
+
+class InMemoryEvaluationTraceRepository:
+    """Retain evaluator traces without coupling the realtime test to PostgreSQL."""
+
+    def __init__(self) -> None:
+        self.traces: list[EvaluationTrace] = []
+
+    async def append_evaluation_trace(self, trace: EvaluationTrace) -> None:
+        self.traces.append(trace)
+
+
+async def _collect_events(
+    events: AsyncIterator[RealtimeAgentEvent],
+) -> list[RealtimeAgentEvent]:
+    """Collect a remaining realtime stream in a separately scheduled task."""
+    return [event async for event in events]
 
 
 class StubRealtimeModelSession(RealtimeModelSession):
@@ -124,6 +194,29 @@ class StubRealtimeModelSession(RealtimeModelSession):
         """Yield the configured model events in order."""
         for event in self._events:
             yield event
+
+
+class ToolResultGatedRealtimeModelSession(StubRealtimeModelSession):
+    """Emit the final model turn only after policy feedback reaches the provider."""
+
+    def __init__(
+        self,
+        events: list[RealtimeModelEvent],
+        terminal: RealtimeModelTurnCompleted,
+    ) -> None:
+        super().__init__(events)
+        self._terminal = terminal
+        self._tool_result_sent = asyncio.Event()
+
+    async def send_tool_results(self, results: tuple[ToolResult, ...]) -> None:
+        await super().send_tool_results(results)
+        self._tool_result_sent.set()
+
+    async def receive(self) -> AsyncIterator[RealtimeModelEvent]:
+        for event in self._events:
+            yield event
+        await self._tool_result_sent.wait()
+        yield self._terminal
 
 
 class StubConversations:
@@ -415,6 +508,250 @@ async def test_realtime_session_streams_media_executes_tools_and_persists_transc
         source="assistant",
     )
     assert all(not isinstance(item, AudioChunk) for item in turn)
+
+
+async def test_realtime_rejects_an_interactive_call_before_executing_its_revision() -> None:
+    """Feed evaluator feedback to realtime and execute only the corrected call batch."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    rejected_call = ToolCall(call_id="call-delegate", tool_name="lookup", arguments={"value": 1})
+    accepted_call = ToolCall(call_id="call-continue", tool_name="lookup", arguments={"value": 2})
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelInputTranscriptDelta(text="Continúa el trabajo anterior"),
+            RealtimeModelToolCall(calls=(rejected_call,)),
+            RealtimeModelToolCall(calls=(accepted_call,)),
+            RealtimeModelOutputTranscriptDelta(text="Continuado"),
+            RealtimeModelTurnCompleted(response_id="response-1"),
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="fail",
+                risk="medium",
+                reason_code="wrong_tool",
+                feedback="Continue the existing worker thread.",
+                model="evaluation-model",
+                usage=ModelUsage(input_tokens=10, output_tokens=2),
+            ),
+            AgentStepEvaluation(
+                verdict="pass",
+                risk="low",
+                reason_code="none",
+                feedback="",
+                model="evaluation-model",
+                usage=ModelUsage(input_tokens=10, output_tokens=2),
+            ),
+        ]
+    )
+    traces = InMemoryEvaluationTraceRepository()
+    tool = LookupTool()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([tool]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+        ),
+        evaluation_traces=traces,
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    assert [arguments.value for arguments in tool.invocations] == [2]
+    assert [event.call_id for event in events if isinstance(event, RealtimeToolStarted)] == [
+        "call-continue"
+    ]
+    assert len(model.tool_results) == 2
+    assert model.tool_results[0][0].call_id == "call-delegate"
+    assert model.tool_results[0][0].error is not None
+    assert '"code":"tool_call_rejected"' in model.tool_results[0][0].error
+    assert evaluator.requests[1].context[-2:] == (
+        rejected_call,
+        model.tool_results[0][0],
+    )
+    assert [trace.executed for trace in traces.traces] == [False, True]
+    assert all(trace.job_id is None for trace in traces.traces)
+
+
+async def test_realtime_delivers_model_output_while_tool_evaluation_runs_in_background() -> None:
+    """Keep spoken acknowledgement flowing without allowing an unapproved tool effect."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    call = ToolCall(call_id="call-delegate", tool_name="lookup", arguments={"value": 7})
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelToolCall(calls=(call,)),
+            RealtimeModelOutputTranscriptDelta(text="Voy a revisarlo."),
+        ]
+    )
+    evaluator = BlockingStepEvaluator()
+    tool = LookupTool()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([tool]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+            technical_failure_mode="feedback",
+        ),
+    )
+    await session.send_text("turn-1", "Consulta estos datos")
+    events = session.events().__aiter__()
+
+    acknowledgement = await asyncio.wait_for(anext(events), timeout=0.5)
+
+    assert acknowledgement == RealtimeOutputTranscriptDelta(
+        turn_id="turn-1",
+        text="Voy a revisarlo.",
+    )
+    assert evaluator.started.is_set()
+    assert tool.invocations == []
+
+    evaluator.release.set()
+    remaining = [event async for event in events]
+
+    assert [arguments.value for arguments in tool.invocations] == [7]
+    assert any(isinstance(event, RealtimeToolStarted) for event in remaining)
+    assert model.tool_results[0][0].output is not None
+
+
+async def test_realtime_settles_background_tool_before_a_user_interruption_changes_turn() -> None:
+    """Keep an approved call and its audit items on the turn that proposed it."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    call = ToolCall(call_id="call-delegate", tool_name="lookup", arguments={"value": 7})
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelOutputTranscriptDelta(text="Voy a revisarlo."),
+            RealtimeModelToolCall(calls=(call,)),
+            RealtimeModelAudioInterrupted(),
+        ]
+    )
+    evaluator = BlockingStepEvaluator()
+    tool = LookupTool()
+    conversations = StubConversations(key)
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([tool]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+            technical_failure_mode="feedback",
+        ),
+    )
+    await session.send_text("turn-1", "Consulta estos datos")
+    events = session.events().__aiter__()
+    assert isinstance(await anext(events), RealtimeOutputTranscriptDelta)
+    remaining_task = asyncio.create_task(_collect_events(events))
+    await evaluator.started.wait()
+
+    assert remaining_task.done() is False
+    assert tool.invocations == []
+
+    evaluator.release.set()
+    remaining = await remaining_task
+
+    completed_index = next(
+        index for index, event in enumerate(remaining) if isinstance(event, RealtimeToolCompleted)
+    )
+    interrupted_index = next(
+        index
+        for index, event in enumerate(remaining)
+        if isinstance(event, RealtimeAudioInterrupted)
+    )
+    assert completed_index < interrupted_index
+    assert call in conversations.saved_turns[0]
+    assert any(isinstance(item, ToolResult) for item in conversations.saved_turns[0])
+
+
+async def test_realtime_cancels_background_evaluation_when_event_consumption_stops() -> None:
+    """Do not leak evaluator work after its owning realtime stream is gone."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    call = ToolCall(call_id="call-delegate", tool_name="lookup", arguments={"value": 7})
+    model = QueueRealtimeModelSession()
+    evaluator = BlockingStepEvaluator()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([LookupTool()]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+            technical_failure_mode="feedback",
+        ),
+    )
+    await session.send_text("turn-1", "Consulta estos datos")
+    consumer = asyncio.create_task(_collect_events(session.events()))
+    await model.events_queue.put(RealtimeModelToolCall(calls=(call,)))
+    await evaluator.started.wait()
+
+    consumer.cancel()
+    await asyncio.gather(consumer, return_exceptions=True)
+
+    assert evaluator.cancelled.is_set()
+
+
+async def test_realtime_evaluator_outage_becomes_a_general_user_message() -> None:
+    """Return a typed terminal result so the model can explain a general failure."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    call = ToolCall(call_id="call-delegate", tool_name="lookup", arguments={"value": 7})
+    model = ToolResultGatedRealtimeModelSession(
+        [
+            RealtimeModelToolCall(calls=(call,)),
+            RealtimeModelOutputTranscriptDelta(
+                text="No he podido validar la operación. Puedes intentarlo de nuevo."
+            ),
+        ],
+        RealtimeModelTurnCompleted(response_id="response-1"),
+    )
+    tool = LookupTool()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([tool]),
+        StubConversations(key),
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+        tool_call_gate=ToolCallEvaluationGate(
+            FailingStepEvaluator(),
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+            technical_failure_mode="feedback",
+        ),
+    )
+    await session.send_text("turn-1", "Consulta estos datos")
+
+    events = [event async for event in session.events()]
+
+    assert tool.invocations == []
+    assert model.tool_results[0][0].error is not None
+    assert '"code":"tool_call_evaluation_unavailable"' in model.tool_results[0][0].error
+    terminal = next(event for event in events if isinstance(event, RealtimeTurnCompleted))
+    assert terminal.result.answer.startswith("No he podido validar")
 
 
 async def test_realtime_suppresses_repeated_text_and_audio_after_a_tool_call() -> None:

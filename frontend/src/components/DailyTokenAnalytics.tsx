@@ -1,8 +1,10 @@
 import { ArrowDownToLine, ArrowUpFromLine, Database, Gauge, RefreshCw } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { formatDate } from '../lib/dates'
+import { formatCurrencyUnit, formatModelCost } from '../lib/costs'
 import type {
   DailyTokenUsageReport,
+  ModelCost,
   ModelUsage,
   VisualPresentation as VisualPresentationData,
 } from '../types'
@@ -26,8 +28,12 @@ export function DailyTokenAnalytics({
   error,
   onRangeChange,
 }: DailyTokenAnalyticsProps) {
+  const [chartMetric, setChartMetric] = useState<'tokens' | 'cost'>('tokens')
   const totals = useMemo(() => aggregateUsage(report), [report])
   const chart = useMemo(() => buildDailyChart(report), [report])
+  const costChart = useMemo(() => buildDailyCostChart(report), [report])
+  const activeChartMetric = chartMetric === 'cost' && costChart ? 'cost' : 'tokens'
+  const activeChart = activeChartMetric === 'cost' ? costChart : chart
 
   return (
     <section className="history-global-usage" aria-labelledby="global-token-title">
@@ -37,22 +43,35 @@ export function DailyTokenAnalytics({
           <h2 id="global-token-title">Consumo global de tokens</h2>
           <p>Incluye conversaciones principales y ejecuciones de agentes internos.</p>
         </div>
-        <label>
-          Periodo
-          <span>
-            {loading && <RefreshCw className="spin" size={13} aria-label="Actualizando" />}
+        <div className="history-global-usage-controls">
+          <label>
+            Gráfica
             <select
-              value={rangeDays}
-              onChange={(event) => onRangeChange(Number(event.target.value))}
-              disabled={loading}
+              aria-label="Gráfica del histórico"
+              value={activeChartMetric}
+              onChange={(event) => setChartMetric(event.target.value as 'tokens' | 'cost')}
             >
-              <option value={7}>7 días</option>
-              <option value={30}>30 días</option>
-              <option value={90}>90 días</option>
-              <option value={365}>365 días</option>
+              <option value="tokens">Tokens</option>
+              <option value="cost" disabled={!costChart}>Coste</option>
             </select>
-          </span>
-        </label>
+          </label>
+          <label>
+            Periodo
+            <span>
+              {loading && <RefreshCw className="spin" size={13} aria-label="Actualizando" />}
+              <select
+                value={rangeDays}
+                onChange={(event) => onRangeChange(Number(event.target.value))}
+                disabled={loading}
+              >
+                <option value={7}>7 días</option>
+                <option value={30}>30 días</option>
+                <option value={90}>90 días</option>
+                <option value={365}>365 días</option>
+              </select>
+            </span>
+          </label>
+        </div>
       </header>
 
       {error ? (
@@ -83,8 +102,15 @@ export function DailyTokenAnalytics({
               value={totals.modelCalls}
               detail={`${numberFormatter.format(totals.turns)} turnos`}
             />
+            <CostTotal
+              icon={<Gauge size={15} />}
+              label="Coste"
+              cost={totals.cost}
+              modelCalls={totals.modelCalls}
+              fullyPriced={totals.fullyPriced}
+            />
           </dl>
-          {chart && <VisualPresentation presentation={chart} />}
+          {activeChart && <VisualPresentation presentation={activeChart} />}
         </>
       ) : (
         <div className="history-global-usage-loading">
@@ -116,6 +142,35 @@ function TokenTotal({
   )
 }
 
+function CostTotal({
+  icon,
+  label,
+  cost,
+  modelCalls,
+  fullyPriced,
+}: {
+  icon: React.ReactNode
+  label: string
+  cost: ModelCost | null
+  modelCalls: number
+  fullyPriced: boolean
+}) {
+  const value = modelCalls === 0 ? 'Sin consumo' : cost ? formatModelCost(cost) : 'Parcial'
+  const detail =
+    modelCalls === 0
+      ? 'Sin llamadas en el periodo'
+      : fullyPriced
+        ? 'Todas las llamadas con tarifa'
+        : 'Faltan tarifas para algunas llamadas'
+  return (
+    <div>
+      <dt>{icon}{label}</dt>
+      <dd>{value}</dd>
+      <small>{detail}</small>
+    </div>
+  )
+}
+
 function aggregateUsage(report: DailyTokenUsageReport | null) {
   const usage = report?.days.reduce<ModelUsage>(
     (total, day) => ({
@@ -134,10 +189,22 @@ function aggregateUsage(report: DailyTokenUsageReport | null) {
   ) ?? emptyUsage()
   const turns = report?.days.reduce((total, day) => total + day.turn_count, 0) ?? 0
   const modelCalls = report?.days.reduce((total, day) => total + day.model_call_count, 0) ?? 0
+  const pricedDays = report?.days.filter((day) => day.cost !== null) ?? []
+  const currencies = new Set(pricedDays.map((day) => day.cost?.currency))
+  const fullyPriced = Boolean(report?.days.every((day) => day.fully_priced))
+  const cost =
+    fullyPriced && pricedDays.length > 0 && currencies.size === 1
+      ? {
+          amount: pricedDays.reduce((total, day) => total + (day.cost?.amount ?? 0), 0),
+          currency: pricedDays[0].cost?.currency ?? '',
+        }
+      : null
   return {
     usage,
     turns,
     modelCalls,
+    cost,
+    fullyPriced,
     cacheRatio: usage.input_tokens
       ? Math.round((usage.cached_input_tokens / usage.input_tokens) * 100)
       : 0,
@@ -178,6 +245,35 @@ function buildDailyChart(report: DailyTokenUsageReport | null): VisualPresentati
           })),
         },
       ],
+    },
+  }
+}
+
+function buildDailyCostChart(report: DailyTokenUsageReport | null): VisualPresentationData | null {
+  if (!report?.days.length) return null
+  const hasCompletePricing = report.days.every(
+    (day) => day.model_call_count === 0 || (day.fully_priced && day.cost !== null),
+  )
+  if (!hasCompletePricing) return null
+  const costDays = report.days.filter((day) => day.cost !== null)
+  const currencies = new Set(costDays.map((day) => day.cost?.currency))
+  if (!costDays.length || currencies.size !== 1) return null
+  const currency = formatCurrencyUnit(costDays[0].cost?.currency)
+  const points = report.days.map((day) => ({
+    x: formatDate(day.date),
+    y: day.cost?.amount ?? 0,
+  }))
+  return {
+    componentId: `global-token-cost-${report.days[0].date}-${report.days.at(-1)?.date}`,
+    fallbackText: points.map((point) => `${point.x}: ${point.y} ${currency ?? ''}`).join('. '),
+    component: {
+      kind: 'chart',
+      title: 'Coste diario',
+      subtitle: 'Coste calculado de llamadas por día',
+      chart_type: 'bar',
+      x_axis: { label: 'Día (UTC)' },
+      y_axis: { label: 'Coste', unit: currency },
+      series: [{ name: 'Coste', points }],
     },
   }
 }

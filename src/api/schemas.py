@@ -11,9 +11,13 @@ from domain.conversations import (
     ConversationHistoryPage,
     ConversationListPage,
     ConversationMessage,
+    ConversationUsageBreakdown,
     DailyTokenUsage,
+    ModelUsageBreakdown,
+    SessionUsageReport,
 )
 from domain.costs import ModelUsage, TurnMetrics
+from domain.evaluations import EvaluationTrace
 from domain.tools import ToolCall, ToolResult
 from domain.visuals import visual_presentation_payload
 
@@ -166,16 +170,24 @@ class DailyTokenUsageResponse(BaseModel):
 
     date: str
     usage: ModelUsageResponse
+    cost: ModelCostResponse | None
     turn_count: int
     model_call_count: int
+    fully_priced: bool
 
     @classmethod
     def from_domain(cls, value: DailyTokenUsage) -> "DailyTokenUsageResponse":
         return cls(
             date=value.day,
             usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
             turn_count=value.turn_count,
             model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
         )
 
 
@@ -185,6 +197,102 @@ class DailyTokenUsageReportResponse(BaseModel):
     user_id: str
     timezone: Literal["UTC"] = "UTC"
     days: list[DailyTokenUsageResponse]
+
+
+class ModelUsageBreakdownResponse(BaseModel):
+    """Aggregated token and cost totals for one model."""
+
+    model: str
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    model_call_count: int
+    fully_priced: bool
+
+    @classmethod
+    def from_domain(cls, value: ModelUsageBreakdown) -> "ModelUsageBreakdownResponse":
+        return cls(
+            model=value.model,
+            usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
+            model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
+        )
+
+
+class ConversationUsageBreakdownResponse(BaseModel):
+    """Aggregated token and cost totals for one root or worker conversation."""
+
+    conversation_id: UUID
+    title: str
+    role: Literal["interactive", "worker"]
+    thread_id: UUID | None
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    turn_count: int
+    model_call_count: int
+    fully_priced: bool
+    models: list[ModelUsageBreakdownResponse]
+
+    @classmethod
+    def from_domain(
+        cls,
+        value: ConversationUsageBreakdown,
+    ) -> "ConversationUsageBreakdownResponse":
+        return cls(
+            conversation_id=UUID(value.conversation_id),
+            title=value.title,
+            role=value.role,
+            thread_id=UUID(value.thread_id) if value.thread_id is not None else None,
+            usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
+            turn_count=value.turn_count,
+            model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
+            models=[ModelUsageBreakdownResponse.from_domain(model) for model in value.models],
+        )
+
+
+class SessionUsageReportResponse(BaseModel):
+    """Full cost report for a root session plus delegated worker conversations."""
+
+    user_id: str
+    root_conversation_id: UUID
+    usage: ModelUsageResponse
+    cost: ModelCostResponse | None
+    turn_count: int
+    model_call_count: int
+    fully_priced: bool
+    models: list[ModelUsageBreakdownResponse]
+    conversations: list[ConversationUsageBreakdownResponse]
+
+    @classmethod
+    def from_domain(cls, value: SessionUsageReport) -> "SessionUsageReportResponse":
+        return cls(
+            user_id=value.root_conversation.user_id,
+            root_conversation_id=UUID(value.root_conversation.conversation_id),
+            usage=ModelUsageResponse.from_domain(value.usage),
+            cost=(
+                ModelCostResponse(amount=float(value.cost.amount), currency=value.cost.currency)
+                if value.cost is not None
+                else None
+            ),
+            turn_count=value.turn_count,
+            model_call_count=value.model_call_count,
+            fully_priced=value.fully_priced,
+            models=[ModelUsageBreakdownResponse.from_domain(model) for model in value.models],
+            conversations=[
+                ConversationUsageBreakdownResponse.from_domain(conversation)
+                for conversation in value.conversations
+            ],
+        )
 
 
 class ModelCallMetricsResponse(BaseModel):
@@ -266,9 +374,7 @@ class AgentCompletedResponse(BaseModel):
                 visual_presentation_payload(component) for component in result.visual_components
             ],
             metrics=(
-                TurnMetricsResponse.from_domain(result.metrics)
-                if result.metrics.calls
-                else None
+                TurnMetricsResponse.from_domain(result.metrics) if result.metrics.calls else None
             ),
         )
 
@@ -417,6 +523,7 @@ class ConversationListResponse(BaseModel):
 
     user_id: str
     sessions: list[ConversationSummaryResponse]
+    total: int
     has_more: bool
     next_offset: int | None
 
@@ -446,8 +553,60 @@ class ConversationListResponse(BaseModel):
         return cls(
             user_id=user_id,
             sessions=sessions,
+            total=page.total,
             has_more=page.has_more,
             next_offset=offset + len(sessions) if page.has_more else None,
+        )
+
+
+class EvaluationTraceResponse(DateFormattedResponse):
+    """Safe evaluator audit record exposed without provider prompts or raw feedback."""
+
+    trace_id: UUID
+    conversation_id: UUID
+    turn_id: UUID
+    job_id: UUID | None
+    attempt: int
+    proposed_call_ids: list[str]
+    verdict: Literal["pass", "fail", "uncertain"]
+    risk: Literal["low", "medium", "high"]
+    reason_code: Literal[
+        "none",
+        "wrong_tool",
+        "unnecessary_tool",
+        "ungrounded_arguments",
+        "duplicate_action",
+        "unsafe_side_effect",
+        "incomplete_request",
+        "other",
+    ]
+    feedback: str
+    mode: Literal["shadow", "enforce"]
+    executed: bool
+    model: str
+    usage: ModelUsageResponse
+    latency_ms: float
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, trace: EvaluationTrace) -> "EvaluationTraceResponse":
+        return cls(
+            trace_id=UUID(trace.trace_id),
+            conversation_id=UUID(trace.conversation_id),
+            turn_id=UUID(trace.turn_id),
+            job_id=UUID(trace.job_id) if trace.job_id is not None else None,
+            attempt=trace.attempt,
+            proposed_call_ids=list(trace.proposed_call_ids),
+            verdict=trace.verdict,
+            risk=trace.risk,
+            reason_code=trace.reason_code,
+            feedback=trace.feedback,
+            mode=trace.mode,
+            executed=trace.executed,
+            model=trace.model,
+            usage=ModelUsageResponse.from_domain(trace.usage),
+            latency_ms=round(trace.latency_ms, 2),
+            created_at=trace.created_at,
         )
 
 
@@ -464,6 +623,8 @@ class ConversationHistoryResponse(DateFormattedResponse):
     updated_at: datetime
     last_message_at: datetime | None
     items: list[ConversationHistoryItemResponse]
+    evaluations: list[EvaluationTraceResponse]
+    evaluations_truncated: bool
     has_more: bool
     next_after_sequence: int | None
     correlation: ConversationCorrelationResponse
@@ -520,6 +681,11 @@ class ConversationHistoryResponse(DateFormattedResponse):
             updated_at=history.updated_at,
             last_message_at=history.last_message_at,
             items=items,
+            evaluations=[
+                EvaluationTraceResponse.from_domain(trace)
+                for trace in history.evaluations.traces
+            ],
+            evaluations_truncated=history.evaluations.truncated,
             has_more=history.has_more,
             next_after_sequence=next_sequence,
             correlation=ConversationCorrelationResponse.from_domain(history.correlation),
