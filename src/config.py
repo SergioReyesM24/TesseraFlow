@@ -50,7 +50,7 @@ class ModelRateSettings(BaseModel):
 
 
 def default_model_pricing() -> dict[str, ModelRateSettings]:
-    """Return € reference rates reviewed on 29-07-2026 for project models."""
+    """Return reviewed € reference rates for project models."""
     return {
         "gpt-5-mini": ModelRateSettings(
             input=Decimal("0.219684"),
@@ -62,6 +62,12 @@ def default_model_pricing() -> dict[str, ModelRateSettings]:
             input=Decimal("0.66"),
             cached_input=Decimal("0.07"),
             output=Decimal("3.96"),
+            currency="€",
+        ),
+        "gpt-5.6-luna": ModelRateSettings(
+            input=Decimal("0.88"),
+            cached_input=Decimal("0.09"),
+            output=Decimal("5.28"),
             currency="€",
         ),
         "gpt-5.4": ModelRateSettings(
@@ -111,8 +117,8 @@ class Settings(BaseSettings):
     openai_realtime_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_realtime_language_code: str | None = None
     openai_realtime_reasoning_effort: str | None = None
-    worker_agent_model: str = "gpt-5-mini"
-    evaluation_model: str = "gpt-5.4-mini"
+    worker_agent_model: str = "gpt-5.6-luna"
+    evaluation_model: str = "gpt-5.6-luna"
     evaluation_reasoning_effort: Literal[
         "none", "minimal", "low", "medium", "high", "xhigh", "max"
     ] = "none"

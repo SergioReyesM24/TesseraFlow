@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -7,6 +8,7 @@ from application.interactions import TurnInteractionAgent
 from application.tools import ToolRegistry
 from config import Settings
 from domain.conversations import Conversation, ConversationItem, ConversationKey
+from domain.costs import ModelRates
 from infrastructure.model_runtime import build_model_runtime
 
 
@@ -181,3 +183,20 @@ def test_runtime_rejects_unregistered_role_provider() -> None:
             interactive_tools=empty_tools(),
             worker_tools=empty_tools(),
         )
+
+
+def test_runtime_uses_current_role_prices_for_unknown_model_families() -> None:
+    """Bind unknown names to the active text, realtime, and worker price cards."""
+    text_rates = ModelRates(input=Decimal("1"), output=Decimal("2"))
+    realtime_rates = ModelRates(input=Decimal("3"), output=Decimal("4"))
+
+    fallbacks = runtime_module._current_model_fallbacks(
+        {"current-text": text_rates, "current-realtime": realtime_rates},
+        text_model="current-text",
+        realtime_model="current-realtime",
+        worker_model="missing-worker",
+    )
+
+    assert fallbacks["gpt"] is text_rates
+    assert fallbacks["gemini"] is realtime_rates
+    assert fallbacks["default"] is text_rates

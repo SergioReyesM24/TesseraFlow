@@ -192,19 +192,54 @@ class TurnMetrics:
 
 
 class ModelCostCalculator:
-    """Calculate costs from a model-keyed, provider-neutral rate catalog."""
+    """Calculate costs from a model-keyed catalog with explicit family fallbacks.
 
-    def __init__(self, rates: Mapping[str, ModelRates] | None = None) -> None:
+    Fallback keys are deliberately model-family names (currently ``gpt``,
+    ``gemini`` and ``default``), not provider SDK concepts. This lets the
+    composition root select the current configured model price for versioned or
+    historical model names without leaking provider details into the domain.
+    """
+
+    def __init__(
+        self,
+        rates: Mapping[str, ModelRates] | None = None,
+        *,
+        fallback_rates: Mapping[str, ModelRates] | None = None,
+    ) -> None:
         self._rates = dict(rates or {})
+        self._fallback_rates = dict(fallback_rates or {})
 
     def metrics(self, model: str, usage: ModelUsage) -> ModelCallMetrics:
-        """Build one auditable call metric, leaving cost unknown without a rate."""
-        rates = self._rates.get(model)
+        """Build one auditable call metric, using a family fallback when needed."""
+        rates = self._rates.get(model) or self._versioned_rates(model)
+        if rates is None:
+            rates = self._fallback_rates.get(self._family(model))
+        if rates is None:
+            rates = self._fallback_rates.get("default")
         return ModelCallMetrics(
             model=model,
             usage=usage,
             cost=self._calculate(usage, rates) if rates is not None else None,
         )
+
+    def _versioned_rates(self, model: str) -> ModelRates | None:
+        """Reuse an exact catalog entry for a provider's versioned model name."""
+        matches = (
+            (configured_model, rates)
+            for configured_model, rates in self._rates.items()
+            if model.startswith(f"{configured_model}-")
+        )
+        return max(matches, key=lambda item: len(item[0]), default=("", None))[1]
+
+    @staticmethod
+    def _family(model: str) -> str:
+        """Classify common model names without depending on a provider SDK."""
+        normalized = model.strip().lower()
+        if normalized.startswith("gpt-"):
+            return "gpt"
+        if normalized.startswith("gemini-"):
+            return "gemini"
+        return "default"
 
     @staticmethod
     def _calculate(usage: ModelUsage, rates: ModelRates) -> ModelCost:

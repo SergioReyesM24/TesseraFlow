@@ -85,3 +85,44 @@ def test_cost_calculator_selects_the_large_context_tier_per_request() -> None:
     assert call.cost is not None
     assert call.cost.amount == Decimal("0.00092")
     assert call.cost.currency == "€"
+
+
+def test_cost_calculator_uses_current_family_rate_for_unknown_model_versions() -> None:
+    """Price historical or newly versioned names with the active family card."""
+    calculator = ModelCostCalculator(
+        {"gpt-5.4": ModelRates(input=Decimal("2"), output=Decimal("10"))},
+        fallback_rates={
+            "gemini": ModelRates(
+                input=Decimal("1"),
+                input_audio=Decimal("4"),
+                output=Decimal("2"),
+                output_audio=Decimal("8"),
+            ),
+            "default": ModelRates(input=Decimal("3"), output=Decimal("6")),
+        },
+    )
+
+    gemini_call = calculator.metrics(
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        ModelUsage(
+            input_tokens=100, input_audio_tokens=40, output_tokens=50, output_audio_tokens=10
+        ),
+    )
+    versioned_gpt_call = calculator.metrics(
+        "gpt-5.4-2026-08-16",
+        ModelUsage(input_tokens=100, output_tokens=50),
+    )
+
+    assert gemini_call.cost == ModelCostCalculator._calculate(
+        ModelUsage(
+            input_tokens=100, input_audio_tokens=40, output_tokens=50, output_audio_tokens=10
+        ),
+        ModelRates(
+            input=Decimal("1"),
+            input_audio=Decimal("4"),
+            output=Decimal("2"),
+            output_audio=Decimal("8"),
+        ),
+    )
+    assert versioned_gpt_call.cost is not None
+    assert versioned_gpt_call.cost.amount == Decimal("0.0007")

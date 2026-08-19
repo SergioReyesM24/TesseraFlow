@@ -146,31 +146,38 @@ def build_model_runtime(
     text_gateway = text_gateways[settings.text_agent_provider]()
     worker_gateway = worker_gateways[settings.worker_provider]()
     realtime_gateway = realtime_gateways[settings.realtime_agent_provider]()
+    rate_catalog = {
+        model: ModelRates(
+            input=rates.input,
+            output=rates.output,
+            cached_input=rates.cached_input,
+            cached_input_audio=rates.cached_input_audio,
+            input_audio=rates.input_audio,
+            output_audio=rates.output_audio,
+            currency=rates.currency,
+            tiers=tuple(
+                ModelRateTier(
+                    min_input_tokens=tier.min_input_tokens,
+                    input=tier.input,
+                    output=tier.output,
+                    cached_input=tier.cached_input,
+                    cached_input_audio=tier.cached_input_audio,
+                    input_audio=tier.input_audio,
+                    output_audio=tier.output_audio,
+                )
+                for tier in rates.tiers
+            ),
+        )
+        for model, rates in settings.model_pricing.items()
+    }
     cost_calculator = ModelCostCalculator(
-        {
-            model: ModelRates(
-                input=rates.input,
-                output=rates.output,
-                cached_input=rates.cached_input,
-                cached_input_audio=rates.cached_input_audio,
-                input_audio=rates.input_audio,
-                output_audio=rates.output_audio,
-                currency=rates.currency,
-                tiers=tuple(
-                    ModelRateTier(
-                        min_input_tokens=tier.min_input_tokens,
-                        input=tier.input,
-                        output=tier.output,
-                        cached_input=tier.cached_input,
-                        cached_input_audio=tier.cached_input_audio,
-                        input_audio=tier.input_audio,
-                        output_audio=tier.output_audio,
-                    )
-                    for tier in rates.tiers
-                ),
-            )
-            for model, rates in settings.model_pricing.items()
-        }
+        rate_catalog,
+        fallback_rates=_current_model_fallbacks(
+            rate_catalog,
+            text_model=settings.text_agent_model,
+            realtime_model=settings.realtime_agent_model,
+            worker_model=settings.worker_agent_model,
+        ),
     )
 
     text_definition = AgentDefinition(
@@ -284,3 +291,22 @@ def _validate_selection(settings: Settings) -> None:
         raise ValueError(f"Unsupported realtime agent provider: {settings.realtime_agent_provider}")
     if settings.worker_provider != "openai":
         raise ValueError(f"Unsupported worker provider: {settings.worker_provider}")
+
+
+def _current_model_fallbacks(
+    rates: dict[str, ModelRates],
+    *,
+    text_model: str,
+    realtime_model: str,
+    worker_model: str,
+) -> dict[str, ModelRates]:
+    """Use prices of the currently configured roles for unknown model names."""
+    text_rates = rates.get(text_model) or rates.get(worker_model)
+    realtime_rates = rates.get(realtime_model)
+    fallbacks: dict[str, ModelRates] = {}
+    if text_rates is not None:
+        fallbacks["gpt"] = text_rates
+        fallbacks["default"] = text_rates
+    if realtime_rates is not None:
+        fallbacks["gemini"] = realtime_rates
+    return fallbacks

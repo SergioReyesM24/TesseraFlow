@@ -50,7 +50,9 @@ def test_default_prompts_are_loaded_from_versioned_markdown_files() -> None:
     assert "immediately call" in DEFAULT_AGENT_INSTRUCTIONS
     assert "Voy a consultarlo, dame un momento." in DEFAULT_AGENT_INSTRUCTIONS
     assert "lateral data panel" in DEFAULT_AGENT_INSTRUCTIONS
-    assert "new or changed visual view" in DEFAULT_AGENT_INSTRUCTIONS
+    assert "Every newly presented visual appends" in DEFAULT_AGENT_INSTRUCTIONS
+    assert 'placement: "append"' in DEFAULT_AGENT_INSTRUCTIONS
+    assert 'placement: "replace"' in DEFAULT_AGENT_INSTRUCTIONS
     assert "textual explanation" in DEFAULT_AGENT_INSTRUCTIONS
     assert "delegate_to_worker_agent" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
     assert "continue_worker_agent" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
@@ -63,8 +65,62 @@ def test_default_prompts_are_loaded_from_versioned_markdown_files() -> None:
     assert "send a Bizum of 10 EUR to their mother" in (
         DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
     )
+    assert "worker-only tools are not alternatives" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "A visual or tool result from a different topic is not reusable evidence" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "Every new visual appends by default" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "reusing its exact `component_id` is correct and required" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "`attached_visuals` metadata" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "Reordering, grouping, filtering, or relabeling" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "Distinguish sorting from grouping or aggregation" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "Never report a missing field that is present" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "latest money movements" in DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    assert "replace only the referenced visual; do not demand aggregation" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "A call followed by a `tool_call_rejected` result did not execute" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "telling the agent exactly what to correct" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "`uncertain` instead of inventing one" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "request to group movements by category" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "created no existing visual" in (
+        DEFAULT_INTERACTIVE_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "seven-day window" in DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    assert "Use a tool's default window only when the user supplied no window" in (
+        DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
+    assert "`uncertain` instead of inventing one" in (
+        DEFAULT_TOOL_CALL_EVALUATOR_INSTRUCTIONS
+    )
     assert "revise_silently" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
+    assert "must not end" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
+    assert "until a corrected call succeeds" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
     assert "tool_call_evaluation_unavailable" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
+    assert "Before calling `delegate_to_worker_agent`" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
+    assert "after speaking that sentence" in DEFAULT_REALTIME_AGENT_INSTRUCTIONS
 
 
 def test_explicit_settings_can_override_markdown_prompts() -> None:
@@ -102,7 +158,7 @@ def test_endpoint_and_worker_models_have_independent_provider_settings() -> None
     assert settings.interactive_tool_evaluation_mode == "shadow"
     assert settings.worker_tool_evaluation_mode == "off"
     assert settings.evaluation_provider == "openai"
-    assert settings.evaluation_model == "gpt-5.4-mini"
+    assert settings.evaluation_model == "gpt-5.6-luna"
     assert settings.evaluation_reasoning_effort == "none"
     assert settings.gemini_api_key == "gemini-key"
     assert settings.openai_api_key == "openai-key"
@@ -142,11 +198,23 @@ def test_model_pricing_accepts_a_provider_neutral_json_catalog(monkeypatch: Any)
     assert settings.model_pricing["custom-model"].currency == "€"
 
 
-def test_active_worker_model_has_reviewed_euro_rates_and_long_context_tier() -> None:
-    """Keep the GPT-5.4 worker priced in the checked-in default catalog."""
+def test_worker_and_evaluators_default_to_priced_gpt_5_6_luna() -> None:
+    """Keep both non-realtime model roles aligned with the requested price card."""
     settings = Settings(_env_file=None)
 
-    rates = settings.model_pricing["gpt-5.4"]
+    assert settings.worker_agent_model == "gpt-5.6-luna"
+    assert settings.evaluation_model == "gpt-5.6-luna"
+    rates = settings.model_pricing["gpt-5.6-luna"]
+    assert rates.input == Decimal("0.88")
+    assert rates.cached_input == Decimal("0.09")
+    assert rates.output == Decimal("5.28")
+    assert rates.currency == "€"
+
+
+def test_gpt_5_4_keeps_reviewed_euro_rates_and_long_context_tier() -> None:
+    """Preserve the existing long-context price-card regression coverage."""
+    rates = Settings(_env_file=None).model_pricing["gpt-5.4"]
+
     assert rates.input == Decimal("2.193945")
     assert rates.cached_input == Decimal("0.219394")
     assert rates.output == Decimal("13.163668")
@@ -225,7 +293,7 @@ def test_blank_optional_dotenv_values_keep_provider_defaults(
 
     assert settings.text_agent_model == "gpt-5-mini"
     assert settings.realtime_agent_model == "gemini-3.1-flash-live-preview"
-    assert settings.worker_agent_model == "gpt-5-mini"
+    assert settings.worker_agent_model == "gpt-5.6-luna"
     assert settings.openai_base_url is None
     assert settings.gemini_live_language_code is None
 
