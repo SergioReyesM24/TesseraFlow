@@ -33,6 +33,10 @@ def test_rejects_non_positive_amounts_and_recipient_overrides() -> None:
     with pytest.raises(ValidationError):
         MockBizumArguments(amount=Decimal("0"))
     with pytest.raises(ValidationError):
+        MockBizumArguments(amount=Decimal("10.001"))
+    with pytest.raises(ValidationError):
+        MockBizumArguments(amount=Decimal("100000000"))
+    with pytest.raises(ValidationError):
         MockBizumArguments.model_validate({"amount": "10", "recipient": "Otra persona"})
 
 
@@ -43,3 +47,10 @@ def test_declares_a_closed_schema_with_one_required_amount() -> None:
     assert schema["required"] == ["amount"]
     assert set(schema["properties"]) == {"amount"}
     assert schema["additionalProperties"] is False
+    assert schema["properties"]["amount"] == {
+        "description": "Positive € amount to send to the fixed mock recipient Mamá",
+        "exclusiveMinimum": 0,
+        "maximum": 99_999_999.99,
+        "title": "Amount",
+        "type": "number",
+    }

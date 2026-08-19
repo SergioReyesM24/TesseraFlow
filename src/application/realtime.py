@@ -69,6 +69,9 @@ from domain.visuals import VisualPresentation
 logger = structlog.get_logger(__name__)
 
 MAX_DEFERRED_REALTIME_AUDIO_BYTES = 8 * 1024 * 1024
+_UNREPAIRED_TOOL_CALL_MESSAGE = (
+    "No he podido completar la operación. Puedes intentarlo de nuevo."
+)
 
 
 class RealtimeSessionStateError(RuntimeError):
@@ -328,6 +331,7 @@ class RealtimeAgentSession:
         self._tool_rounds = 0
         self._tool_call_revisions = 0
         self._evaluation_attempt = 0
+        self._tool_revision_required = False
         self._terminal_rejection_sent = False
 
     @property
@@ -516,7 +520,7 @@ class RealtimeAgentSession:
             turn_id = self._ensure_turn_id()
             self._turn_has_output = True
             transcript_event = RealtimeOutputTranscriptDelta(turn_id=turn_id, text=event.text)
-            if self._pre_tool_output is not None:
+            if self._should_defer_model_output():
                 self._deferred_output_parts.append(event.text)
                 self._deferred_output_events.append(transcript_event)
             else:
@@ -530,7 +534,7 @@ class RealtimeAgentSession:
                 data=event.data,
                 mime_type=event.mime_type,
             )
-            if self._pre_tool_output is not None:
+            if self._should_defer_model_output():
                 self._deferred_output_events.append(audio_event)
                 self._deferred_audio_bytes += len(event.data)
                 if self._deferred_audio_bytes > MAX_DEFERRED_REALTIME_AUDIO_BYTES:
@@ -556,8 +560,11 @@ class RealtimeAgentSession:
                 return
             turn_id = self._ensure_turn_id()
             self._capture_metrics(event.usage)
-            for deferred in self._release_deferred_output(deduplicate=True):
-                yield deferred
+            if self._tool_revision_required or self._terminal_rejection_sent:
+                yield self._replace_output_with_unrepaired_tool_failure(turn_id)
+            else:
+                for deferred in self._release_deferred_output(deduplicate=True):
+                    yield deferred
             yield await self._complete_turn(turn_id, event.response_id)
         elif isinstance(event, RealtimeModelActivityStarted):
             await self._activate_audio_turn_for_input()
@@ -635,16 +642,22 @@ class RealtimeAgentSession:
         if decision is not None and not decision.execute:
             feedback_results = decision.feedback_results
             if decision.disposition == "inform_user":
+                self._tool_revision_required = False
                 self._terminal_rejection_sent = True
             elif self._tool_call_revisions >= self._max_tool_call_revisions:
                 feedback_results = tool_call_revision_limit_results(event.calls)
+                self._tool_revision_required = False
                 self._terminal_rejection_sent = True
             else:
                 self._tool_call_revisions += 1
+                self._tool_revision_required = True
             self._turn_items.extend(event.calls)
             self._turn_items.extend(feedback_results)
             await self._enqueue("tool_results", feedback_results)
             return
+        if self._tool_revision_required:
+            self._discard_deferred_output()
+            self._tool_revision_required = False
         self._tool_rounds += 1
         if self._tool_rounds > self._max_tool_rounds:
             raise RealtimeToolRoundsExceededError(
@@ -755,6 +768,40 @@ class RealtimeAgentSession:
         self._deferred_output_events = []
         self._deferred_audio_bytes = 0
         return events
+
+    def _should_defer_model_output(self) -> bool:
+        """Hold post-tool claims until policy and any required repair have succeeded."""
+        return (
+            self._pre_tool_output is not None
+            or self._tool_revision_required
+            or self._terminal_rejection_sent
+        )
+
+    def _discard_deferred_output(self) -> None:
+        """Drop model output produced while a rejected tool call still lacked repair."""
+        self._deferred_output_parts = []
+        self._deferred_output_events = []
+        self._deferred_audio_bytes = 0
+
+    def _replace_output_with_unrepaired_tool_failure(
+        self,
+        turn_id: str,
+    ) -> RealtimeOutputTranscriptDelta:
+        """Guarantee a truthful terminal answer when no approved tool call ran."""
+        self._discard_deferred_output()
+        self._pre_tool_output = None
+        self._output_parts = [_UNREPAIRED_TOOL_CALL_MESSAGE]
+        self._turn_has_output = True
+        logger.warning(
+            "realtime_tool_rejection_overrode_model_output",
+            turn_id=turn_id,
+            revision_required=self._tool_revision_required,
+            terminal_rejection=self._terminal_rejection_sent,
+        )
+        return RealtimeOutputTranscriptDelta(
+            turn_id=turn_id,
+            text=_UNREPAIRED_TOOL_CALL_MESSAGE,
+        )
 
     @staticmethod
     def _normalized_spoken_text(value: str) -> str:
@@ -1265,6 +1312,7 @@ class RealtimeAgentSession:
         self._tool_rounds = 0
         self._tool_call_revisions = 0
         self._evaluation_attempt = 0
+        self._tool_revision_required = False
         self._terminal_rejection_sent = False
         self._turn_has_input = False
         self._turn_has_output = False

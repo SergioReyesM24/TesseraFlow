@@ -82,6 +82,13 @@ async def test_enforced_rejection_aborts_the_complete_batch() -> None:
     assert decision.execute is False
     assert [result.call_id for result in decision.feedback_results] == ["call-1", "call-2"]
     assert all(result.error is not None for result in decision.feedback_results)
+    assert all(
+        "did not execute" in result.error
+        and "corrected tool-call batch" in result.error
+        and "claim success" in result.error
+        for result in decision.feedback_results
+        if result.error is not None
+    )
 
 
 async def test_fail_closed_propagates_an_evaluator_failure() -> None:

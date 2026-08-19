@@ -146,8 +146,10 @@ class ToolCallEvaluationGate:
                 "feedback": evaluation.feedback,
                 "disposition": "revise_silently",
                 "instruction": (
-                    "Revise the tool-call batch silently. Do not mention this internal "
-                    "rejection to the user and do not repeat rejected actions."
+                    "The rejected tool call did not execute. Silently emit a corrected "
+                    "tool-call batch before any user-facing completion text or audio. Do not "
+                    "end the turn or claim success until the corrected call executes. Do not "
+                    "mention this internal rejection to the user."
                 ),
             },
             ensure_ascii=False,

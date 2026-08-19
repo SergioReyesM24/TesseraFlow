@@ -2,9 +2,11 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+from domain.a2a import A2ACompletionMessage
 from domain.conversations import ConversationMessage
 from domain.evaluations import AgentStepEvaluationRequest
 from domain.tools import ToolCall, ToolSpec
+from domain.visuals import Metric, MetricGroupComponent, VisualPresentation
 from infrastructure.openai_step_evaluator import OpenAIToolCallEvaluator
 
 
@@ -75,3 +77,47 @@ async def test_openai_evaluator_uses_structured_outputs_and_neutral_payload() ->
     assert payload["protocol"] == "tesseraflow.tool_call_evaluation"
     assert payload["conversation_context"][0]["content"] == "Show recent transactions"
     assert payload["proposed_calls"][0]["tool_name"] == "wrong_tool"
+
+
+def test_evaluator_payload_exposes_attached_visual_identity_as_structured_context() -> None:
+    """Make replacement identity explicit instead of burying it in an A2A JSON string."""
+    completion = A2ACompletionMessage(
+        job_id="job-1",
+        thread_id="thread-1",
+        status="completed",
+        answer="Usage ready",
+        visual_components=(
+            VisualPresentation(
+                component_id="usage-summary",
+                fallback_text="Usage summary",
+                component=MetricGroupComponent(
+                    kind="metric_group",
+                    title="Usage",
+                    subtitle=None,
+                    metrics=(Metric(label="Calls", value="3"),),
+                ),
+            ),
+        ),
+    )
+    request = AgentStepEvaluationRequest(
+        role="interactive",
+        context=(
+            ConversationMessage(
+                role="user",
+                content=completion.serialize(),
+                source="worker_agent",
+            ),
+        ),
+        available_tools=(),
+        proposed_calls=(ToolCall(call_id="call-1", tool_name="present_visual", arguments={}),),
+    )
+
+    payload = OpenAIToolCallEvaluator._request_payload(request)
+
+    assert payload["conversation_context"][0]["attached_visuals"] == [
+        {
+            "component_id": "usage-summary",
+            "kind": "metric_group",
+            "placement": "append",
+        }
+    ]

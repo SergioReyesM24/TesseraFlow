@@ -8,6 +8,7 @@ from openai.types.shared_params.reasoning import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
 from application.ports import AgentStepEvaluator
+from domain.a2a import visual_components_from_completion_message
 from domain.conversations import ConversationItem, ConversationMessage
 from domain.evaluations import AgentStepEvaluation, AgentStepEvaluationRequest
 from domain.tools import ToolCall, ToolSpec
@@ -123,12 +124,23 @@ class OpenAIToolCallEvaluator(AgentStepEvaluator):
     @staticmethod
     def _context_item(item: ConversationItem) -> JsonObject:
         if isinstance(item, ConversationMessage):
-            return {
+            payload: JsonObject = {
                 "type": "message",
                 "role": item.role,
                 "source": item.source,
                 "content": item.content,
             }
+            attached_visuals = visual_components_from_completion_message(item.content)
+            if attached_visuals:
+                payload["attached_visuals"] = [
+                    {
+                        "component_id": visual.component_id,
+                        "kind": visual.component.kind,
+                        "placement": visual.placement,
+                    }
+                    for visual in attached_visuals
+                ]
+            return payload
         if isinstance(item, ToolCall):
             return {
                 "type": "tool_call",

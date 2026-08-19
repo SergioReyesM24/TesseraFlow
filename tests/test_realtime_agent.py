@@ -519,6 +519,7 @@ async def test_realtime_rejects_an_interactive_call_before_executing_its_revisio
         [
             RealtimeModelInputTranscriptDelta(text="Continúa el trabajo anterior"),
             RealtimeModelToolCall(calls=(rejected_call,)),
+            RealtimeModelOutputTranscriptDelta(text="Ya está hecho."),
             RealtimeModelToolCall(calls=(accepted_call,)),
             RealtimeModelOutputTranscriptDelta(text="Continuado"),
             RealtimeModelTurnCompleted(response_id="response-1"),
@@ -569,6 +570,9 @@ async def test_realtime_rejects_an_interactive_call_before_executing_its_revisio
     assert [event.call_id for event in events if isinstance(event, RealtimeToolStarted)] == [
         "call-continue"
     ]
+    assert "Ya está hecho." not in [
+        event.text for event in events if isinstance(event, RealtimeOutputTranscriptDelta)
+    ]
     assert len(model.tool_results) == 2
     assert model.tool_results[0][0].call_id == "call-delegate"
     assert model.tool_results[0][0].error is not None
@@ -579,6 +583,71 @@ async def test_realtime_rejects_an_interactive_call_before_executing_its_revisio
     )
     assert [trace.executed for trace in traces.traces] == [False, True]
     assert all(trace.job_id is None for trace in traces.traces)
+
+
+async def test_realtime_does_not_claim_success_when_a_rejected_call_is_not_repaired() -> None:
+    """Replace an impossible success claim when the model ends without a corrected call."""
+    key = ConversationKey(conversation_id="conversation-1", user_id="user-1")
+    rejected_call = ToolCall(
+        call_id="call-visual",
+        tool_name="lookup",
+        arguments={"value": 1},
+    )
+    model = StubRealtimeModelSession(
+        [
+            RealtimeModelInputTranscriptDelta(text="Agrupa los movimientos"),
+            RealtimeModelOutputTranscriptDelta(text="Voy a preparar esa gráfica."),
+            RealtimeModelToolCall(calls=(rejected_call,)),
+            RealtimeModelOutputTranscriptDelta(text="Ya está lista en el lateral."),
+            RealtimeModelTurnCompleted(response_id="response-1"),
+        ]
+    )
+    evaluator = StubStepEvaluator(
+        [
+            AgentStepEvaluation(
+                verdict="fail",
+                risk="medium",
+                reason_code="other",
+                feedback="Correct the visual transformation.",
+                model="evaluation-model",
+            )
+        ]
+    )
+    conversations = StubConversations(key)
+    tool = LookupTool()
+    session = RealtimeAgentSession(
+        model,
+        ToolRegistry([tool]),
+        conversations,
+        key,
+        max_audio_chunk_bytes=16,
+        max_tool_rounds=4,
+        tool_call_gate=ToolCallEvaluationGate(
+            evaluator,
+            role="interactive",
+            mode="enforce",
+            fail_open=False,
+        ),
+    )
+
+    await session.start_audio("turn-1")
+    events = [event async for event in session.events()]
+
+    transcripts = [
+        event.text for event in events if isinstance(event, RealtimeOutputTranscriptDelta)
+    ]
+    terminal = next(event for event in events if isinstance(event, RealtimeTurnCompleted))
+    assert tool.invocations == []
+    assert "Ya está lista en el lateral." not in transcripts
+    assert transcripts[-1] == "No he podido completar la operación. Puedes intentarlo de nuevo."
+    assert terminal.result.answer == transcripts[-1]
+    assert conversations.saved_turns[0][-1] == ConversationMessage(
+        role="assistant",
+        content=transcripts[-1],
+        source="assistant",
+    )
+    assert model.tool_results[0][0].error is not None
+    assert '"code":"tool_call_rejected"' in model.tool_results[0][0].error
 
 
 async def test_realtime_delivers_model_output_while_tool_evaluation_runs_in_background() -> None:
@@ -751,7 +820,9 @@ async def test_realtime_evaluator_outage_becomes_a_general_user_message() -> Non
     assert model.tool_results[0][0].error is not None
     assert '"code":"tool_call_evaluation_unavailable"' in model.tool_results[0][0].error
     terminal = next(event for event in events if isinstance(event, RealtimeTurnCompleted))
-    assert terminal.result.answer.startswith("No he podido validar")
+    assert terminal.result.answer == (
+        "No he podido completar la operación. Puedes intentarlo de nuevo."
+    )
 
 
 async def test_realtime_suppresses_repeated_text_and_audio_after_a_tool_call() -> None:

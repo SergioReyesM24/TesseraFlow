@@ -1,9 +1,9 @@
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
-from pydantic import Field
+from pydantic import Field, WithJsonSchema
 
 from application.tools import AgentTool, ToolArguments, ToolExecutionContext
 
@@ -13,12 +13,17 @@ MOCK_BIZUM_RECIPIENT = "Mamá"
 class MockBizumArguments(ToolArguments):
     """Validated amount for a simulated payment to the fixed recipient."""
 
-    amount: Decimal = Field(
-        gt=0,
-        max_digits=10,
-        decimal_places=2,
-        description="Positive € amount to send to the fixed mock recipient Mamá",
-    )
+    amount: Annotated[
+        Decimal,
+        Field(gt=0, max_digits=10, decimal_places=2),
+        WithJsonSchema(
+            {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 99_999_999.99,
+            }
+        ),
+    ] = Field(description="Positive € amount to send to the fixed mock recipient Mamá")
 
 
 class MockBizumTool(AgentTool[MockBizumArguments]):
