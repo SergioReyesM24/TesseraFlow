@@ -107,7 +107,8 @@ async def build_container(settings: Settings) -> AppContainer:
         command_timeout_seconds=settings.postgres_command_timeout_seconds,
     )
     a2a_service = A2AService(jobs)
-    worker_tools = build_tool_registry()
+    conversation_history_service = ConversationHistoryService(canonical_conversations)
+    worker_tools = build_tool_registry(conversation_history_service)
     interactive_tools = build_interactive_tool_registry(a2a_service)
     model_runtime = build_model_runtime(
         settings,
@@ -144,7 +145,7 @@ async def build_container(settings: Settings) -> AppContainer:
         postgres_pool=postgres_pool,
         text_agent_service=model_runtime.text_agent_service,
         conversation_service=ConversationService(conversations),
-        conversation_history_service=ConversationHistoryService(canonical_conversations),
+        conversation_history_service=conversation_history_service,
         text_definition=model_runtime.text_definition,
         realtime_definition=model_runtime.realtime_definition,
         realtime_agent_service=model_runtime.realtime_agent_service,

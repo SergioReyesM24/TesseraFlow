@@ -45,6 +45,14 @@ from tools.registry import build_tool_registry
 from tools.weekly_balance_history import WeeklyBalanceHistoryTool
 
 
+class StubApplicationUsageService:
+    """Provide an empty owner-scoped usage window for worker registry tests."""
+
+    async def load_daily_token_usage(self, user_id: str, *, days: int) -> tuple[object, ...]:
+        del user_id, days
+        return ()
+
+
 class StubModelSession:
     def __init__(self, replies: list[ModelReply]) -> None:
         self.replies = deque(replies)
@@ -819,6 +827,7 @@ async def test_streams_visual_component_before_terminal_text_result() -> None:
                             call_id="call_visual",
                             tool_name="present_visual",
                             arguments={
+                                "placement": "append",
                                 "component_id": "trend",
                                 "fallback_text": "La serie sube de 10 a 12.",
                                 "component": {
@@ -922,12 +931,13 @@ async def test_streams_visual_declared_by_a_backend_tool_without_present_visual(
 
 
 def test_tool_specs_are_provider_neutral_and_closed() -> None:
-    specs = build_tool_registry().specs
+    specs = build_tool_registry(StubApplicationUsageService()).specs
 
     assert [spec.name for spec in specs] == [
         "weekly_balance_history",
         "send_mock_bizum_to_mom",
         "recent_transactions",
+        "get_application_usage",
     ]
     assert all(spec.arguments_schema["additionalProperties"] is False for spec in specs)
     assert all(not hasattr(spec, "strict") for spec in specs)
@@ -987,7 +997,7 @@ async def test_common_agent_service_streams_native_audio_events() -> None:
     await repository.create(conversation_key())
     service = AgentService(
         AudioStubModelGateway(),
-        build_tool_registry(),
+        build_tool_registry(StubApplicationUsageService()),
         repository,
     )
 
