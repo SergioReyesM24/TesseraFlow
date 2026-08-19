@@ -36,13 +36,13 @@ los jobs, el historial y las colas de los canales textual y realtime.
 
 El núcleo de TesseraFlow no es un transporte ni un proveedor concreto, sino una
 arquitectura estable de dos agentes. El primer agente mantiene la interacción de baja
-latencia con el usuario y solo conoce tools de protocolo A2A. El segundo trabaja de forma
-durable, conserva su propio contexto y ejecuta las tools operativas. Texto, WebSocket
+latencia con el usuario y solo conoce tools de protocolo A2A y presentación. El segundo
+trabaja de forma durable, conserva su propio contexto y ejecuta las tools operativas. Texto, WebSocket
 durable y voz realtime son distintas puertas de entrada a esa misma separación.
 
 ```text
 Texto por SSE ───────────┐
-Texto por WS durable ────┼──> Agente interactivo ──> Tools A2A ──> Worker ──> Tools pesadas
+Texto por WS durable ────┼──> Agente interactivo ──> Tools locales/A2A ──> Worker ──> Tools pesadas
 Audio STS realtime ──────┘
 ```
 
@@ -328,6 +328,9 @@ utilizar estas capacidades neutrales:
 | `delegate_to_worker_agent` | Crea un thread y devuelve inmediatamente `thread_id` y `job_id`. |
 | `get_worker_agent_status` | Consulta el estado y recupera el informe cuando está completo. |
 | `continue_worker_agent` | Añade un mensaje al historial del mismo worker para una ampliación. |
+
+El worker dispone además de `get_application_usage`, una consulta owner-scoped de tokens y
+coste configurado que adjunta métricas y gráficas semánticas a su resultado A2A.
 
 ```text
 usuario -> agente interactivo -> delegate_to_worker_agent -> queued
@@ -633,7 +636,7 @@ la valida y publica directamente un evento neutral al frontend. No hace falta un
 tool call a `present_visual`.
 
 El envelope público es general y versionado (`schema`, `version`, `component_id`,
-`fallback_text`, `component`). El catálogo de componentes dentro del envelope sigue siendo
+`placement`, `fallback_text`, `component`). El catálogo de componentes dentro del envelope sigue siendo
 semántico y cerrado para que el frontend nunca ejecute markup o configuración arbitraria:
 
 ```json
@@ -644,6 +647,7 @@ semántico y cerrado para que el frontend nunca ejecute markup o configuración 
     "schema": "tesseraflow.visual",
     "version": 1,
     "component_id": "weekly-balance",
+    "placement": "append",
     "fallback_text": "El saldo termina el periodo en 13.275,65 €.",
     "component": {
       "kind": "chart",
@@ -678,9 +682,11 @@ la respuesta textual completa sigue llegando normalmente.
 
 Las presentaciones viajan también en los resultados A2A: si una tool del worker genera una,
 el backend la incorpora al comando de finalización y la emite en los canales textual y
-realtime antes de la respuesta del agente principal. `present_visual` se conserva para que
-el usuario pueda pedir otro formato; al reutilizar `component_id`, el nuevo componente
-reemplaza al anterior en lugar de duplicarlo.
+realtime antes de la respuesta del agente principal. El panel acumula por defecto cada
+presentación con `placement="append"`, incluso si otra vista usa el mismo `component_id`.
+`present_visual` utiliza `placement="replace"` y reutiliza el `component_id` únicamente cuando
+el usuario pide explícitamente modificar esa vista; las demás presentaciones permanecen en el
+panel.
 
 ### WebSocket speech-to-speech
 
@@ -890,9 +896,9 @@ el entorno sin modificar los archivos versionados.
 | `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | Transcripción auxiliar del audio de entrada. |
 | `OPENAI_REALTIME_LANGUAGE_CODE` | inferido | Idioma opcional de la transcripción de entrada. |
 | `OPENAI_REALTIME_REASONING_EFFORT` | inferido | Esfuerzo de razonamiento opcional del modelo realtime. |
-| `WORKER_AGENT_MODEL` | `gpt-5-mini` | Modelo del agente de trabajo. |
+| `WORKER_AGENT_MODEL` | `gpt-5.6-luna` | Modelo del agente de trabajo. |
 | `EVALUATION_PROVIDER` | `openai` | Adaptador del evaluador de tool calls. |
-| `EVALUATION_MODEL` | `gpt-5.4-mini` | Modelo pequeño usado por el evaluador. |
+| `EVALUATION_MODEL` | `gpt-5.6-luna` | Modelo usado por ambos evaluadores de tool calls. |
 | `EVALUATION_REASONING_EFFORT` | `none` | Esfuerzo de razonamiento del evaluador OpenAI. |
 | `INTERACTIVE_TOOL_EVALUATION_MODE` | `off` | Evaluador del agente textual y realtime: `off`, `shadow` o `enforce`. |
 | `INTERACTIVE_TOOL_EVALUATION_TIMEOUT_SECONDS` | `15` | Presupuesto de cada evaluación interactiva. |
@@ -945,7 +951,8 @@ TEXT_AGENT_MODEL=gpt-5-mini
 REALTIME_AGENT_PROVIDER=gemini
 REALTIME_AGENT_MODEL=gemini-3.1-flash-live-preview
 WORKER_PROVIDER=openai
-WORKER_AGENT_MODEL=gpt-5
+WORKER_AGENT_MODEL=gpt-5.6-luna
+EVALUATION_MODEL=gpt-5.6-luna
 GEMINI_API_KEY=...
 OPENAI_API_KEY=...
 REALTIME_AUDIO_MAX_CHUNK_BYTES=32768
@@ -960,9 +967,10 @@ tokens y el coste se expone como no configurado, evitando estimaciones silencios
 
 ### Referencia de precios y moneda
 
-El catálogo incluido fue revisado el **29-07-2026** y expresa tarifas por millón
-de tokens en €:
+El catálogo incluido expresa tarifas por millón de tokens en €:
 
+- `gpt-5.6-luna`: tarifa configurada para worker y evaluadores el **16-08-2026**:
+  `0.88` € entrada, `0.09` € entrada cacheada y `5.28` € salida.
 - `gpt-5.4-mini`: `0.66` € entrada, `0.07` € entrada cacheada y `3.96` € salida.
 - `gpt-5.4`: tarifa retail de Azure OpenAI Global Standard en Sweden Central:
   `2.193945` € entrada, `0.219394` € entrada cacheada y `13.163668` € salida.
