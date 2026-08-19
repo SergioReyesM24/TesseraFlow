@@ -6,6 +6,7 @@ import type {
   MetricGroupVisualComponent,
   MetricVisual,
   TransactionListVisualComponent,
+  ConversationMessage,
   VisualPresentation,
 } from '../types'
 
@@ -15,12 +16,13 @@ type UnknownObject = Record<string, unknown>
 export function parseVisualPresentation(data: UnknownObject): VisualPresentation | null {
   const componentId = text(data.component_id)
   const fallbackText = text(data.fallback_text)
+  const placement = data.placement === 'replace' ? 'replace' : 'append'
   if (!componentId || !fallbackText) return null
   if (data.schema !== 'tesseraflow.visual' || data.version !== 1) {
-    return { componentId, fallbackText, component: null }
+    return { componentId, fallbackText, component: null, placement }
   }
   const rawComponent = object(data.component)
-  if (!rawComponent) return { componentId, fallbackText, component: null }
+  if (!rawComponent) return { componentId, fallbackText, component: null, placement }
   const component =
     rawComponent.kind === 'chart'
       ? parseChart(rawComponent)
@@ -29,20 +31,66 @@ export function parseVisualPresentation(data: UnknownObject): VisualPresentation
         : rawComponent.kind === 'transaction_list'
           ? parseTransactionList(rawComponent)
           : null
-  return { componentId, fallbackText, component }
+  return { componentId, fallbackText, component, placement }
 }
 
-/** Upsert one component so a terminal replay cannot duplicate a streamed visual. */
+/** Apply one explicit append/replace operation inside its owning assistant turn. */
 export function mergeVisual(
   current: VisualPresentation[] | undefined,
   incoming: VisualPresentation,
 ): VisualPresentation[] {
   const visuals = current ?? []
-  return visuals.some((visual) => visual.componentId === incoming.componentId)
-    ? visuals.map((visual) =>
-        visual.componentId === incoming.componentId ? incoming : visual,
-      )
-    : [...visuals, incoming]
+  if ((incoming.placement ?? 'append') === 'append') return [...visuals, incoming]
+  let targetIndex = -1
+  for (let index = visuals.length - 1; index >= 0; index -= 1) {
+    if (visuals[index].componentId === incoming.componentId) {
+      targetIndex = index
+      break
+    }
+  }
+  return targetIndex === -1
+    ? [...visuals, incoming]
+    : visuals.map((visual, index) => (index === targetIndex ? incoming : visual))
+}
+
+export interface DockedVisualCollection {
+  presentations: VisualPresentation[]
+  activeIndex: number
+  key: string
+}
+
+/** Append visuals across turns and replace only an explicitly targeted component. */
+export function collectDockedVisuals(
+  messages: readonly ConversationMessage[],
+): DockedVisualCollection | null {
+  const presentations: VisualPresentation[] = []
+  const eventKeys: string[] = []
+  let activeIndex = -1
+
+  for (const message of messages) {
+    for (const visual of message.visuals ?? []) {
+      const placement = visual.placement ?? 'append'
+      let targetIndex = -1
+      if (placement === 'replace') {
+        for (let index = presentations.length - 1; index >= 0; index -= 1) {
+          if (presentations[index].componentId === visual.componentId) {
+            targetIndex = index
+            break
+          }
+        }
+      }
+      if (targetIndex === -1) {
+        presentations.push(visual)
+        activeIndex = presentations.length - 1
+      } else {
+        presentations[targetIndex] = visual
+        activeIndex = targetIndex
+      }
+      eventKeys.push(`${message.id}:${visual.componentId}:${placement}`)
+    }
+  }
+
+  return presentations.length ? { presentations, activeIndex, key: eventKeys.join('|') } : null
 }
 
 /** Validate the closed chart payload before it reaches SVG calculations. */

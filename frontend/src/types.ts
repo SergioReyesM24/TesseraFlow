@@ -173,6 +173,7 @@ export interface VisualPresentation {
   componentId: string
   fallbackText: string
   component: VisualComponent | null
+  placement?: 'append' | 'replace'
 }
 
 export interface SocketEnvelope {

@@ -184,6 +184,7 @@ class TransactionListComponent:
 
 
 VisualComponent: TypeAlias = ChartComponent | MetricGroupComponent | TransactionListComponent
+VisualPlacement: TypeAlias = Literal["append", "replace"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +194,7 @@ class VisualPresentation:
     component_id: str
     fallback_text: str
     component: VisualComponent
+    placement: VisualPlacement = "append"
 
     def __post_init__(self) -> None:
         """Require stable correlation and a complete non-visual alternative."""
@@ -269,6 +271,7 @@ def visual_presentation_payload(presentation: VisualPresentation) -> dict[str, o
         "schema": VISUAL_SCHEMA,
         "version": VISUAL_SCHEMA_VERSION,
         "component_id": presentation.component_id,
+        "placement": presentation.placement,
         "fallback_text": presentation.fallback_text,
         "component": encoded_component,
     }
@@ -292,10 +295,14 @@ def visual_presentation_from_payload(raw: object) -> VisualPresentation:
         decoded = _transaction_list_from_payload(component)
     else:
         raise ValueError("visual component kind is unsupported")
+    placement = payload.get("placement", "append")
+    if placement not in ("append", "replace"):
+        raise ValueError("visual placement is unsupported")
     return VisualPresentation(
         component_id=_text(payload, "component_id"),
         fallback_text=_text(payload, "fallback_text"),
         component=decoded,
+        placement=cast(VisualPlacement, placement),
     )
 
 

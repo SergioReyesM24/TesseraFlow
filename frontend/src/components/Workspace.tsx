@@ -24,6 +24,7 @@ import {
 } from 'react'
 import { useAgentSocket } from '../hooks/useAgentSocket'
 import { useRealtimeSocket } from '../hooks/useRealtimeSocket'
+import { collectDockedVisuals } from '../lib/visuals'
 import type { Mode } from '../types'
 import { BrandMark } from './BrandMark'
 import { Composer } from './Composer'
@@ -291,23 +292,10 @@ export function Workspace({
     mode === 'history' ? 'connected' : mode === 'text' ? text.connection : voice.connection
   const activeError = mode === 'history' ? null : mode === 'text' ? text.error : voice.error
   const activeMessages = mode === 'text' ? text.messages : mode === 'voice' ? voice.messages : []
-  const latestVisualGroup = (() => {
-    for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
-      const visuals = activeMessages[index].visuals
-      if (visuals?.length) {
-        return {
-          presentations: visuals,
-          key: `${activeMessages[index].id}:${visuals
-            .map((visual) => visual.componentId)
-            .join('|')}`,
-        }
-      }
-    }
-    return null
-  })()
+  const visualCollection = collectDockedVisuals(activeMessages)
   const activeVisuals =
-    latestVisualGroup && latestVisualGroup.key !== dismissedVisualGroupKey
-      ? latestVisualGroup.presentations
+    visualCollection && visualCollection.key !== dismissedVisualGroupKey
+      ? visualCollection.presentations
       : null
 
   /** Enter voice mode while the click still grants browser audio permission. */
@@ -318,8 +306,8 @@ export function Workspace({
 
   /** Return a dismissed visual to its original inline message position. */
   const closeVisual = () => {
-    if (!activeVisuals || !latestVisualGroup) return
-    setDismissedVisualGroupKey(latestVisualGroup.key)
+    if (!activeVisuals || !visualCollection) return
+    setDismissedVisualGroupKey(visualCollection.key)
   }
 
   /** Keep the side navigation preference stable across reloads. */
@@ -532,8 +520,9 @@ export function Workspace({
 
       {activeVisuals && (
         <VisualInspector
-          key={latestVisualGroup?.key}
+          key={visualCollection?.key}
           presentations={activeVisuals}
+          initialActiveIndex={visualCollection?.activeIndex}
           onClose={closeVisual}
         />
       )}

@@ -165,6 +165,12 @@ ComponentArguments = ChartArguments | MetricGroupArguments | TransactionListArgu
 class PresentVisualArguments(ToolArguments):
     """Version-one semantic component requested by the interactive agent."""
 
+    placement: Literal["append", "replace"] = Field(
+        description=(
+            "Use append for every new visual. Use replace only when the user explicitly asks "
+            "to modify an existing visual, and then reuse that visual's component_id"
+        ),
+    )
     component_id: str = Field(
         min_length=1,
         max_length=80,
@@ -263,6 +269,7 @@ class PresentVisualTool(AgentTool[PresentVisualArguments]):
             component_id=arguments.component_id,
             fallback_text=arguments.fallback_text,
             component=component,
+            placement=arguments.placement,
         )
         return ToolExecutionOutput(
             value={"presented": True, "component_id": arguments.component_id},

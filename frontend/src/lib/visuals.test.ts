@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { mergeVisual, parseVisualPresentation } from './visuals'
+import type { ConversationMessage, VisualPresentation } from '../types'
+import { collectDockedVisuals, mergeVisual, parseVisualPresentation } from './visuals'
 
 describe('visual presentation protocol', () => {
   it('parses the closed chart schema', () => {
@@ -50,6 +51,7 @@ describe('visual presentation protocol', () => {
       componentId: 'future',
       fallbackText: 'Resumen compatible.',
       component: null,
+      placement: 'append',
     })
   })
 
@@ -89,14 +91,74 @@ describe('visual presentation protocol', () => {
     }
   })
 
-  it('deduplicates a replay by component id', () => {
+  it('replaces the latest matching component only when requested explicitly', () => {
     const first = {
       componentId: 'summary',
       fallbackText: 'Primero',
       component: null,
+      placement: 'append' as const,
     }
-    const updated = { ...first, fallbackText: 'Actualizado' }
+    const updated = { ...first, fallbackText: 'Actualizado', placement: 'replace' as const }
 
     expect(mergeVisual(mergeVisual([], first), updated)).toEqual([updated])
+  })
+
+  it('appends inside one turn even when the component id is repeated', () => {
+    const visual: VisualPresentation = {
+      componentId: 'summary',
+      fallbackText: 'Resumen',
+      component: null,
+      placement: 'append',
+    }
+
+    expect(mergeVisual(mergeVisual([], visual), visual)).toEqual([visual, visual])
+  })
+
+  it('appends visuals across turns even when their component ids match', () => {
+    const first: VisualPresentation = {
+      componentId: 'summary',
+      fallbackText: 'Primero',
+      component: null,
+      placement: 'append',
+    }
+    const second: VisualPresentation = {
+      ...first,
+      fallbackText: 'Segundo',
+    }
+    const messages: ConversationMessage[] = [
+      { id: 'assistant-1', role: 'assistant', content: '', visuals: [first] },
+      { id: 'assistant-2', role: 'assistant', content: '', visuals: [second] },
+    ]
+
+    expect(collectDockedVisuals(messages)?.presentations).toEqual([first, second])
+  })
+
+  it('replaces only the matching visual when placement explicitly requests it', () => {
+    const first: VisualPresentation = {
+      componentId: 'balance',
+      fallbackText: 'Barras',
+      component: null,
+      placement: 'append',
+    }
+    const other: VisualPresentation = {
+      componentId: 'transactions',
+      fallbackText: 'Movimientos',
+      component: null,
+      placement: 'append',
+    }
+    const replacement: VisualPresentation = {
+      ...first,
+      fallbackText: 'Líneas',
+      placement: 'replace',
+    }
+    const messages: ConversationMessage[] = [
+      { id: 'assistant-1', role: 'assistant', content: '', visuals: [first, other] },
+      { id: 'assistant-2', role: 'assistant', content: '', visuals: [replacement] },
+    ]
+
+    expect(collectDockedVisuals(messages)).toMatchObject({
+      presentations: [replacement, other],
+      activeIndex: 0,
+    })
   })
 })

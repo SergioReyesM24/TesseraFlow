@@ -7,17 +7,27 @@ const VISUAL_GENERATION_DELAY_MS = 1050
 
 interface VisualInspectorProps {
   presentations: VisualPresentationData[]
+  initialActiveIndex?: number
   onClose: () => void
 }
 
 /** Dock one or more agent visuals in a side panel with stable tab navigation. */
-export function VisualInspector({ presentations, onClose }: VisualInspectorProps) {
+export function VisualInspector({
+  presentations,
+  initialActiveIndex,
+  onClose,
+}: VisualInspectorProps) {
   const shouldAnimate =
     typeof window !== 'undefined' &&
     !window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const groupKey = presentations.map((presentation) => presentation.componentId).join('|')
   const [isReady, setIsReady] = useState(!shouldAnimate)
-  const [activeIndex, setActiveIndex] = useState(() => Math.max(0, presentations.length - 1))
+  const [activeIndex, setActiveIndex] = useState(() =>
+    Math.min(
+      Math.max(0, initialActiveIndex ?? presentations.length - 1),
+      Math.max(0, presentations.length - 1),
+    ),
+  )
   const selectedIndex = Math.min(activeIndex, Math.max(0, presentations.length - 1))
   const activePresentation = presentations[selectedIndex]
   const tabListId = useId()
@@ -95,7 +105,7 @@ export function VisualInspector({ presentations, onClose }: VisualInspectorProps
                 aria-controls={panelId}
                 id={tabId}
                 tabIndex={active ? 0 : -1}
-                key={presentation.componentId}
+                key={`${presentation.componentId}:${index}`}
                 onClick={() => setActiveIndex(index)}
                 onKeyDown={(event) => navigateTabs(event, index)}
                 ref={(element) => {

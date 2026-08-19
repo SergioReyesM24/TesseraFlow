@@ -34,6 +34,7 @@ def test_present_visual_schema_is_closed_and_strict_compatible() -> None:
     for object_schema in object_schemas:
         assert object_schema["additionalProperties"] is False
         assert set(object_schema["required"]) == set(object_schema["properties"])
+    assert schema["properties"]["placement"]["enum"] == ["append", "replace"]
 
 
 async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> None:
@@ -46,6 +47,7 @@ async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> No
                 call_id="visual-1",
                 tool_name="present_visual",
                 arguments={
+                    "placement": "append",
                     "component_id": "weekly-balance",
                     "fallback_text": "El saldo termina la serie en 13.275,65 €.",
                     "component": {
@@ -85,6 +87,7 @@ async def test_present_visual_produces_a_typed_chart_and_small_model_ack() -> No
     assert len(batch.visual_components) == 1
     presentation = batch.visual_components[0]
     assert presentation.component_id == "weekly-balance"
+    assert presentation.placement == "append"
     assert isinstance(presentation.component, ChartComponent)
     assert presentation.component.x_min == "12-07-2026"
     assert presentation.component.x_max == "19-07-2026"
@@ -103,6 +106,7 @@ async def test_present_visual_defaults_omitted_chart_axis_bounds() -> None:
                 call_id="visual-default-bounds",
                 tool_name="present_visual",
                 arguments={
+                    "placement": "append",
                     "component_id": "weekly-balance",
                     "fallback_text": "El saldo termina la serie en 120 €.",
                     "component": {
@@ -145,6 +149,7 @@ async def test_present_visual_rejects_oversized_or_non_finite_charts() -> None:
                 call_id="visual-invalid",
                 tool_name="present_visual",
                 arguments={
+                    "placement": "append",
                     "component_id": "invalid",
                     "fallback_text": "Datos no disponibles como gráfica.",
                     "component": {
@@ -183,6 +188,7 @@ async def test_present_visual_supports_bounded_metric_groups() -> None:
                 call_id="metrics-1",
                 tool_name="present_visual",
                 arguments={
+                    "placement": "append",
                     "component_id": "balance-summary",
                     "fallback_text": "Saldo actual 13.275,65 €; variación semanal -1,30%.",
                     "component": {
@@ -225,6 +231,7 @@ async def test_present_visual_supports_transactions_based_on_savings() -> None:
                 call_id="transactions-1",
                 tool_name="present_visual",
                 arguments={
+                    "placement": "append",
                     "component_id": "recent-transactions",
                     "fallback_text": (
                         "El ahorro pasa de 10.000,00 € a 12.109,16 € tras los movimientos."
@@ -324,9 +331,33 @@ def test_visual_output_with_the_same_id_replaces_its_format() -> None:
         component_id="summary",
         fallback_text="Saldo actual 100 € en formato actualizado.",
         component=original.component,
+        placement="replace",
     )
     current = [original]
 
     extend_visual_components(current, (replacement,))
 
     assert current == [replacement]
+
+
+def test_visual_output_with_the_same_id_appends_by_default() -> None:
+    """Keep separate visual windows unless replacement is explicitly requested."""
+    original = VisualPresentation(
+        component_id="summary",
+        fallback_text="First summary",
+        component=MetricGroupComponent(
+            kind="metric_group",
+            title="Summary",
+            metrics=(Metric(label="Balance", value="100"),),
+        ),
+    )
+    appended = VisualPresentation(
+        component_id="summary",
+        fallback_text="Second summary",
+        component=original.component,
+    )
+    current = [original]
+
+    extend_visual_components(current, (appended,))
+
+    assert current == [original, appended]

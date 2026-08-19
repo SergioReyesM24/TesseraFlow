@@ -56,24 +56,26 @@ def extend_visual_components(
     current: list[VisualPresentation],
     incoming: tuple[VisualPresentation, ...],
 ) -> None:
-    """Upsert presentations by ID while enforcing the per-turn public output bound."""
-    positions = {presentation.component_id: index for index, presentation in enumerate(current)}
-    additions = {
-        presentation.component_id
-        for presentation in incoming
-        if presentation.component_id not in positions
-    }
-    if len(current) + len(additions) > MAX_VISUAL_COMPONENTS_PER_TURN:
-        raise VisualComponentLimitError(
-            f"Agent turn cannot exceed {MAX_VISUAL_COMPONENTS_PER_TURN} visual components"
-        )
+    """Apply explicit append/replace placement within the bounded public turn output."""
+    updated = list(current)
     for presentation in incoming:
-        position = positions.get(presentation.component_id)
-        if position is None:
-            positions[presentation.component_id] = len(current)
-            current.append(presentation)
+        position = next(
+            (
+                index
+                for index in range(len(updated) - 1, -1, -1)
+                if updated[index].component_id == presentation.component_id
+            ),
+            None,
+        )
+        if presentation.placement == "replace" and position is not None:
+            updated[position] = presentation
         else:
-            current[position] = presentation
+            updated.append(presentation)
+        if len(updated) > MAX_VISUAL_COMPONENTS_PER_TURN:
+            raise VisualComponentLimitError(
+                f"Agent turn cannot exceed {MAX_VISUAL_COMPONENTS_PER_TURN} visual components"
+            )
+    current[:] = updated
 
 
 class ToolExecutionContext(BaseModel):

@@ -64,6 +64,7 @@ def test_visual_events_round_trip_through_the_durable_json_codec() -> None:
     assert event_type == "visual_component"
     assert payload["schema"] == "tesseraflow.visual"
     assert payload["version"] == 1
+    assert payload["placement"] == "append"
     assert payload["component"]["x_axis"]["min"] == "01-07-2026"
     assert payload["component"]["x_axis"]["max"] == "08-07-2026"
     assert payload["component"]["y_axis"]["min"] == 0.0
