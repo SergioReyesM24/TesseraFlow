@@ -1,6 +1,7 @@
 import { Bot, Check, LoaderCircle, Wrench, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import type { ConversationMessage } from '../types'
+import { MarkdownMessage } from './MarkdownMessage'
 import { VisualPresentation } from './VisualPresentation'
 
 interface MessageListProps {
@@ -80,7 +81,7 @@ export function MessageList({
               </div>
             )}
             <div className="message-content">
-              {message.content ? <p>{message.content}</p> : null}
+              {message.content ? <MarkdownMessage content={message.content} /> : null}
               {!message.content && message.status === 'streaming' ? (
                 <span className="typing-dots" aria-label="TesseraFlow está respondiendo">
                   <i />

@@ -130,6 +130,7 @@ async def test_runtime_composes_independent_text_realtime_and_worker_roles(
     assert interactive_gate is not None
     assert runtime.realtime_agent_service._tool_call_gate is interactive_gate
     assert runtime.worker_agent_service._tool_call_gate is not interactive_gate
+    assert runtime.evaluation_control.enabled is True
     assert len(FakeOpenAIClient.instances) == 1
     assert len(FakeGeminiClient.instances) == 1
     client = FakeOpenAIClient.instances[0]
@@ -151,6 +152,8 @@ async def test_runtime_registers_openai_realtime_on_the_shared_openai_client(
     settings = Settings(
         realtime_agent_provider="openai",
         realtime_agent_model="gpt-realtime-2.1",
+        interactive_tool_evaluation_mode="off",
+        worker_tool_evaluation_mode="off",
         openai_api_key="test-key",
     )
 
@@ -164,6 +167,7 @@ async def test_runtime_registers_openai_realtime_on_the_shared_openai_client(
     assert runtime.realtime_agent_provider == "openai"
     assert runtime.realtime_definition.model == "gpt-realtime-2.1"
     assert runtime.realtime_agent_service.capabilities.input_audio_mime_type.endswith("rate=24000")
+    assert runtime.evaluation_control.enabled is False
     assert len(FakeOpenAIClient.instances) == 1
     assert FakeGeminiClient.instances == []
     await runtime.close()

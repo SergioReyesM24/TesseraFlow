@@ -29,6 +29,7 @@ services:
   frontend:
     build:
       context: ./frontend
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
     environment:
       TESSERAFLOW_BACKEND_URL: http://backend:8000
     volumes:

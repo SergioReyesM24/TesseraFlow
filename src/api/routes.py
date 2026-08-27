@@ -24,8 +24,10 @@ from api.schemas import (
     CreateSessionResponse,
     DailyTokenUsageReportResponse,
     DailyTokenUsageResponse,
+    EvaluatorStatusResponse,
     SessionUsageReportResponse,
     StreamAgentRequest,
+    UpdateEvaluatorsRequest,
 )
 from api.sse import encode_agent_stream
 from api.websocket import serve_agent_websocket
@@ -36,6 +38,7 @@ from application.conversations import (
     ConversationNotFoundError,
     ConversationService,
 )
+from application.evaluations import EvaluationControl
 from application.interactions import ConversationCoordinator, InteractionQueueFullError
 from application.realtime import RealtimeAgentService
 from bootstrap import AppContainer
@@ -79,10 +82,42 @@ def get_realtime_agent_service(
     return container.realtime_agent_service
 
 
+def get_evaluation_control(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> EvaluationControl:
+    """Resolve the process-wide evaluator runtime control."""
+    return container.evaluation_control
+
+
 @router.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
     """Report that the HTTP process is alive without calling external services."""
     return {"status": "ok"}
+
+
+@router.get(
+    "/v1/evaluators",
+    response_model=EvaluatorStatusResponse,
+    tags=["system"],
+)
+async def get_evaluators(
+    control: Annotated[EvaluationControl, Depends(get_evaluation_control)],
+) -> EvaluatorStatusResponse:
+    """Return whether interactive and worker evaluations are active."""
+    return EvaluatorStatusResponse(enabled=control.enabled)
+
+
+@router.put(
+    "/v1/evaluators",
+    response_model=EvaluatorStatusResponse,
+    tags=["system"],
+)
+async def update_evaluators(
+    payload: UpdateEvaluatorsRequest,
+    control: Annotated[EvaluationControl, Depends(get_evaluation_control)],
+) -> EvaluatorStatusResponse:
+    """Enable or bypass both evaluator gates for subsequent tool calls."""
+    return EvaluatorStatusResponse(enabled=control.set_enabled(payload.enabled))
 
 
 @router.post(

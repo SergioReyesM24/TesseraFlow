@@ -147,6 +147,17 @@ class StubConversationCoordinator:
         )
 
 
+class StubEvaluationControl:
+    """Expose a mutable evaluator switch at the API boundary."""
+
+    def __init__(self) -> None:
+        self.enabled = True
+
+    def set_enabled(self, enabled: bool) -> bool:
+        self.enabled = enabled
+        return self.enabled
+
+
 class StubConversationService:
     """Manage one deterministic session for API boundary tests."""
 
@@ -524,6 +535,7 @@ def build_test_app(
         conversation_service=StubConversationService(),
         conversation_history_service=StubConversationHistoryService(),
         realtime_agent_service=realtime_service or StubRealtimeService(),
+        evaluation_control=StubEvaluationControl(),
         realtime_definition=AgentDefinition(
             model="realtime-model",
             instructions="Be helpful.",
@@ -533,6 +545,20 @@ def build_test_app(
     app.middleware("http")(request_logging_middleware)
     app.include_router(router)
     return app
+
+
+async def test_evaluator_runtime_control_reports_and_updates_both_gates() -> None:
+    """Expose one validated switch without leaking gate implementation details."""
+    async with AsyncClient(
+        transport=ASGITransport(app=build_test_app()), base_url="http://test"
+    ) as client:
+        initial = await client.get("/v1/evaluators")
+        disabled = await client.put("/v1/evaluators", json={"enabled": False})
+        current = await client.get("/v1/evaluators")
+
+    assert initial.json() == {"enabled": True}
+    assert disabled.json() == {"enabled": False}
+    assert current.json() == {"enabled": False}
 
 
 async def test_session_creation_and_agent_stream() -> None:

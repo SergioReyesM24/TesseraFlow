@@ -33,6 +33,7 @@ import { buildCompactPagination } from '../lib/pagination'
 import { DailyTokenAnalytics } from './DailyTokenAnalytics'
 import { SessionCostAnalytics } from './SessionCostAnalytics'
 import { TokenUsage } from './TokenUsage'
+import { MarkdownMessage } from './MarkdownMessage'
 
 interface ConversationHistoryProps {
   apiBaseUrl: string
@@ -236,7 +237,10 @@ export function HistoryRecord({ record, toolResult }: HistoryRecordProps) {
           <span className="history-sequence">#{record.sequence}</span>
         </header>
 
-        <p className="history-message-content">{payload.content || 'Respuesta vacía'}</p>
+        <MarkdownMessage
+          className="history-message-content"
+          content={payload.content || 'Respuesta vacía'}
+        />
         {payload.metrics && (
           <TokenUsage
             usage={payload.metrics.usage}

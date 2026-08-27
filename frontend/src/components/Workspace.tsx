@@ -4,14 +4,11 @@ import {
   Database,
   MessageCircle,
   Mic,
-  Monitor,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Settings,
   Square,
-  Sun,
   Volume2,
   X,
 } from 'lucide-react'
@@ -23,17 +20,18 @@ import {
   useState,
 } from 'react'
 import { useAgentSocket } from '../hooks/useAgentSocket'
+import { useEvaluatorControl } from '../hooks/useEvaluatorControl'
 import { useRealtimeSocket } from '../hooks/useRealtimeSocket'
 import { collectDockedVisuals } from '../lib/visuals'
 import type { Mode } from '../types'
 import { BrandMark } from './BrandMark'
 import { Composer } from './Composer'
 import { ConversationHistory } from './ConversationHistory'
+import { EvaluatorToggle } from './EvaluatorToggle'
 import { MessageList } from './MessageList'
 import { StatusPill } from './StatusPill'
+import { ThemeToggle, type ThemeMode } from './ThemeToggle'
 import { VisualInspector } from './VisualInspector'
-
-export type ThemeMode = 'system' | 'light' | 'dark'
 
 interface WorkspaceProps {
   apiBaseUrl: string
@@ -55,38 +53,6 @@ interface SettingsDialogProps {
   onSave: (apiBaseUrl: string, userId: string) => void
 }
 
-/** Small segmented control for the two explicit themes plus the OS preference. */
-function ThemeSwitch({
-  value,
-  onChange,
-}: {
-  value: ThemeMode
-  onChange: (themeMode: ThemeMode) => void
-}) {
-  const options: Array<{ value: ThemeMode; label: string; icon: ReactNode }> = [
-    { value: 'system', label: 'Sistema', icon: <Monitor size={15} /> },
-    { value: 'light', label: 'Claro', icon: <Sun size={15} /> },
-    { value: 'dark', label: 'Oscuro', icon: <Moon size={15} /> },
-  ]
-
-  return (
-    <div className="theme-switch" aria-label="Tema visual">
-      {options.map((option) => (
-        <button
-          className={value === option.value ? 'active' : ''}
-          type="button"
-          key={option.value}
-          onClick={() => onChange(option.value)}
-          aria-pressed={value === option.value}
-          title={`Tema ${option.label.toLowerCase()}`}
-        >
-          {option.icon}
-          <span>{option.label}</span>
-        </button>
-      ))}
-    </div>
-  )
-}
 interface ModeSelectorProps {
   mode: Mode
   onSelect: (mode: Mode) => void
@@ -276,6 +242,7 @@ export function Workspace({
     return window.localStorage.getItem('tesseraflow.navigationExpanded') !== 'false'
   })
   const [dismissedVisualGroupKey, setDismissedVisualGroupKey] = useState<string | null>(null)
+  const evaluators = useEvaluatorControl(apiBaseUrl)
   const text = useAgentSocket({
     apiBaseUrl,
     sessionUid,
@@ -388,6 +355,13 @@ export function Workspace({
         </nav>
 
         <div className="sidebar-spacer" />
+        <EvaluatorToggle
+          enabled={evaluators.enabled}
+          pending={evaluators.pending}
+          error={evaluators.error}
+          onToggle={evaluators.toggle}
+        />
+        <ThemeToggle value={themeMode} onChange={onThemeModeChange} />
         <div className="session-card">
           <span>Sesión activa</span>
           <code title={sessionUid}>{sessionUid.slice(0, 8)}…{sessionUid.slice(-4)}</code>
@@ -422,7 +396,6 @@ export function Workspace({
             }}
           />
           <div className="topbar-actions">
-            <ThemeSwitch value={themeMode} onChange={onThemeModeChange} />
             <StatusPill
               state={activeConnection}
               label={

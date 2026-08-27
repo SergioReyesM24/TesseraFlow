@@ -86,6 +86,27 @@ describe('MessageList docked visuals', () => {
     expect(markup).not.toContain('En caché')
   })
 
+  it('renders assistant Markdown instead of exposing its formatting markers', () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          {
+            id: 'assistant-markdown',
+            role: 'assistant',
+            content:
+              'En el último mes, has gastado **2.389.110 tokens** en los últimos **30 días naturales (UTC)**.',
+          },
+        ]}
+        emptyTitle="Sin mensajes"
+        emptyDescription="No hay actividad"
+      />,
+    )
+
+    expect(markup).toContain('<strong>2.389.110 tokens</strong>')
+    expect(markup).toContain('<strong>30 días naturales (UTC)</strong>')
+    expect(markup).not.toContain('**')
+  })
+
   it('shows typing dots only while an empty assistant message is streaming', () => {
     const markup = renderToStaticMarkup(
       <MessageList

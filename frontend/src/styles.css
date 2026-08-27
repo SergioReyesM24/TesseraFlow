@@ -427,6 +427,56 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.markdown-message > :first-child {
+  margin-top: 0;
+}
+
+.markdown-message > :last-child {
+  margin-bottom: 0;
+}
+
+.message .markdown-message {
+  min-width: 0;
+}
+
+.message .markdown-message > * + * {
+  margin-top: 10px;
+}
+
+.message .markdown-message :where(ul, ol) {
+  margin-bottom: 0;
+  padding-left: 22px;
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.72;
+}
+
+.message .markdown-message :where(blockquote, pre) {
+  margin-right: 0;
+  margin-bottom: 0;
+  margin-left: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--color-brand);
+  border-radius: var(--radius-xs);
+  background: var(--color-surface-muted);
+}
+
+.message .markdown-message code {
+  font-family: var(--font-mono);
+}
+
+.message .markdown-message :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--color-surface-muted);
+}
+
+.message .markdown-message a {
+  color: var(--color-brand);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
 .message-error {
   display: block;
   margin-top: 8px;
@@ -1999,6 +2049,18 @@ button:disabled {
   font-size: 12px;
   line-height: 1.65;
   white-space: pre-wrap;
+}
+
+.history-message-content > * {
+  margin: 0;
+}
+
+.history-message-content > * + * {
+  margin-top: 8px;
+}
+
+.history-message-content :where(ul, ol) {
+  padding-left: 18px;
 }
 
 .history-tool-content {
@@ -4543,41 +4605,164 @@ body,
   gap: 10px;
 }
 
-.theme-switch {
-  display: inline-flex;
+.theme-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface-muted);
-}
-
-.theme-switch button {
-  display: inline-flex;
-  min-width: 34px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: 6px;
-  color: var(--color-text-tertiary);
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--color-nav-text-muted);
   background: transparent;
-  font-size: 11px;
-  font-weight: 760;
-  transition: background var(--transition-fast), color var(--transition-fast);
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
-.theme-switch button:hover {
-  color: var(--color-text);
+.theme-toggle:hover {
+  border-color: var(--color-nav-control-border-hover);
+  color: var(--color-nav-text);
+  background: var(--color-nav-hover);
 }
 
-.theme-switch button.active {
-  color: var(--color-text);
-  background: var(--color-surface);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+.theme-toggle-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 13px;
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.theme-toggle-track {
+  position: relative;
+  display: grid;
+  width: 44px;
+  height: 24px;
+  flex: 0 0 44px;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  justify-items: center;
+  border: 1px solid var(--color-nav-control-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-nav-control);
+}
+
+.theme-toggle-track svg {
+  position: relative;
+  z-index: 1;
+  color: var(--color-nav-text-muted);
+  transition: color var(--transition-fast);
+}
+
+.theme-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-brand);
+  transition: transform var(--transition-base);
+}
+
+.theme-toggle:not(.is-dark) .theme-toggle-sun,
+.theme-toggle.is-dark .theme-toggle-moon {
+  color: var(--color-brand-contrast);
+}
+
+.theme-toggle.is-dark .theme-toggle-knob {
+  transform: translateX(20px);
+}
+
+.sidebar-collapsed .theme-toggle {
+  width: 44px;
+  min-height: 44px;
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-collapsed .theme-toggle-label {
+  display: none;
+}
+
+.evaluator-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 13px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--color-nav-text-muted);
+  background: transparent;
+  text-align: left;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.evaluator-toggle:hover:not(:disabled),
+.evaluator-toggle.active {
+  border-color: var(--color-nav-control-border-hover);
+  color: var(--color-nav-text);
+  background: var(--color-nav-hover);
+}
+
+.evaluator-toggle:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.evaluator-toggle.has-error {
+  color: var(--color-danger);
+}
+
+.evaluator-toggle-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.evaluator-toggle-copy strong {
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.evaluator-toggle-copy small {
+  color: var(--color-nav-text-muted);
+  font-size: 10px;
+}
+
+.evaluator-toggle-state {
+  padding: 3px 6px;
+  border-radius: var(--radius-pill);
+  color: var(--color-text-tertiary);
+  background: var(--color-nav-control);
+  font-size: 9px;
+  font-weight: 850;
+}
+
+.evaluator-toggle.active .evaluator-toggle-state {
+  color: var(--color-brand-contrast);
+  background: var(--color-brand);
+}
+
+.sidebar-collapsed .evaluator-toggle {
+  width: 44px;
+  min-height: 44px;
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-collapsed .evaluator-toggle-copy,
+.sidebar-collapsed .evaluator-toggle-state {
+  display: none;
 }
 
 .visual-card,
@@ -5315,21 +5500,6 @@ body,
     gap: 7px;
   }
 
-  .theme-switch {
-    padding: 2px;
-  }
-
-  .theme-switch button {
-    width: 28px;
-    min-width: 28px;
-    height: 28px;
-    padding: 0;
-  }
-
-  .theme-switch button span {
-    display: none;
-  }
-
   .visual-card .visual-header {
     padding: 16px 16px 12px;
   }
@@ -5474,21 +5644,6 @@ body,
   .topbar-actions {
     flex: 0 0 auto;
     gap: 6px;
-  }
-
-  .theme-switch {
-    padding: 2px;
-  }
-
-  .theme-switch button {
-    width: 28px;
-    min-width: 28px;
-    height: 28px;
-    padding: 0;
-  }
-
-  .theme-switch button span {
-    display: none;
   }
 
   .status-pill {

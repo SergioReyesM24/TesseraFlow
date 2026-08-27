@@ -2,6 +2,10 @@ export type Mode = 'text' | 'voice' | 'history'
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error'
 
+export interface EvaluatorStatus {
+  enabled: boolean
+}
+
 export interface ToolActivity {
   callId: string
   name: string

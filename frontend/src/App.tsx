@@ -1,7 +1,8 @@
 import { SlidersHorizontal } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { BrandMark } from './components/BrandMark'
-import { SettingsDialog, type ThemeMode, Workspace } from './components/Workspace'
+import { SettingsDialog, Workspace } from './components/Workspace'
+import type { ThemeMode } from './components/ThemeToggle'
 import { createSession } from './lib/api'
 import type { Mode } from './types'
 
@@ -22,7 +23,8 @@ function defaultUserId(): string {
 /** Read a trusted theme preference while tolerating older localStorage values. */
 function defaultThemeMode(): ThemeMode {
   const stored = window.localStorage.getItem('tesseraflow.themeMode')
-  return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system'
+  if (stored === 'light' || stored === 'dark') return stored
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
 /** Read stable browser settings once for the lifetime of the application. */
@@ -92,10 +94,6 @@ export default function App() {
 
   useEffect(() => {
     window.localStorage.setItem('tesseraflow.themeMode', themeMode)
-    if (themeMode === 'system') {
-      delete document.documentElement.dataset.theme
-      return
-    }
     document.documentElement.dataset.theme = themeMode
   }, [themeMode])
 

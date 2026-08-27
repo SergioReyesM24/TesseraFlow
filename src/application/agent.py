@@ -419,7 +419,7 @@ class AgentService:
         attempt: int,
     ) -> ToolCallGateDecision | None:
         """Evaluate one normalized batch and include evaluator usage in turn metrics."""
-        if self._tool_call_gate is None:
+        if self._tool_call_gate is None or not self._tool_call_gate.enabled:
             return None
         decision = await self._tool_call_gate.inspect(
             context=context,

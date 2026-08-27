@@ -876,6 +876,12 @@ ejecución, modelo, consumo, latencia y fecha. La API las expone en `evaluations
 `GET /v1/sessions/{session_uid}/history`; `evaluations_truncated` indica si la proyección
 alcanzó el límite de auditoría.
 
+La barra lateral del frontend permite activar o desactivar conjuntamente los evaluadores
+interactivo y worker. El estado se consulta con `GET /v1/evaluators` y se actualiza con
+`PUT /v1/evaluators` enviando `{ "enabled": true | false }`. El cambio afecta a los nuevos
+tool calls del proceso actual y conserva el modo `shadow` o `enforce` configurado para cuando
+se reactive; al reiniciar el backend se recupera el estado definido por las variables de entorno.
+
 `config.py` los carga mediante una ruta relativa al código, independientemente del
 directorio desde el que se arranque el proceso. `AGENT_INSTRUCTIONS`,
 `REALTIME_AGENT_INSTRUCTIONS` y `WORKER_AGENT_INSTRUCTIONS` pueden sobrescribirlos desde

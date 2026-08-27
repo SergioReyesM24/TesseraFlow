@@ -706,7 +706,7 @@ class RealtimeAgentSession:
         attempt: int,
     ) -> ToolCallGateDecision | None:
         """Evaluate a realtime batch against durable history and current-turn evidence."""
-        if self._tool_call_gate is None:
+        if self._tool_call_gate is None or not self._tool_call_gate.enabled:
             return None
         conversation = await self._conversations.load(self._conversation_key)
         if conversation is None:

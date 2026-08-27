@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   httpUrl,
   listConversationSessions,
+  loadEvaluatorStatus,
   loadConversationGroup,
   loadConversationHistory,
   loadDailyTokenUsage,
   loadSessionTokenUsage,
   normalizeBaseUrl,
+  updateEvaluatorStatus,
 } from './api'
 
 describe('API URL composition', () => {
@@ -132,6 +134,29 @@ describe('API URL composition', () => {
       'http://api.test/v1/metrics/tokens/daily?user_id=user-1&days=90',
       { signal: undefined },
     )
+
+    vi.unstubAllGlobals()
+  })
+
+  it('loads and updates the global evaluator state', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: false }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(loadEvaluatorStatus('http://api.test/')).resolves.toEqual({ enabled: true })
+    await expect(updateEvaluatorStatus('http://api.test/', false)).resolves.toEqual({
+      enabled: false,
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(1, 'http://api.test/v1/evaluators', {
+      signal: undefined,
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, 'http://api.test/v1/evaluators', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    })
 
     vi.unstubAllGlobals()
   })

@@ -47,18 +47,29 @@ class ToolCallEvaluationGate:
         role: AgentRole,
         mode: EvaluationMode,
         fail_open: bool,
+        enabled: bool = True,
         technical_failure_mode: TechnicalFailureMode = "raise",
     ) -> None:
         self._evaluator = evaluator
         self._role = role
         self._mode = mode
         self._fail_open = fail_open
+        self._enabled = enabled
         self._technical_failure_mode = technical_failure_mode
 
     @property
     def role(self) -> AgentRole:
         """Expose the neutral agent role needed to correlate audit traces."""
         return self._role
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether new tool-call batches should pass through this gate."""
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Apply a process-wide runtime policy change to subsequent batches."""
+        self._enabled = enabled
 
     async def inspect(
         self,
@@ -156,6 +167,26 @@ class ToolCallEvaluationGate:
             separators=(",", ":"),
         )
         return tuple(ToolResult(call_id=call.call_id, error=error) for call in calls)
+
+
+class EvaluationControl:
+    """Enable or bypass every composed evaluator through one semantic operation."""
+
+    def __init__(self, gates: tuple[ToolCallEvaluationGate, ...]) -> None:
+        if not gates:
+            raise ValueError("Evaluation control requires at least one gate")
+        self._gates = gates
+
+    @property
+    def enabled(self) -> bool:
+        """Report whether every evaluator is currently active."""
+        return all(gate.enabled for gate in self._gates)
+
+    def set_enabled(self, enabled: bool) -> bool:
+        """Enable or bypass all evaluators and return the resulting state."""
+        for gate in self._gates:
+            gate.set_enabled(enabled)
+        return self.enabled
 
 
 def tool_call_evaluation_unavailable_results(

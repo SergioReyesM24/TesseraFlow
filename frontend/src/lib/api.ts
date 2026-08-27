@@ -3,6 +3,7 @@ import type {
   ConversationHistoryResponse,
   ConversationListResponse,
   DailyTokenUsageReport,
+  EvaluatorStatus,
   SessionResponse,
   SessionUsageReport,
 } from '../types'
@@ -131,6 +132,34 @@ export async function loadDailyTokenUsage(
   }
 
   return (await response.json()) as DailyTokenUsageReport
+}
+
+/** Read the process-wide interactive and worker evaluator state. */
+export async function loadEvaluatorStatus(
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<EvaluatorStatus> {
+  const response = await fetch(httpUrl('/v1/evaluators', baseUrl), { signal })
+  if (!response.ok) {
+    throw new Error(`No se pudo consultar el estado de los evaluadores (${response.status}).`)
+  }
+  return (await response.json()) as EvaluatorStatus
+}
+
+/** Enable or bypass both evaluator gates for subsequent tool calls. */
+export async function updateEvaluatorStatus(
+  baseUrl: string,
+  enabled: boolean,
+): Promise<EvaluatorStatus> {
+  const response = await fetch(httpUrl('/v1/evaluators', baseUrl), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+  if (!response.ok) {
+    throw new Error(`No se pudo actualizar el estado de los evaluadores (${response.status}).`)
+  }
+  return (await response.json()) as EvaluatorStatus
 }
 
 /** Load full root-plus-worker model usage and cost for one session group. */

@@ -6,7 +6,7 @@ from google import genai
 from openai import AsyncOpenAI
 
 from application.agent import AgentService
-from application.evaluations import ToolCallEvaluationGate
+from application.evaluations import EvaluationControl, ToolCallEvaluationGate
 from application.interactions import TurnInteractionAgent
 from application.ports import (
     ConversationRepository,
@@ -22,6 +22,7 @@ from application.tools import ToolRegistry
 from config import Settings
 from domain.agent import AgentDefinition
 from domain.costs import ModelCostCalculator, ModelRates, ModelRateTier
+from domain.evaluations import EvaluationMode
 from infrastructure.gemini_realtime_gateway import GeminiRealtimeGateway
 from infrastructure.openai_gateway import OpenAIResponsesGateway
 from infrastructure.openai_realtime_gateway import OpenAIRealtimeGateway
@@ -44,6 +45,7 @@ class ModelRuntime:
     text_agent_provider: str
     realtime_agent_provider: str
     worker_provider: str
+    evaluation_control: EvaluationControl
     _closers: tuple[AsyncCloser, ...]
 
     async def close(self) -> None:
@@ -195,40 +197,36 @@ def build_model_runtime(
         instructions=settings.worker_agent_instructions,
         tool_names=worker_tools.names,
     )
-    if (
-        settings.interactive_tool_evaluation_mode != "off"
-        or settings.worker_tool_evaluation_mode != "off"
-    ) and settings.evaluation_provider != "openai":
+    if settings.evaluation_provider != "openai":
         raise ValueError(f"Unsupported evaluation provider: {settings.evaluation_provider}")
-    interactive_tool_call_gate = None
-    if settings.interactive_tool_evaluation_mode != "off":
-        interactive_tool_call_gate = ToolCallEvaluationGate(
-            OpenAIToolCallEvaluator(
-                get_openai_client(),
-                model=settings.evaluation_model,
-                instructions=settings.interactive_tool_call_evaluator_instructions,
-                timeout_seconds=settings.interactive_tool_evaluation_timeout_seconds,
-                reasoning_effort=settings.evaluation_reasoning_effort,
-            ),
-            role="interactive",
-            mode=settings.interactive_tool_evaluation_mode,
-            fail_open=settings.interactive_tool_evaluation_fail_open,
-            technical_failure_mode="feedback",
-        )
-    worker_tool_call_gate = None
-    if settings.worker_tool_evaluation_mode != "off":
-        worker_tool_call_gate = ToolCallEvaluationGate(
-            OpenAIToolCallEvaluator(
-                get_openai_client(),
-                model=settings.evaluation_model,
-                instructions=settings.tool_call_evaluator_instructions,
-                timeout_seconds=settings.worker_tool_evaluation_timeout_seconds,
-                reasoning_effort=settings.evaluation_reasoning_effort,
-            ),
-            role="worker",
-            mode=settings.worker_tool_evaluation_mode,
-            fail_open=settings.worker_tool_evaluation_fail_open,
-        )
+    interactive_tool_call_gate = ToolCallEvaluationGate(
+        OpenAIToolCallEvaluator(
+            get_openai_client(),
+            model=settings.evaluation_model,
+            instructions=settings.interactive_tool_call_evaluator_instructions,
+            timeout_seconds=settings.interactive_tool_evaluation_timeout_seconds,
+            reasoning_effort=settings.evaluation_reasoning_effort,
+        ),
+        role="interactive",
+        mode=_active_evaluation_mode(settings.interactive_tool_evaluation_mode),
+        fail_open=settings.interactive_tool_evaluation_fail_open,
+        enabled=settings.interactive_tool_evaluation_mode != "off",
+        technical_failure_mode="feedback",
+    )
+    worker_tool_call_gate = ToolCallEvaluationGate(
+        OpenAIToolCallEvaluator(
+            get_openai_client(),
+            model=settings.evaluation_model,
+            instructions=settings.tool_call_evaluator_instructions,
+            timeout_seconds=settings.worker_tool_evaluation_timeout_seconds,
+            reasoning_effort=settings.evaluation_reasoning_effort,
+        ),
+        role="worker",
+        mode=_active_evaluation_mode(settings.worker_tool_evaluation_mode),
+        fail_open=settings.worker_tool_evaluation_fail_open,
+        enabled=settings.worker_tool_evaluation_mode != "off",
+    )
+    evaluation_control = EvaluationControl((interactive_tool_call_gate, worker_tool_call_gate))
     text_agent_service = AgentService(
         model_gateway=text_gateway,
         tools=interactive_tools,
@@ -279,8 +277,16 @@ def build_model_runtime(
         text_agent_provider=settings.text_agent_provider,
         realtime_agent_provider=settings.realtime_agent_provider,
         worker_provider=settings.worker_provider,
+        evaluation_control=evaluation_control,
         _closers=tuple(closers),
     )
+
+
+def _active_evaluation_mode(configured_mode: str) -> EvaluationMode:
+    """Choose the enforcement policy restored when a configured-off gate is enabled."""
+    if configured_mode == "shadow":
+        return "shadow"
+    return "enforce"
 
 
 def _validate_selection(settings: Settings) -> None:

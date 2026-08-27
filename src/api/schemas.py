@@ -53,6 +53,20 @@ class StreamAgentRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
 
 
+class UpdateEvaluatorsRequest(BaseModel):
+    """Requested process-wide evaluator state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class EvaluatorStatusResponse(BaseModel):
+    """Current process-wide evaluator state."""
+
+    enabled: bool
+
+
 class AgentWebSocketRequest(BaseModel):
     """One correlated user turn received through an established agent socket."""
 

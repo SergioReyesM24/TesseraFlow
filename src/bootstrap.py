@@ -11,6 +11,7 @@ from application.conversations import (
     ConversationService,
     RecentConversationCompactor,
 )
+from application.evaluations import EvaluationControl
 from application.interactions import ConversationCoordinator
 from application.ports import InteractionNotifier
 from application.realtime import RealtimeAgentService
@@ -46,6 +47,7 @@ class AppContainer:
     a2a_worker: A2AWorker
     interaction_notifier: InteractionNotifier
     conversation_coordinator: ConversationCoordinator
+    evaluation_control: EvaluationControl
 
     async def start(self) -> None:
         """Start process-local background consumers after lifespan composition."""
@@ -153,4 +155,5 @@ async def build_container(settings: Settings) -> AppContainer:
         a2a_worker=a2a_worker,
         interaction_notifier=interaction_notifier,
         conversation_coordinator=conversation_coordinator,
+        evaluation_control=model_runtime.evaluation_control,
     )
